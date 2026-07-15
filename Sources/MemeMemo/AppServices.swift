@@ -1,0 +1,198 @@
+import AppKit
+import Carbon.HIToolbox
+import Combine
+import MemeMemoCore
+import SwiftUI
+
+@MainActor
+final class AppServices: ObservableObject {
+    let memeStore = MemeStore()
+    let clipboardStore = ClipboardHistoryStore()
+    let screenshotSettingsStore = ScreenshotSettingsStore()
+    @Published private(set) var hotKeyWarnings: [String] = []
+
+    private var hotKeyController: GlobalHotKeyController?
+    private var clipboardPanelController: ClipboardHistoryPanelController?
+    private let screenshotService = ScreenshotService()
+    private let screenshotEditor = ScreenshotEditorPanelController()
+    private var cancellables = Set<AnyCancellable>()
+    private var didStart = false
+
+    init() {
+        NotificationCenter.default.addObserver(
+            forName: NSApplication.didFinishLaunchingNotification,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            Task { @MainActor in self?.start() }
+        }
+    }
+
+    func start() {
+        guard !didStart else { return }
+        didStart = true
+        clipboardStore.startMonitoring()
+
+        let panelController = ClipboardHistoryPanelController(store: clipboardStore)
+        let hotKey = GlobalHotKeyController()
+        updateHotKeyWarning(.clipboard, status: hotKey.registerClipboardHotKey(clipboardStore.settings.hotKey ?? .defaultClipboard) {
+            panelController.toggle()
+        })
+        updateHotKeyWarning(.screenshot, status: hotKey.registerScreenshotHotKey(screenshotSettingsStore.settings.hotKey ?? .defaultScreenshot) { [weak self] in
+            self?.captureScreenshot()
+        })
+        clipboardStore.$settings
+            .dropFirst()
+            .sink { [weak self, weak panelController, weak hotKey] settings in
+                guard let self, let panelController else { return }
+                let status = hotKey?.registerClipboardHotKey(settings.hotKey ?? .defaultClipboard) {
+                    panelController.toggle()
+                } ?? OSStatus(eventHotKeyInvalidErr)
+                Task { @MainActor in self.updateHotKeyWarning(.clipboard, status: status) }
+            }
+            .store(in: &cancellables)
+        screenshotSettingsStore.$settings
+            .dropFirst()
+            .sink { [weak self, weak hotKey] settings in
+                let status = hotKey?.registerScreenshotHotKey(settings.hotKey ?? .defaultScreenshot) { [weak self] in
+                    self?.captureScreenshot()
+                } ?? OSStatus(eventHotKeyInvalidErr)
+                Task { @MainActor in self?.updateHotKeyWarning(.screenshot, status: status) }
+            }
+            .store(in: &cancellables)
+        clipboardPanelController = panelController
+        hotKeyController = hotKey
+    }
+
+    func captureScreenshot(requestedMode: ScreenshotMode? = nil) {
+        let mode = ScreenshotPolicy.resolvedMode(settings: screenshotSettingsStore.settings, requestedMode: requestedMode)
+        screenshotService.capture(mode: mode) { [weak self] result in
+            guard let self else { return }
+            switch result {
+            case .success(let image):
+                self.handleCapturedScreenshot(image, mode: mode)
+            case .failure(let error):
+                self.memeStore.report(error)
+            }
+        }
+    }
+
+    private func handleCapturedScreenshot(_ image: NSImage, mode: ScreenshotMode) {
+        screenshotSettingsStore.markCapture(mode: mode)
+        guard screenshotSettingsStore.settings.opensEditorAfterCapture else {
+            saveScreenshot(image, mode: mode)
+            return
+        }
+        screenshotEditor.edit(image: image) { [weak self] editedImage in
+            guard let self, let editedImage else { return }
+            self.saveScreenshot(editedImage, mode: mode)
+        }
+    }
+
+    private func saveScreenshot(_ image: NSImage, mode: ScreenshotMode) {
+        _ = memeStore.addImage(image, note: mode.displayName)
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.writeObjects([image])
+    }
+
+    private func updateHotKeyWarning(_ kind: HotKeyKind, status: OSStatus) {
+        let prefix = kind == .clipboard ? "剪贴板快捷键" : "截图快捷键"
+        let message: String?
+        if status == noErr {
+            message = nil
+        } else if status == OSStatus(eventHotKeyExistsErr) {
+            message = "\(prefix) 已被占用，请换一个。"
+        } else if status == OSStatus(eventHotKeyInvalidErr) {
+            message = "\(prefix) 无效，请重新录制。"
+        } else {
+            message = "\(prefix) 注册失败，请换一个。"
+        }
+        hotKeyWarnings.removeAll { $0.hasPrefix(prefix) }
+        if let message { hotKeyWarnings.append(message) }
+    }
+}
+
+final class GlobalHotKeyController: @unchecked Sendable {
+    private var hotKeyRefs = [UInt32: EventHotKeyRef]()
+    private var eventHandler: EventHandlerRef?
+    private var actions = [UInt32: () -> Void]()
+    private static let signature: OSType = 0x4d4d4348
+
+    deinit {
+        for hotKeyRef in hotKeyRefs.values { UnregisterEventHotKey(hotKeyRef) }
+        if let eventHandler { RemoveEventHandler(eventHandler) }
+    }
+
+    func registerClipboardHotKey(_ hotKey: HotKeyDefinition, onTrigger: @escaping () -> Void) -> OSStatus {
+        register(id: 1, hotKey: hotKey, onTrigger: onTrigger)
+    }
+
+    func registerScreenshotHotKey(_ hotKey: HotKeyDefinition, onTrigger: @escaping () -> Void) -> OSStatus {
+        register(id: 2, hotKey: hotKey, onTrigger: onTrigger)
+    }
+
+    private func register(id: UInt32, hotKey: HotKeyDefinition, onTrigger: @escaping () -> Void) -> OSStatus {
+        installHandlerIfNeeded()
+        if let hotKeyRef = hotKeyRefs[id] {
+            UnregisterEventHotKey(hotKeyRef)
+            hotKeyRefs[id] = nil
+        }
+        guard hotKey.isUsable else {
+            actions[id] = nil
+            return OSStatus(eventHotKeyInvalidErr)
+        }
+        actions[id] = onTrigger
+        let hotKeyID = EventHotKeyID(signature: Self.signature, id: id)
+        var hotKeyRef: EventHotKeyRef?
+        let status = RegisterEventHotKey(hotKey.keyCode, hotKey.carbonModifiers, hotKeyID, GetApplicationEventTarget(), 0, &hotKeyRef)
+        guard status == noErr, let hotKeyRef else { return status }
+        hotKeyRefs[id] = hotKeyRef
+        return noErr
+    }
+
+    private func installHandlerIfNeeded() {
+        guard eventHandler == nil else { return }
+        var eventType = EventTypeSpec(eventClass: OSType(kEventClassKeyboard), eventKind: UInt32(kEventHotKeyPressed))
+        let selfPointer = Unmanaged.passUnretained(self).toOpaque()
+        InstallEventHandler(
+            GetApplicationEventTarget(),
+            { _, event, userData in
+                guard let event, let userData else { return noErr }
+                var hotKeyID = EventHotKeyID()
+                let status = GetEventParameter(
+                    event,
+                    EventParamName(kEventParamDirectObject),
+                    EventParamType(typeEventHotKeyID),
+                    nil,
+                    MemoryLayout<EventHotKeyID>.size,
+                    nil,
+                    &hotKeyID
+                )
+                guard status == noErr, hotKeyID.signature == GlobalHotKeyController.signature else { return noErr }
+                let controller = Unmanaged<GlobalHotKeyController>.fromOpaque(userData).takeUnretainedValue()
+                Task { @MainActor in controller.actions[hotKeyID.id]?() }
+                return noErr
+            },
+            1,
+            &eventType,
+            selfPointer,
+            &eventHandler
+        )
+    }
+}
+
+private enum HotKeyKind {
+    case clipboard
+    case screenshot
+}
+
+private extension HotKeyDefinition {
+    var carbonModifiers: UInt32 {
+        var modifiers: UInt32 = 0
+        if command { modifiers |= UInt32(cmdKey) }
+        if option { modifiers |= UInt32(optionKey) }
+        if control { modifiers |= UInt32(controlKey) }
+        if shift { modifiers |= UInt32(shiftKey) }
+        return modifiers
+    }
+}

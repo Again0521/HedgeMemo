@@ -11,11 +11,17 @@ final class MemeMemoAppDelegate: NSObject, NSApplicationDelegate {
 @main
 struct MemeMemoApp: App {
     @NSApplicationDelegateAdaptor(MemeMemoAppDelegate.self) private var appDelegate
-    @StateObject private var store = MemeStore()
+    @StateObject private var services = AppServices()
 
     var body: some Scene {
         MenuBarExtra {
-            MemePanelView(store: store)
+            MemePanelView(
+                store: services.memeStore,
+                clipboardStore: services.clipboardStore,
+                screenshotSettingsStore: services.screenshotSettingsStore,
+                hotKeyWarnings: services.hotKeyWarnings,
+                onScreenshot: services.captureScreenshot
+            )
         } label: {
             Image(nsImage: HedgehogIcon.statusImage)
         }
