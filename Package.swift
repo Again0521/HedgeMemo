@@ -11,7 +11,11 @@ let package = Package(
     ],
     targets: [
         .target(name: "MemeMemoCore"),
-        .executableTarget(name: "MemeMemo", dependencies: ["MemeMemoCore"]),
+        .executableTarget(
+            name: "MemeMemo",
+            dependencies: ["MemeMemoCore"],
+            resources: [.process("Resources")]
+        ),
         .executableTarget(name: "MemeMemoWhitebox", dependencies: ["MemeMemoCore"]),
     ]
 )

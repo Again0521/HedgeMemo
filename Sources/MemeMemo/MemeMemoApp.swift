@@ -14,8 +14,10 @@ struct MemeMemoApp: App {
     @StateObject private var store = MemeStore()
 
     var body: some Scene {
-        MenuBarExtra("MemeMemo", systemImage: "face.smiling") {
+        MenuBarExtra {
             MemePanelView(store: store)
+        } label: {
+            Image(nsImage: HedgehogIcon.statusImage)
         }
         .menuBarExtraStyle(.window)
     }

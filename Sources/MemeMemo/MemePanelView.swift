@@ -87,8 +87,8 @@ struct MemePanelView: View {
 
     private var header: some View {
         HStack(spacing: 8) {
-            Image(systemName: "face.smiling")
-                .foregroundStyle(.tint)
+            Image(nsImage: HedgehogIcon.statusImage)
+                .frame(width: 18, height: 18)
             TextField("搜索备注或文字", text: $query)
                 .textFieldStyle(.roundedBorder)
             Button(action: importImages) {
