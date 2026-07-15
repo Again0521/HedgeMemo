@@ -49,7 +49,7 @@ struct MemeTileView: View {
                 if isManaging {
                     Image(systemName: isSelected ? "checkmark.circle.fill" : "circle")
                         .symbolRenderingMode(.hierarchical)
-                        .foregroundStyle(isSelected ? .tint : .secondary)
+                        .foregroundStyle(isSelected ? Color.accentColor : Color.secondary)
                         .padding(5)
                 }
             }

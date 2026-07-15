@@ -14,7 +14,7 @@
 
 ## 开发与运行
 
-需要 macOS 14+ 和 Swift 6。执行：
+需要 macOS 14+ 和完整 Xcode（Command Line Tools 不含本项目所需的 SwiftUI 宏插件）。执行：
 
 ```bash
 ./script/build_and_run.sh

@@ -104,7 +104,7 @@ struct MemePanelView: View {
             .help("导入或导出")
             Button(action: toggleManaging) {
                 Image(systemName: isManaging ? "checkmark.circle.fill" : "checklist")
-                    .foregroundStyle(isManaging ? .tint : .primary)
+                    .foregroundStyle(isManaging ? Color.accentColor : Color.primary)
             }
             .help(isManaging ? "完成管理" : "批量管理")
             Button(action: { store.captureEnabled.toggle() }) {
