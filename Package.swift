@@ -7,10 +7,11 @@ let package = Package(
     products: [
         .library(name: "MemeMemoCore", targets: ["MemeMemoCore"]),
         .executable(name: "MemeMemo", targets: ["MemeMemo"]),
+        .executable(name: "MemeMemoWhitebox", targets: ["MemeMemoWhitebox"]),
     ],
     targets: [
         .target(name: "MemeMemoCore"),
         .executableTarget(name: "MemeMemo", dependencies: ["MemeMemoCore"]),
-        .testTarget(name: "MemeMemoCoreTests", dependencies: ["MemeMemoCore"]),
+        .executableTarget(name: "MemeMemoWhitebox", dependencies: ["MemeMemoCore"]),
     ]
 )

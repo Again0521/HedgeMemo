@@ -8,6 +8,7 @@ struct MemePanelView: View {
     @State private var query = ""
     @State private var isManaging = false
     @State private var selectedIDs = Set<UUID>()
+    @State private var draggedID: UUID?
     @State private var captureService: ClipboardCaptureService?
     @State private var editingMeme: MemeItem?
     @State private var categoryDraft = ""
@@ -45,6 +46,7 @@ struct MemePanelView: View {
                             onEditNote: { editingMeme = meme },
                             onMove: { store.move(ids: [meme.id], to: $0) },
                             onDelete: { store.delete(ids: [meme.id]) },
+                            draggedID: $draggedID,
                             onReorder: store.reorder
                         )
                     }

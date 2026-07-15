@@ -14,8 +14,8 @@ struct MemeTileView: View {
     let onEditNote: () -> Void
     let onMove: (UUID?) -> Void
     let onDelete: () -> Void
+    @Binding var draggedID: UUID?
     let onReorder: (UUID, UUID) -> Void
-    @State private var draggedID: UUID?
 
     var body: some View {
         Button(action: { if isManaging { onSelection(meme.id) } else { onCopy() } }) {
