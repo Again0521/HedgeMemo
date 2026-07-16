@@ -39,7 +39,10 @@ final class StatusItemController: NSObject {
         popover.behavior = .transient
         popover.animates = true
         // NSPopover already renders with native vibrancy chrome.
-        popover.contentViewController = NSHostingController(rootView: MemePanelView(store: services.memeStore))
+        popover.contentViewController = NSHostingController(rootView: MemePanelView(
+            store: services.memeStore,
+            onDismiss: { [weak self] in self?.popover.performClose(nil) }
+        ))
     }
 
     @objc private func handleClick() {

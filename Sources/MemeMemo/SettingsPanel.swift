@@ -95,12 +95,6 @@ struct SettingsPanelView: View {
             }
             Toggle("保存图片", isOn: savesImagesBinding)
             Toggle("复制后自动粘贴", isOn: autoPasteBinding)
-            Picker("条目大小", selection: itemSizeBinding) {
-                ForEach(ClipboardItemSize.allCases, id: \.self) { size in
-                    Text(size.displayName).tag(size)
-                }
-            }
-            .pickerStyle(.segmented)
             HotKeyRecorderRow(title: "剪贴板快捷键", hotKey: clipboardHotKeyBinding)
             if clipboardStore.settings.autoPaste {
                 PermissionStatusRow(
@@ -148,13 +142,6 @@ struct SettingsPanelView: View {
         Binding(
             get: { clipboardStore.settings.autoPaste },
             set: { clipboardStore.settings.autoPaste = $0 }
-        )
-    }
-
-    private var itemSizeBinding: Binding<ClipboardItemSize> {
-        Binding(
-            get: { clipboardStore.settings.itemSize },
-            set: { clipboardStore.settings.itemSize = $0 }
         )
     }
 

@@ -7,6 +7,7 @@ import SwiftUI
 final class ClipboardHistoryPanelController: NSObject {
     private let store: ClipboardHistoryStore
     private var panel: NSPanel?
+    private var hoverCard: NSPanel?
     private var resignKeyObserver: NSObjectProtocol?
 
     init(store: ClipboardHistoryStore) {
@@ -19,6 +20,7 @@ final class ClipboardHistoryPanelController: NSObject {
     }
 
     func hide() {
+        hideHoverCard()
         panel?.orderOut(nil)
     }
 
@@ -30,6 +32,9 @@ final class ClipboardHistoryPanelController: NSObject {
             onDone: { [weak self] in self?.hide() },
             onContentChange: { [weak self] count, category in
                 self?.resize(entryCount: count, category: category, animate: true)
+            },
+            onHoverEntry: { [weak self] entry in
+                self?.updateHoverCard(entry: entry)
             }
         )
         if let effectView = panel.contentView as? NSVisualEffectView {
@@ -62,16 +67,7 @@ final class ClipboardHistoryPanelController: NSObject {
         panel.isReleasedWhenClosed = false
         panel.level = .floating
         panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .transient]
-
-        let effectView = NSVisualEffectView()
-        effectView.material = .popover
-        effectView.blendingMode = .behindWindow
-        effectView.state = .active
-        effectView.wantsLayer = true
-        effectView.layer?.cornerRadius = 16
-        effectView.layer?.cornerCurve = .continuous
-        effectView.layer?.masksToBounds = true
-        panel.contentView = effectView
+        panel.contentView = Self.makeVibrancyView(cornerRadius: 16)
 
         resignKeyObserver = NotificationCenter.default.addObserver(
             forName: NSWindow.didResignKeyNotification,
@@ -81,6 +77,16 @@ final class ClipboardHistoryPanelController: NSObject {
             Task { @MainActor in self?.hide() }
         }
         return panel
+    }
+
+    static func makeVibrancyView(cornerRadius: CGFloat) -> NSVisualEffectView {
+        let effectView = NSVisualEffectView()
+        effectView.material = .popover
+        effectView.blendingMode = .behindWindow
+        effectView.state = .active
+        // maskImage (not a layer mask) so the window server rounds the blur itself.
+        effectView.maskImage = .cornerMask(radius: cornerRadius)
+        return effectView
     }
 
     /// The screen the panel lives on, falling back to wherever the mouse is.
@@ -117,6 +123,67 @@ final class ClipboardHistoryPanelController: NSObject {
         )
         panel.setFrameOrigin(origin)
     }
+
+    // MARK: - Hover detail card
+
+    private func updateHoverCard(entry: ClipboardEntry?) {
+        guard let entry, let panel, panel.isVisible else {
+            hideHoverCard()
+            return
+        }
+        let card = hoverCard ?? makeHoverCard()
+        hoverCard = card
+
+        let content = ClipboardHoverDetailCard(entry: entry, imageURL: store.imageURL(for: entry))
+        let hosting = NSHostingView(rootView: content)
+        let size = hosting.fittingSize
+        if let effectView = card.contentView as? NSVisualEffectView {
+            effectView.subviews.forEach { $0.removeFromSuperview() }
+            hosting.frame = NSRect(origin: .zero, size: size)
+            hosting.autoresizingMask = [.width, .height]
+            effectView.addSubview(hosting)
+        }
+
+        let visibleFrame = activeScreen?.visibleFrame ?? panel.frame
+        let mouse = NSEvent.mouseLocation
+        var x = panel.frame.minX - size.width - 10
+        if x < visibleFrame.minX + 8 {
+            x = panel.frame.maxX + 10
+        }
+        let y = min(
+            max(mouse.y - size.height / 2, visibleFrame.minY + 8),
+            visibleFrame.maxY - size.height - 8
+        )
+        card.setFrame(NSRect(x: x, y: y, width: size.width, height: size.height), display: true)
+        if card.parent == nil {
+            panel.addChildWindow(card, ordered: .above)
+        }
+        card.orderFront(nil)
+    }
+
+    private func makeHoverCard() -> NSPanel {
+        let card = NSPanel(
+            contentRect: NSRect(x: 0, y: 0, width: 240, height: 160),
+            styleMask: [.borderless, .nonactivatingPanel],
+            backing: .buffered,
+            defer: false
+        )
+        card.isOpaque = false
+        card.backgroundColor = .clear
+        card.hasShadow = true
+        card.ignoresMouseEvents = true
+        card.isReleasedWhenClosed = false
+        card.level = .floating
+        card.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .transient]
+        card.contentView = Self.makeVibrancyView(cornerRadius: 12)
+        return card
+    }
+
+    private func hideHoverCard() {
+        guard let hoverCard else { return }
+        hoverCard.parent?.removeChildWindow(hoverCard)
+        hoverCard.orderOut(nil)
+    }
 }
 
 /// Borderless panels refuse key status by default; the search field needs it.
@@ -124,10 +191,62 @@ private final class KeyableClipboardPanel: NSPanel {
     override var canBecomeKey: Bool { true }
 }
 
+// MARK: - Hover detail card content
+
+private struct ClipboardHoverDetailCard: View {
+    let entry: ClipboardEntry
+    let imageURL: URL?
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            if entry.kind == .image, let imageURL, let image = NSImage(contentsOf: imageURL) {
+                Image(nsImage: image)
+                    .resizable()
+                    .scaledToFit()
+                    .frame(maxHeight: 90)
+                    .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
+            } else {
+                Text(entry.previewText)
+                    .font(.system(size: 12, weight: .semibold))
+                    .lineLimit(2)
+            }
+            Divider()
+            VStack(alignment: .leading, spacing: 3) {
+                detailRow("类型", entry.contentCategory.displayName)
+                detailRow("收录时间", entry.createdAt.formatted(date: .abbreviated, time: .shortened))
+                detailRow("上次使用", entry.lastUsedAt?.formatted(date: .abbreviated, time: .shortened) ?? "还未使用")
+            }
+            Divider()
+            VStack(alignment: .leading, spacing: 2) {
+                Text("按 ⏎ 复制。按 ⌫ 删除。")
+                Text(entry.isPinned ? "按 ⌘P 取消置顶。" : "按 ⌘P 置顶。")
+            }
+            .font(.system(size: 10))
+            .foregroundStyle(.secondary)
+        }
+        .padding(12)
+        .frame(width: 232, alignment: .leading)
+    }
+
+    private func detailRow(_ label: String, _ value: String) -> some View {
+        HStack(alignment: .firstTextBaseline, spacing: 6) {
+            Text(label)
+                .foregroundStyle(.secondary)
+            Spacer(minLength: 4)
+            Text(value)
+                .multilineTextAlignment(.trailing)
+        }
+        .font(.system(size: 11))
+    }
+}
+
+// MARK: - Panel content
+
 struct ClipboardHistoryPanelView: View {
     @ObservedObject var store: ClipboardHistoryStore
     let onDone: () -> Void
     let onContentChange: (Int, ClipboardContentCategory) -> Void
+    let onHoverEntry: (ClipboardEntry?) -> Void
 
     @State private var query = ""
     @State private var selectedID: UUID?
@@ -138,7 +257,7 @@ struct ClipboardHistoryPanelView: View {
 
     var body: some View {
         VStack(spacing: ClipboardPanelLayout.sectionSpacing) {
-            header
+            PanelSearchField(placeholder: "搜索剪贴板", text: $query)
                 .frame(height: ClipboardPanelLayout.headerHeight)
             categoryBar
                 .frame(height: ClipboardPanelLayout.segmentedHeight)
@@ -152,10 +271,7 @@ struct ClipboardHistoryPanelView: View {
             }
             .overlay {
                 if entries.isEmpty {
-                    ContentUnavailableView(
-                        emptyTitle,
-                        systemImage: category.systemImage
-                    )
+                    ContentUnavailableView(emptyTitle, systemImage: category.systemImage)
                 }
             }
         }
@@ -169,6 +285,10 @@ struct ClipboardHistoryPanelView: View {
         .onChange(of: query) { _, _ in selectionAndSizeChanged() }
         .onChange(of: category) { _, _ in selectionAndSizeChanged() }
         .onChange(of: store.entries) { _, _ in selectionAndSizeChanged() }
+        .onChange(of: hoveredID) { _, id in
+            onHoverEntry(entries.first(where: { $0.id == id }))
+        }
+        .onDisappear { onHoverEntry(nil) }
     }
 
     private var emptyTitle: String {
@@ -184,35 +304,18 @@ struct ClipboardHistoryPanelView: View {
         onContentChange(entries.count, category)
     }
 
-    private var header: some View {
-        HStack(spacing: 8) {
-            Image(systemName: "doc.on.clipboard")
-                .foregroundStyle(.secondary)
-            TextField("搜索剪贴板", text: $query)
-                .textFieldStyle(.roundedBorder)
-            Button(action: onDone) {
-                Image(systemName: "xmark")
-            }
-            .buttonStyle(.borderless)
-            .help("关闭")
-        }
-    }
-
     private var categoryBar: some View {
-        Picker("类型", selection: categoryBinding) {
+        HStack(spacing: 6) {
             ForEach(ClipboardContentCategory.allCases, id: \.self) { item in
-                Label(item.displayName, systemImage: item.systemImage).tag(item)
+                CategoryChip(
+                    title: item.displayName,
+                    isSelected: category == item
+                ) {
+                    store.settings.activeCategory = item
+                }
             }
+            Spacer()
         }
-        .pickerStyle(.segmented)
-        .labelsHidden()
-    }
-
-    private var categoryBinding: Binding<ClipboardContentCategory> {
-        Binding(
-            get: { store.settings.activeCategory },
-            set: { store.settings.activeCategory = $0 }
-        )
     }
 
     @ViewBuilder
@@ -236,7 +339,7 @@ struct ClipboardHistoryPanelView: View {
                     )
                     .id(entry.id)
                     .onTapGesture { copy(entry) }
-                    .onHover { hoveredID = $0 ? entry.id : nil }
+                    .onHover { hoveredID = $0 ? entry.id : (hoveredID == entry.id ? nil : hoveredID) }
                     .contextMenu { entryMenu(entry) }
                 }
             }
@@ -245,23 +348,15 @@ struct ClipboardHistoryPanelView: View {
                 ForEach(entries) { entry in
                     Group {
                         if category == .code {
-                            CodeEntryRow(
-                                entry: entry,
-                                isSelected: selectedID == entry.id,
-                                isHovered: hoveredID == entry.id
-                            )
+                            CodeEntryRow(entry: entry, isSelected: selectedID == entry.id, isHovered: hoveredID == entry.id)
                         } else {
-                            TextEntryRow(
-                                entry: entry,
-                                isSelected: selectedID == entry.id,
-                                isHovered: hoveredID == entry.id
-                            )
+                            TextEntryRow(entry: entry, isSelected: selectedID == entry.id, isHovered: hoveredID == entry.id)
                         }
                     }
                     .id(entry.id)
                     .contentShape(Rectangle())
                     .onTapGesture { copy(entry) }
-                    .onHover { hoveredID = $0 ? entry.id : nil }
+                    .onHover { hoveredID = $0 ? entry.id : (hoveredID == entry.id ? nil : hoveredID) }
                     .contextMenu { entryMenu(entry) }
                 }
             }
@@ -342,73 +437,7 @@ struct ClipboardHistoryPanelView: View {
     }
 }
 
-// MARK: - Shared row pieces
-
-@MainActor
-private enum ClipboardTimeFormat {
-    static let formatter: RelativeDateTimeFormatter = {
-        let formatter = RelativeDateTimeFormatter()
-        formatter.unitsStyle = .short
-        return formatter
-    }()
-
-    static func relative(_ date: Date) -> String {
-        formatter.localizedString(for: date, relativeTo: .now)
-    }
-}
-
-private struct HoverDetailStrip: View {
-    let entry: ClipboardEntry
-    var compact = false
-
-    var body: some View {
-        HStack(spacing: 6) {
-            Text(detailText)
-                .lineLimit(1)
-            Spacer(minLength: 4)
-            if !compact {
-                Text("⌫ 删除 · ⌘P 置顶")
-                    .lineLimit(1)
-            }
-        }
-        .font(.system(size: 10))
-        .foregroundStyle(.secondary)
-    }
-
-    private var detailText: String {
-        var parts = ["收录 \(ClipboardTimeFormat.relative(entry.createdAt))"]
-        if let used = entry.lastUsedAt {
-            parts.append("使用 \(ClipboardTimeFormat.relative(used))")
-        }
-        return parts.joined(separator: " · ")
-    }
-}
-
-private struct RowBackground: View {
-    let isSelected: Bool
-    let isHovered: Bool
-
-    var body: some View {
-        RoundedRectangle(cornerRadius: 8, style: .continuous)
-            .fill(
-                isSelected
-                    ? AnyShapeStyle(Color.accentColor.opacity(0.16))
-                    : isHovered
-                        ? AnyShapeStyle(Color.primary.opacity(0.06))
-                        : AnyShapeStyle(Color.clear)
-            )
-    }
-}
-
-private struct PinBadge: View {
-    var body: some View {
-        Image(systemName: "pin.fill")
-            .font(.system(size: 8))
-            .foregroundStyle(.secondary)
-    }
-}
-
-// MARK: - Text rows
+// MARK: - Rows
 
 private struct TextEntryRow: View {
     let entry: ClipboardEntry
@@ -416,27 +445,31 @@ private struct TextEntryRow: View {
     let isHovered: Bool
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 3) {
-            HStack(spacing: 5) {
-                Text(entry.previewText)
-                    .font(.system(size: 13))
-                    .lineLimit(isHovered ? 1 : 2)
-                if entry.isPinned { PinBadge() }
-                Spacer(minLength: 0)
+        HStack(spacing: 6) {
+            Text(entry.previewText.replacingOccurrences(of: "\n", with: " "))
+                .font(.system(size: 13))
+                .lineLimit(1)
+                .foregroundStyle(isSelected ? Color.white : Color.primary)
+            if entry.isPinned {
+                Image(systemName: "pin.fill")
+                    .font(.system(size: 8))
+                    .foregroundStyle(isSelected ? Color.white.opacity(0.8) : Color.secondary)
             }
-            if isHovered {
-                HoverDetailStrip(entry: entry)
-            }
+            Spacer(minLength: 0)
         }
         .padding(.horizontal, 10)
-        .padding(.vertical, 6)
-        .frame(height: ClipboardPanelLayout.textRowHeight, alignment: isHovered ? .top : .center)
+        .frame(height: ClipboardPanelLayout.textRowHeight)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .background(RowBackground(isSelected: isSelected, isHovered: isHovered))
+        .background(
+            RoundedRectangle(cornerRadius: 7, style: .continuous)
+                .fill(
+                    isSelected
+                        ? AnyShapeStyle(Color.accentColor)
+                        : isHovered ? AnyShapeStyle(.quaternary) : AnyShapeStyle(.clear)
+                )
+        )
     }
 }
-
-// MARK: - Code rows
 
 private struct CodeEntryRow: View {
     let entry: ClipboardEntry
@@ -444,24 +477,31 @@ private struct CodeEntryRow: View {
     let isHovered: Bool
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 3) {
-            HStack(alignment: .top, spacing: 5) {
-                Text(CodeHighlighter.highlight(previewCode))
-                    .font(.system(size: 11, design: .monospaced))
-                    .lineLimit(3, reservesSpace: true)
-                    .lineSpacing(1)
-                if entry.isPinned { PinBadge() }
-                Spacer(minLength: 0)
+        HStack(alignment: .top, spacing: 6) {
+            Text(CodeHighlighter.highlight(previewCode))
+                .font(.system(size: 11, design: .monospaced))
+                .lineLimit(3, reservesSpace: true)
+                .lineSpacing(1)
+                .foregroundStyle(isSelected ? Color.white : Color.primary)
+            if entry.isPinned {
+                Image(systemName: "pin.fill")
+                    .font(.system(size: 8))
+                    .foregroundStyle(isSelected ? Color.white.opacity(0.8) : Color.secondary)
             }
-            if isHovered {
-                HoverDetailStrip(entry: entry)
-            }
+            Spacer(minLength: 0)
         }
         .padding(.horizontal, 10)
-        .padding(.vertical, 6)
+        .padding(.vertical, 5)
         .frame(height: ClipboardPanelLayout.codeRowHeight, alignment: .top)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .background(RowBackground(isSelected: isSelected, isHovered: isHovered))
+        .background(
+            RoundedRectangle(cornerRadius: 7, style: .continuous)
+                .fill(
+                    isSelected
+                        ? AnyShapeStyle(Color.accentColor)
+                        : isHovered ? AnyShapeStyle(.quaternary) : AnyShapeStyle(.quinary)
+                )
+        )
     }
 
     private var previewCode: String {
@@ -471,8 +511,6 @@ private struct CodeEntryRow: View {
         return lines.prefix(3).joined(separator: "\n")
     }
 }
-
-// MARK: - Image cells
 
 private struct ImageEntryCell: View {
     let entry: ClipboardEntry
@@ -485,7 +523,7 @@ private struct ImageEntryCell: View {
     var body: some View {
         ZStack {
             RoundedRectangle(cornerRadius: 8, style: .continuous)
-                .fill(.quaternary.opacity(0.5))
+                .fill(.quinary)
             if let imageURL, let image = NSImage(contentsOf: imageURL) {
                 Image(nsImage: image)
                     .resizable()
@@ -498,23 +536,6 @@ private struct ImageEntryCell: View {
             }
         }
         .frame(width: side, height: side)
-        .overlay(alignment: .bottom) {
-            if isHovered {
-                VStack(alignment: .leading, spacing: 1) {
-                    Text("收录 \(ClipboardTimeFormat.relative(entry.createdAt))")
-                    if let used = entry.lastUsedAt {
-                        Text("使用 \(ClipboardTimeFormat.relative(used))")
-                    }
-                    Text("⌫ 删除 · ⌘P 置顶")
-                }
-                .font(.system(size: 8.5))
-                .foregroundStyle(.white)
-                .padding(.horizontal, 5)
-                .padding(.vertical, 3)
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .background(.black.opacity(0.55))
-            }
-        }
         .overlay(alignment: .topTrailing) {
             if entry.isPinned {
                 Image(systemName: "pin.fill")
@@ -528,7 +549,10 @@ private struct ImageEntryCell: View {
         .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
         .overlay {
             RoundedRectangle(cornerRadius: 8, style: .continuous)
-                .stroke(isSelected ? Color.accentColor : Color.clear, lineWidth: 2)
+                .stroke(
+                    isSelected ? Color.accentColor : isHovered ? Color.secondary.opacity(0.4) : Color.clear,
+                    lineWidth: 2
+                )
         }
     }
 }

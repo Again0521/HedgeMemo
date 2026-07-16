@@ -1,34 +1,37 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024" width="1024" height="1024">
   <!-- Cream rounded-square plate -->
-  <rect x="100" y="100" width="824" height="824" rx="186" fill="#F2EFE9"/>
-  <!-- Ink hedgehog, face left as negative space -->
-  <path fill="#232326" fill-rule="evenodd" d="
-    M 265 700
-    C 238 662 244 596 286 545
-    L 256 428 L 342 505
-    L 330 338 L 416 470
-    L 436 268 L 506 452
-    L 546 254 L 592 452
-    L 642 300 L 668 470
-    L 736 378 L 742 472
-    C 782 516 812 590 818 652
-    L 802 692
-    C 700 706 480 706 265 700
+  <rect x="100" y="100" width="824" height="824" rx="190" fill="#F2EFE9"/>
+  <!-- Ink hedgehog: spikes lean toward the tail, face is a hollow wedge -->
+  <path fill="#26262A" fill-rule="evenodd" d="
+    M 808 730
+    L 310 742
+    C 276 740 252 726 244 704
+    L 178 690
+    L 248 646
+    C 242 594 266 542 314 514
+    L 276 402 L 392 478
+    L 356 316 L 458 448
+    L 444 262 L 530 430
+    L 532 246 L 596 426
+    L 618 268 L 652 436
+    C 660 430 668 426 676 426
+    L 712 330
+    L 754 468
+    C 776 492 790 520 796 556
     Z
-    M 648 478
-    C 700 462 752 492 776 528
-    C 796 560 806 610 808 646
-    L 792 676
-    C 744 682 690 680 656 668
-    C 644 620 640 540 648 478
+    M 658 534
+    C 702 512 748 552 770 610
+    C 778 638 786 668 790 692
+    L 654 706
+    C 648 644 650 580 658 534
     Z
   "/>
   <!-- Eye inside the hollow face -->
-  <circle cx="706" cy="562" r="23" fill="#232326"/>
-  <!-- Nose dot floating right of the snout -->
-  <circle cx="856" cy="664" r="27" fill="#232326"/>
-  <!-- Coral paperclip standing in as one spike -->
-  <g transform="rotate(-9 597 370)" fill="none" stroke="#E8705A" stroke-width="22" stroke-linecap="round">
-    <path d="M 576 462 L 576 322 A 23 23 0 0 1 622 322 L 622 442 A 15 15 0 0 1 592 442 L 592 342"/>
+  <circle cx="706" cy="600" r="20" fill="#26262A"/>
+  <!-- Nose dot floating beyond the snout tip -->
+  <circle cx="852" cy="712" r="25" fill="#26262A"/>
+  <!-- Coral paperclip standing among the spikes -->
+  <g transform="rotate(-3 586 415)" fill="none" stroke="#E1795F" stroke-width="19" stroke-linecap="round">
+    <path d="M 563 505 L 563 330 A 24 24 0 0 1 611 330 L 611 486 A 16 16 0 0 1 579 486 L 579 348"/>
   </g>
 </svg>

@@ -4,6 +4,7 @@ import SwiftUI
 
 struct MemePanelView: View {
     @ObservedObject var store: MemeStore
+    var onDismiss: () -> Void = {}
     @State private var query = ""
     @State private var isManaging = false
     @State private var selectedIDs = Set<UUID>()
@@ -48,7 +49,10 @@ struct MemePanelView: View {
                             isSelected: selectedIDs.contains(meme.id),
                             categories: store.categories,
                             onSelection: toggleSelection,
-                            onCopy: { store.copyToPasteboard(meme) },
+                            onCopy: {
+                                store.copyToPasteboard(meme)
+                                onDismiss()
+                            },
                             onEditNote: { editingMeme = meme },
                             onMove: { store.move(ids: [meme.id], to: $0) },
                             onDelete: { store.delete(ids: [meme.id]) },
@@ -95,22 +99,19 @@ struct MemePanelView: View {
 
     private var header: some View {
         HStack(spacing: 8) {
-            Image(nsImage: HedgehogIcon.statusImage)
-                .frame(width: 18, height: 18)
-            TextField("搜索备注或文字", text: $query)
-                .textFieldStyle(.roundedBorder)
-            Button(action: toggleManaging) {
-                Image(systemName: isManaging ? "checkmark.circle.fill" : "checklist")
-                    .foregroundStyle(isManaging ? Color.accentColor : Color.primary)
-            }
-            .buttonStyle(.borderless)
-            .help(isManaging ? "完成管理" : "批量管理")
-            Button(action: { store.captureEnabled.toggle() }) {
-                Image(systemName: store.captureEnabled ? "record.circle.fill" : "record.circle")
-                    .foregroundStyle(store.captureEnabled ? .red : .primary)
-            }
-            .buttonStyle(.borderless)
-            .help(store.captureEnabled ? "结束捕获" : "开始捕获剪贴板图片")
+            PanelSearchField(placeholder: "搜索备注或文字", text: $query)
+            HoverIconButton(
+                systemImage: isManaging ? "checkmark.circle.fill" : "checklist",
+                tint: isManaging ? .accentColor : .primary,
+                help: isManaging ? "完成管理" : "批量管理",
+                action: toggleManaging
+            )
+            HoverIconButton(
+                systemImage: store.captureEnabled ? "record.circle.fill" : "record.circle",
+                tint: store.captureEnabled ? .red : .primary,
+                help: store.captureEnabled ? "结束捕获" : "开始捕获剪贴板图片",
+                action: { store.captureEnabled.toggle() }
+            )
         }
     }
 
@@ -192,27 +193,22 @@ private struct CategoryBarView: View {
     var body: some View {
         ScrollView(.horizontal, showsIndicators: false) {
             HStack(spacing: 6) {
-                categoryButton("全部", id: nil)
-                ForEach(categories) { category in
-                    categoryButton(category.name, id: category.id)
-                        .contextMenu {
-                            Button("重命名") { onRename(category) }
-                            Divider()
-                            Button("删除分类", role: .destructive) { onDelete(category.id) }
-                        }
+                CategoryChip(title: "全部", isSelected: selectedCategoryID == nil) {
+                    selectedCategoryID = nil
                 }
-                Button(action: onAdd) { Image(systemName: "plus") }
-                    .buttonStyle(.borderless)
-                    .help("新建分类")
+                ForEach(categories) { category in
+                    CategoryChip(title: category.name, isSelected: selectedCategoryID == category.id) {
+                        selectedCategoryID = category.id
+                    }
+                    .contextMenu {
+                        Button("重命名") { onRename(category) }
+                        Divider()
+                        Button("删除分类", role: .destructive) { onDelete(category.id) }
+                    }
+                }
+                HoverIconButton(systemImage: "plus", help: "新建分类", action: onAdd)
             }
         }
-    }
-
-    @ViewBuilder
-    private func categoryButton(_ title: String, id: UUID?) -> some View {
-        Button(title) { selectedCategoryID = id }
-            .buttonStyle(.bordered)
-            .tint(selectedCategoryID == id ? .accentColor : nil)
     }
 }
 

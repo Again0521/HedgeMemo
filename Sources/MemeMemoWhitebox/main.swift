@@ -91,11 +91,68 @@ let imageEntry = ClipboardEntry(kind: .image, text: nil, imageFileName: "x.png",
 expect(codeEntry.contentCategory == .code, "code entry must classify as code")
 expect(proseEntry.contentCategory == .text, "prose entry must classify as text")
 expect(imageEntry.contentCategory == .image, "image entry must classify as image")
+expect(codeEntry.lastUsedAt == nil, "new entries must not carry a last-used time")
 
 let mixed = [codeEntry, proseEntry, imageEntry]
 expect(ClipboardHistoryPolicy.ordered(mixed, category: .code).map(\.id) == [codeEntry.id], "category filter must isolate code")
 expect(ClipboardHistoryPolicy.ordered(mixed, category: .text).map(\.id) == [proseEntry.id], "category filter must isolate text")
 expect(ClipboardHistoryPolicy.ordered(mixed, category: .image).map(\.id) == [imageEntry.id], "category filter must isolate images")
-expect(Set(ClipboardHistoryPolicy.ordered(mixed, category: .all).map(\.id)) == Set(mixed.map(\.id)), "the all category must keep every entry")
+expect(Set(ClipboardHistoryPolicy.ordered(mixed, category: nil).map(\.id)) == Set(mixed.map(\.id)), "no category filter must keep every entry")
 
-print("MemeMemo whitebox checks passed (33 assertions).")
+expect(HotKeyDefinition.defaultClipboard.displayName == "Command + Shift + V", "clipboard default hotkey must be Command + Shift + V")
+var migratedSettings = ClipboardHistorySettings(hotKey: .legacyClipboard, lastCategory: nil)
+migratedSettings.normalize()
+expect(migratedSettings.hotKey == .defaultClipboard, "legacy Option + Space hotkey must migrate to the new default")
+expect(migratedSettings.activeCategory == .text, "missing last category must default to text")
+var rememberedSettings = ClipboardHistorySettings()
+rememberedSettings.activeCategory = .code
+expect(rememberedSettings.lastCategory == .code, "active category must persist into settings")
+
+expect(ClipboardPanelLayout.contentHeight(entryCount: 0, category: .text) == ClipboardPanelLayout.emptyStateHeight, "empty categories must keep the empty-state height")
+expect(
+    ClipboardPanelLayout.contentHeight(entryCount: 3, category: .text)
+        == ClipboardPanelLayout.textRowHeight * 3 + ClipboardPanelLayout.listSpacing * 2,
+    "text content height must follow row count"
+)
+expect(
+    ClipboardPanelLayout.contentHeight(entryCount: 4, category: .image)
+        == ClipboardPanelLayout.imageCellSide * 2 + ClipboardPanelLayout.imageCellSpacing,
+    "four images must lay out as two grid rows"
+)
+expect(
+    ClipboardPanelLayout.contentHeight(entryCount: 2, category: .code)
+        > ClipboardPanelLayout.contentHeight(entryCount: 2, category: .text),
+    "code rows must be taller than text rows"
+)
+expect(
+    ClipboardPanelLayout.panelHeight(entryCount: 1_000, category: .text, availableHeight: 600) == 600,
+    "panel height must clamp to the available screen height"
+)
+expect(
+    ClipboardPanelLayout.panelHeight(entryCount: 0, category: .image, availableHeight: 600)
+        == ClipboardPanelLayout.chromeHeight + ClipboardPanelLayout.emptyStateHeight,
+    "panel height must keep a sensible minimum"
+)
+
+// Regression: mutating settings used to recurse through didSet until the stack
+// overflowed (max-entries stepper crash, post-screenshot crash).
+await MainActor.run {
+    let tempRoot = FileManager.default.temporaryDirectory
+        .appendingPathComponent("memememo-whitebox-\(UUID().uuidString)", isDirectory: true)
+    defer { try? FileManager.default.removeItem(at: tempRoot) }
+    let clipboardStore = ClipboardHistoryStore(repository: ClipboardHistoryRepository(rootURL: tempRoot))
+    clipboardStore.settings.maxEntries = 200
+    expect(clipboardStore.settings.maxEntries == 200, "changing max entries must not crash and must persist")
+    clipboardStore.settings.activeCategory = .image
+    expect(clipboardStore.settings.activeCategory == .image, "changing the active category must not crash")
+
+    let suiteName = "memememo-whitebox-screenshot"
+    let defaults = UserDefaults(suiteName: suiteName)!
+    defaults.removePersistentDomain(forName: suiteName)
+    let screenshotStore = ScreenshotSettingsStore(defaults: defaults)
+    screenshotStore.markCapture(mode: .manualSelection)
+    expect(screenshotStore.settings.mode == .manualSelection, "marking a capture must not crash and must remember the mode")
+    defaults.removePersistentDomain(forName: suiteName)
+}
+
+print("MemeMemo whitebox checks passed (46 assertions).")

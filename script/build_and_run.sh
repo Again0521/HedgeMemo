@@ -15,6 +15,11 @@ APP_RESOURCES="$APP_CONTENTS/Resources"
 APP_BINARY="$APP_MACOS/$APP_NAME"
 INFO_PLIST="$APP_CONTENTS/Info.plist"
 
+# Launching from inside ~/Documents triggers a Documents-access TCC prompt on
+# every start, so the runnable copy lives in ~/Applications instead.
+INSTALL_DIR="$HOME/Applications"
+INSTALLED_APP="$INSTALL_DIR/$APP_NAME.app"
+
 if [[ -d /Applications/Xcode.app/Contents/Developer ]]; then
   export DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer
 fi
@@ -35,6 +40,10 @@ if [[ -d "$RESOURCE_BUNDLE" ]]; then
   cp -R "$RESOURCE_BUNDLE" "$APP_RESOURCES/"
 fi
 
+if [[ -f "$ROOT_DIR/Assets/AppIcon.icns" ]]; then
+  cp "$ROOT_DIR/Assets/AppIcon.icns" "$APP_RESOURCES/AppIcon.icns"
+fi
+
 cat >"$INFO_PLIST" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -43,14 +52,23 @@ cat >"$INFO_PLIST" <<PLIST
 <key>CFBundleIdentifier</key><string>$BUNDLE_ID</string>
 <key>CFBundleName</key><string>$APP_NAME</string>
 <key>CFBundlePackageType</key><string>APPL</string>
+<key>CFBundleIconFile</key><string>AppIcon</string>
+<key>CFBundleShortVersionString</key><string>0.0.1</string>
 <key>LSMinimumSystemVersion</key><string>$MIN_SYSTEM_VERSION</string>
 <key>LSUIElement</key><true/>
 <key>NSPrincipalClass</key><string>NSApplication</string>
 </dict></plist>
 PLIST
 
+# Ad-hoc signature with a stable identifier keeps the bundle valid for TCC.
+codesign --force --sign - --identifier "$BUNDLE_ID" "$APP_BUNDLE" >/dev/null 2>&1 || true
+
+mkdir -p "$INSTALL_DIR"
+rm -rf "$INSTALLED_APP"
+cp -R "$APP_BUNDLE" "$INSTALLED_APP"
+
 open_app() {
-  /usr/bin/open -n "$APP_BUNDLE"
+  /usr/bin/open -n "$INSTALLED_APP"
 }
 
 case "$MODE" in
@@ -58,7 +76,7 @@ case "$MODE" in
     open_app
     ;;
   --debug|debug)
-    lldb -- "$APP_BINARY"
+    lldb -- "$INSTALLED_APP/Contents/MacOS/$APP_NAME"
     ;;
   --logs|logs)
     open_app
