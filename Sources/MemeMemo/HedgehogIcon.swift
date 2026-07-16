@@ -8,7 +8,11 @@ enum HedgehogIcon {
             return NSImage(systemSymbolName: "face.smiling", accessibilityDescription: "MemeMemo") ?? NSImage()
         }
         image.isTemplate = true
-        image.size = NSSize(width: 18, height: 18)
+        // Fill the menu bar height like neighboring apps; width follows the
+        // hedgehog's wide aspect ratio so it isn't letterboxed into a small glyph.
+        let targetHeight: CGFloat = 18
+        let aspect = image.size.height > 0 ? image.size.width / image.size.height : 1
+        image.size = NSSize(width: (targetHeight * aspect).rounded(), height: targetHeight)
         return image
     }()
 }

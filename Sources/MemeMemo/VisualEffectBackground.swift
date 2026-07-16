@@ -1,23 +1,41 @@
 import AppKit
 import SwiftUI
 
-/// Native vibrancy backdrop, matching the look of system status bar popovers.
-struct VisualEffectBackground: NSViewRepresentable {
-    var material: NSVisualEffectView.Material = .popover
-    var blendingMode: NSVisualEffectView.BlendingMode = .behindWindow
+/// NSImageView is used instead of SwiftUI.Image so animated GIF representations
+/// keep playing in previews while static formats use the same aspect-fit layout.
+struct AnimatedImageFileView: NSViewRepresentable {
+    let url: URL
 
-    func makeNSView(context: Context) -> NSVisualEffectView {
-        let view = NSVisualEffectView()
-        view.material = material
-        view.blendingMode = blendingMode
-        view.state = .active
-        view.isEmphasized = true
+    func makeCoordinator() -> Coordinator { Coordinator() }
+
+    func makeNSView(context: Context) -> AspectFitImageView {
+        let view = AspectFitImageView()
+        view.imageScaling = .scaleProportionallyUpOrDown
+        view.imageAlignment = .alignCenter
+        view.animates = true
+        view.image = NSImage(contentsOf: url)
+        context.coordinator.url = url
         return view
     }
 
-    func updateNSView(_ view: NSVisualEffectView, context: Context) {
-        view.material = material
-        view.blendingMode = blendingMode
+    func updateNSView(_ view: AspectFitImageView, context: Context) {
+        if context.coordinator.url != url {
+            view.image = NSImage(contentsOf: url)
+            context.coordinator.url = url
+        }
+        view.animates = true
+    }
+
+    final class Coordinator {
+        var url: URL?
+    }
+
+    final class AspectFitImageView: NSImageView {
+        override var intrinsicContentSize: NSSize {
+            NSSize(width: NSView.noIntrinsicMetric, height: NSView.noIntrinsicMetric)
+        }
+
+        override func hitTest(_ point: NSPoint) -> NSView? { nil }
     }
 }
 

@@ -1,6 +1,7 @@
 import AppKit
 import MemeMemoCore
 import SwiftUI
+import UniformTypeIdentifiers
 
 struct MemePanelView: View {
     @ObservedObject var store: MemeStore
@@ -9,6 +10,7 @@ struct MemePanelView: View {
     @State private var isManaging = false
     @State private var selectedIDs = Set<UUID>()
     @State private var draggedID: UUID?
+    @State private var insertionProposal: MemeInsertionProposal?
     @State private var captureService: ClipboardCaptureService?
     @State private var editingMeme: MemeItem?
     @State private var categoryDraft = ""
@@ -22,6 +24,7 @@ struct MemePanelView: View {
     private var columns: [GridItem] {
         [GridItem(.adaptive(minimum: tileSide, maximum: tileSide + 12), spacing: tileSpacing)]
     }
+    private var visibleMemes: [MemeItem] { store.filteredMemes(query: query) }
     private var gridHeight: CGFloat { tileSide * 3 + tileSpacing * 2 + 4 }
 
     var body: some View {
@@ -40,7 +43,7 @@ struct MemePanelView: View {
             Divider()
             ScrollView {
                 LazyVGrid(columns: columns, spacing: tileSpacing) {
-                    ForEach(store.filteredMemes(query: query)) { meme in
+                    ForEach(visibleMemes) { meme in
                         MemeTileView(
                             meme: meme,
                             imageURL: store.imageURL(for: meme),
@@ -57,22 +60,36 @@ struct MemePanelView: View {
                             onMove: { store.move(ids: [meme.id], to: $0) },
                             onDelete: { store.delete(ids: [meme.id]) },
                             draggedID: $draggedID,
-                            onReorder: store.reorder
+                            insertionProposal: $insertionProposal,
+                            onReorder: { draggedID, targetID, insertAfter in
+                                store.reorder(draggedID: draggedID, relativeTo: targetID, insertAfter: insertAfter)
+                            }
                         )
+                    }
+                    if draggedID != nil {
+                        MoveToEndDropTarget(
+                            side: tileSide,
+                            isTargeted: insertionProposal == nil,
+                            draggedID: $draggedID
+                        ) { id in
+                            let categoryID = store.memes.first(where: { $0.id == id })?.categoryID
+                            store.reorderToEnd(draggedID: id, categoryID: categoryID)
+                            insertionProposal = nil
+                        }
                     }
                 }
                 .padding(2)
             }
             .frame(height: gridHeight)
             .overlay {
-                if store.filteredMemes(query: query).isEmpty {
+                if visibleMemes.isEmpty {
                     ContentUnavailableView("还没有表情包", systemImage: "photo.on.rectangle.angled")
                 }
             }
         }
         .padding(12)
         .frame(width: 420)
-        .background(VisualEffectBackground())
+        .background(Color(nsColor: .windowBackgroundColor))
         .sheet(item: $editingMeme) { meme in
             NoteEditorSheet(meme: meme) { store.updateNote(id: meme.id, note: $0) }
         }
@@ -154,7 +171,7 @@ struct MemePanelView: View {
     private func configureCapture(enabled: Bool) {
         if enabled {
             let service = ClipboardCaptureService { image in
-                _ = store.addImage(image)
+                _ = store.addImageData(image)
             }
             captureService = service
             service.start()
@@ -180,6 +197,45 @@ struct MemePanelView: View {
         if let category = editingCategory { store.renameCategory(id: category.id, name: categoryDraft) }
         else { store.addCategory(name: categoryDraft) }
         showsCategorySheet = false
+    }
+}
+
+private struct MoveToEndDropTarget: View {
+    let side: CGFloat
+    let isTargeted: Bool
+    @Binding var draggedID: UUID?
+    let onDropAtEnd: (UUID) -> Void
+
+    var body: some View {
+        VStack(spacing: 6) {
+            Image(systemName: "arrow.right.to.line")
+                .font(.system(size: 18, weight: .medium))
+            Text("移到末尾")
+                .font(.caption)
+        }
+        .foregroundStyle(Color.accentColor)
+        .frame(width: side, height: side)
+        .background(.quinary, in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+        .overlay {
+            RoundedRectangle(cornerRadius: 8, style: .continuous)
+                .strokeBorder(Color.accentColor.opacity(isTargeted ? 0.85 : 0.35), style: StrokeStyle(lineWidth: 2, dash: [5, 4]))
+        }
+        .onDrop(of: [UTType.plainText], delegate: MoveToEndDropDelegate(draggedID: $draggedID, onDropAtEnd: onDropAtEnd))
+        .accessibilityLabel("将表情包移到末尾")
+    }
+}
+
+private struct MoveToEndDropDelegate: DropDelegate {
+    @Binding var draggedID: UUID?
+    let onDropAtEnd: (UUID) -> Void
+
+    func dropUpdated(info: DropInfo) -> DropProposal? { DropProposal(operation: .move) }
+
+    func performDrop(info: DropInfo) -> Bool {
+        guard let draggedID else { return false }
+        onDropAtEnd(draggedID)
+        self.draggedID = nil
+        return true
     }
 }
 

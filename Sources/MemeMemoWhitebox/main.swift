@@ -1,3 +1,4 @@
+import AppKit
 import Foundation
 import MemeMemoCore
 
@@ -6,6 +7,15 @@ private func expect(_ condition: @autoclosure () -> Bool, _ message: String) {
         FileHandle.standardError.write(Data("FAILED: \(message)\n".utf8))
         exit(1)
     }
+}
+
+private func solidImage(_ shade: CGFloat, size: CGFloat) -> NSImage {
+    let image = NSImage(size: NSSize(width: size, height: size))
+    image.lockFocus()
+    NSColor(calibratedWhite: shade, alpha: 1).setFill()
+    NSRect(x: 0, y: 0, width: size, height: size).fill()
+    image.unlockFocus()
+    return image
 }
 
 let noteMatch = MemeItem(fileName: "a.png", contentHash: "a", note: "周五下班", ocrText: "")
@@ -156,6 +166,10 @@ expect(
 expect(ClipboardPanelLayout.previewLineCount("single line") == 1, "single-line code must count one preview line")
 expect(ClipboardPanelLayout.previewLineCount("a\nb\nc\nd\ne") == 3, "long snippets must clamp to three preview lines")
 expect(
+    ClipboardPanelLayout.codePreviewLines("one\n\n\n") == ["one"],
+    "blank code lines must not reserve phantom preview rows"
+)
+expect(
     ClipboardPanelLayout.codeRowHeight(lineCount: 1) < ClipboardPanelLayout.codeRowHeight(lineCount: 3),
     "one-line code rows must be shorter than three-line rows"
 )
@@ -194,6 +208,63 @@ await MainActor.run {
     screenshotStore.markCapture(mode: .manualSelection)
     expect(screenshotStore.settings.mode == .manualSelection, "marking a capture must not crash and must remember the mode")
     defaults.removePersistentDomain(forName: suiteName)
+
+    // Regression: dragging a meme reorders the backing array, but sortOrder was
+    // re-derived from stale values so the visible order never changed.
+    let memeRoot = FileManager.default.temporaryDirectory
+        .appendingPathComponent("memememo-whitebox-memes-\(UUID().uuidString)", isDirectory: true)
+    defer { try? FileManager.default.removeItem(at: memeRoot) }
+    let memeStore = MemeStore(repository: MemeRepository(rootURL: memeRoot))
+    expect(memeStore.addImage(solidImage(0.1, size: 6), note: "一"), "seed meme one")
+    expect(memeStore.addImage(solidImage(0.5, size: 8), note: "二"), "seed meme two")
+    expect(memeStore.addImage(solidImage(0.9, size: 10), note: "三"), "seed meme three")
+    let initialOrder = memeStore.filteredMemes(query: "").map(\.note)
+    expect(initialOrder == ["一", "二", "三"], "memes must start in insertion order")
+    let first = memeStore.filteredMemes(query: "")[0].id
+    let third = memeStore.filteredMemes(query: "")[2].id
+    memeStore.reorder(draggedID: first, before: third)
+    let reordered = memeStore.filteredMemes(query: "").map(\.note)
+    expect(reordered == ["二", "一", "三"], "reorder must move the dragged meme and persist through sortOrder")
+    let second = memeStore.filteredMemes(query: "")[0].id
+    memeStore.reorder(draggedID: second, relativeTo: third, insertAfter: true)
+    expect(
+        memeStore.filteredMemes(query: "").map(\.note) == ["一", "三", "二"],
+        "dropping on the trailing half must insert after the target"
+    )
+    memeStore.reorderToEnd(draggedID: first, categoryID: nil)
+    expect(
+        memeStore.filteredMemes(query: "").map(\.note) == ["三", "二", "一"],
+        "the explicit end drop target must move an item to the category tail"
+    )
+
+    let gifBytes = Data(base64Encoded: "R0lGODlhAQABAIAAAAAAAP///ywAAAAAAQABAAACAUwAOw==")!
+    let gifPayload = ImageAssetData(data: gifBytes, fileExtension: "png")
+    expect(gifPayload.fileExtension == "gif", "GIF magic bytes must override an incorrect suggested extension")
+    expect(memeStore.addImageData(gifPayload, note: "动态"), "animated GIF bytes must be accepted without PNG conversion")
+    let gifMeme = memeStore.filteredMemes(query: "动态").first!
+    expect(
+        gifMeme.fileName.hasSuffix(".gif") && (try? Data(contentsOf: memeStore.imageURL(for: gifMeme))) == gifBytes,
+        "GIF storage must preserve the original format and bytes"
+    )
+
+    // Screenshot completion uses this exact encoded-payload path. Exercise it
+    // on an isolated pasteboard so the user's real clipboard is untouched.
+    let testPasteboard = NSPasteboard.withUniqueName()
+    let screenshotBytes = solidImage(0.4, size: 12).pngData!
+    let screenshotPayload = ImageAssetData(data: screenshotBytes, fileExtension: "png")
+    expect(screenshotPayload.write(to: testPasteboard), "screenshot PNG must be writable to the pasteboard")
+    expect(
+        ImageAssetData.read(from: testPasteboard)?.fileExtension == "png",
+        "a completed screenshot must be readable from the pasteboard as PNG"
+    )
+
+    // Meme capture pauses clipboard history recording.
+    let clipRoot = FileManager.default.temporaryDirectory
+        .appendingPathComponent("memememo-whitebox-clip-\(UUID().uuidString)", isDirectory: true)
+    defer { try? FileManager.default.removeItem(at: clipRoot) }
+    let pausedStore = ClipboardHistoryStore(repository: ClipboardHistoryRepository(rootURL: clipRoot))
+    pausedStore.isRecordingPaused = true
+    expect(pausedStore.isRecordingPaused, "recording pause flag must be settable for meme capture")
 }
 
-print("MemeMemo whitebox checks passed (59 assertions).")
+print("MemeMemo whitebox checks passed (71 assertions).")

@@ -11,7 +11,7 @@ enum LibraryActions {
         panel.allowedContentTypes = [.image]
         guard panel.runModal() == .OK else { return }
         for url in panel.urls {
-            if let image = NSImage(contentsOf: url) { _ = store.addImage(image) }
+            if let payload = ImageAssetData(fileURL: url) { _ = store.addImageData(payload) }
         }
     }
 

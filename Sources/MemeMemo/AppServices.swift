@@ -33,7 +33,7 @@ final class AppServices: ObservableObject {
         didStart = true
         clipboardStore.startMonitoring()
 
-        let panelController = ClipboardHistoryPanelController(store: clipboardStore)
+        let panelController = ClipboardHistoryPanelController(store: clipboardStore, memeStore: memeStore)
         let hotKey = GlobalHotKeyController()
         updateHotKeyWarning(.clipboard, status: hotKey.registerClipboardHotKey(clipboardStore.settings.hotKey ?? .defaultClipboard) {
             panelController.toggle()
@@ -64,6 +64,13 @@ final class AppServices: ObservableObject {
                 Task { @MainActor in self?.updateHotKeyWarning(.screenshot, status: status) }
             }
             .store(in: &cancellables)
+        memeStore.$captureEnabled
+            .removeDuplicates()
+            .sink { [weak self] capturing in
+                self?.clipboardStore.isRecordingPaused = capturing
+            }
+            .store(in: &cancellables)
+
         clipboardPanelController = panelController
         hotKeyController = hotKey
     }
@@ -81,22 +88,39 @@ final class AppServices: ObservableObject {
         }
     }
 
+    func previewScreenshotEditor(imageURL: URL) {
+        guard let image = NSImage(contentsOf: imageURL) else { return }
+        screenshotEditor.edit(image: image) { _ in }
+    }
+
+    func previewClipboard(category: ClipboardContentCategory) {
+        clipboardPanelController?.preview(category: category)
+    }
+
     private func handleCapturedScreenshot(_ image: NSImage, mode: ScreenshotMode) {
         screenshotSettingsStore.markCapture(mode: mode)
         guard screenshotSettingsStore.settings.opensEditorAfterCapture else {
-            saveScreenshot(image, mode: mode)
+            copyScreenshot(image)
             return
         }
         screenshotEditor.edit(image: image) { [weak self] editedImage in
             guard let self, let editedImage else { return }
-            self.saveScreenshot(editedImage, mode: mode)
+            self.copyScreenshot(editedImage)
         }
     }
 
-    private func saveScreenshot(_ image: NSImage, mode: ScreenshotMode) {
-        _ = memeStore.addImage(image, note: mode.displayName)
-        NSPasteboard.general.clearContents()
-        NSPasteboard.general.writeObjects([image])
+    /// "完成" means the screenshot is ready to paste. It does not add the
+    /// screenshot to the meme library; that remains an explicit user action.
+    private func copyScreenshot(_ image: NSImage) {
+        guard let data = image.pngData else {
+            memeStore.report(MemeRepositoryError.cannotEncodeImage)
+            return
+        }
+        let payload = ImageAssetData(data: data, fileExtension: "png")
+        guard payload.write(to: .general) else {
+            memeStore.report(MemeRepositoryError.cannotEncodeImage)
+            return
+        }
     }
 
     private func updateHotKeyWarning(_ kind: HotKeyKind, status: OSStatus) {

@@ -16,7 +16,8 @@ struct MemeTileView: View {
     let onMove: (UUID?) -> Void
     let onDelete: () -> Void
     @Binding var draggedID: UUID?
-    let onReorder: (UUID, UUID) -> Void
+    @Binding var insertionProposal: MemeInsertionProposal?
+    let onReorder: (UUID, UUID, Bool) -> Void
 
     private var hasNote: Bool {
         !meme.note.isEmpty && meme.note != "未命名"
@@ -28,10 +29,9 @@ struct MemeTileView: View {
                 RoundedRectangle(cornerRadius: 8, style: .continuous)
                     .fill(.quaternary)
                 Group {
-                    if let image = NSImage(contentsOf: imageURL) {
-                        Image(nsImage: image)
-                            .resizable()
-                            .scaledToFit()
+                    if NSImage(contentsOf: imageURL) != nil {
+                        AnimatedImageFileView(url: imageURL)
+                            .frame(maxWidth: .infinity, maxHeight: .infinity)
                     } else {
                         Image(systemName: "photo")
                             .resizable()
@@ -69,6 +69,15 @@ struct MemeTileView: View {
                 RoundedRectangle(cornerRadius: 8, style: .continuous)
                     .stroke(isSelected ? Color.accentColor : Color.clear, lineWidth: 2)
             }
+            .overlay(alignment: insertionProposal?.insertAfter == true ? .trailing : .leading) {
+                if insertionProposal?.targetID == meme.id {
+                    Capsule()
+                        .fill(Color.accentColor)
+                        .frame(width: 4)
+                        .padding(.vertical, 5)
+                        .shadow(color: Color.accentColor.opacity(0.35), radius: 3)
+                }
+            }
         }
         .buttonStyle(.plain)
         .contextMenu { contextMenu }
@@ -78,7 +87,9 @@ struct MemeTileView: View {
         }
         .onDrop(of: [UTType.plainText], delegate: MemeDropDelegate(
             targetID: meme.id,
+            side: side,
             draggedID: $draggedID,
+            insertionProposal: $insertionProposal,
             onReorder: onReorder
         ))
         .help(hasNote ? meme.note : "按住并拖动可排序")
@@ -99,18 +110,45 @@ struct MemeTileView: View {
     }
 }
 
+struct MemeInsertionProposal: Equatable {
+    let targetID: UUID
+    let insertAfter: Bool
+}
+
 private struct MemeDropDelegate: DropDelegate {
     let targetID: UUID
+    let side: CGFloat
     @Binding var draggedID: UUID?
-    let onReorder: (UUID, UUID) -> Void
+    @Binding var insertionProposal: MemeInsertionProposal?
+    let onReorder: (UUID, UUID, Bool) -> Void
 
     func dropEntered(info: DropInfo) {
-        guard let draggedID, draggedID != targetID else { return }
-        onReorder(draggedID, targetID)
+        updateProposal(info)
+    }
+
+    func dropUpdated(info: DropInfo) -> DropProposal? {
+        updateProposal(info)
+        return DropProposal(operation: .move)
+    }
+
+    func dropExited(info: DropInfo) {
+        if insertionProposal?.targetID == targetID { insertionProposal = nil }
     }
 
     func performDrop(info: DropInfo) -> Bool {
-        draggedID = nil
+        guard let draggedID, draggedID != targetID else { return false }
+        let insertAfter = info.location.x >= side / 2
+        onReorder(draggedID, targetID, insertAfter)
+        insertionProposal = nil
+        self.draggedID = nil
         return true
+    }
+
+    private func updateProposal(_ info: DropInfo) {
+        guard let draggedID, draggedID != targetID else {
+            insertionProposal = nil
+            return
+        }
+        insertionProposal = MemeInsertionProposal(targetID: targetID, insertAfter: info.location.x >= side / 2)
     }
 }

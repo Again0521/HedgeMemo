@@ -5,9 +5,9 @@ import Foundation
 public final class ClipboardCaptureService {
     private var timer: Timer?
     private var observedChangeCount = NSPasteboard.general.changeCount
-    private let onImage: (NSImage) -> Void
+    private let onImage: (ImageAssetData) -> Void
 
-    public init(onImage: @escaping (NSImage) -> Void) {
+    public init(onImage: @escaping (ImageAssetData) -> Void) {
         self.onImage = onImage
     }
 
@@ -30,7 +30,7 @@ public final class ClipboardCaptureService {
         let pasteboard = NSPasteboard.general
         guard pasteboard.changeCount != observedChangeCount else { return }
         observedChangeCount = pasteboard.changeCount
-        guard let image = NSImage(pasteboard: pasteboard) else { return }
+        guard let image = ImageAssetData.read(from: pasteboard) else { return }
         onImage(image)
     }
 }

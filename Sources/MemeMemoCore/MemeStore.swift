@@ -17,7 +17,12 @@ public final class MemeStore: ObservableObject {
         do {
             let snapshot = try repository.load()
             categories = snapshot.categories.sorted { $0.createdAt < $1.createdAt }
-            memes = snapshot.memes
+            // Array order is the source of truth for sorting; align it to the
+            // persisted sortOrder so a fresh launch matches the last arrangement.
+            memes = snapshot.memes.sorted { lhs, rhs in
+                if lhs.sortOrder == rhs.sortOrder { return lhs.createdAt < rhs.createdAt }
+                return lhs.sortOrder < rhs.sortOrder
+            }
         } catch {
             lastError = error.localizedDescription
         }
@@ -58,9 +63,28 @@ public final class MemeStore: ObservableObject {
 
     @discardableResult
     public func addImage(_ image: NSImage, categoryID: UUID? = nil, note: String? = nil, ocrText: String = "") -> Bool {
+        guard let pngData = image.pngData else {
+            lastError = MemeRepositoryError.cannotEncodeImage.localizedDescription
+            return false
+        }
+        return addImageData(
+            ImageAssetData(data: pngData, fileExtension: "png"),
+            categoryID: categoryID,
+            note: note,
+            ocrText: ocrText
+        )
+    }
+
+    @discardableResult
+    public func addImageData(
+        _ payload: ImageAssetData,
+        categoryID: UUID? = nil,
+        note: String? = nil,
+        ocrText: String = ""
+    ) -> Bool {
         do {
-            guard let pngData = image.pngData else { throw MemeRepositoryError.cannotEncodeImage }
-            let tempStored = try repository.saveImageData(pngData)
+            guard NSImage(data: payload.data) != nil else { throw MemeRepositoryError.cannotEncodeImage }
+            let tempStored = try repository.saveImageData(payload.data, fileExtension: payload.fileExtension)
             guard !memes.contains(where: { $0.contentHash == tempStored.contentHash }) else {
                 try repository.removeImage(named: tempStored.fileName)
                 return false
@@ -114,22 +138,36 @@ public final class MemeStore: ObservableObject {
     }
 
     public func reorder(draggedID: UUID, before targetID: UUID) {
+        reorder(draggedID: draggedID, relativeTo: targetID, insertAfter: false)
+    }
+
+    public func reorder(draggedID: UUID, relativeTo targetID: UUID, insertAfter: Bool) {
         guard draggedID != targetID,
               let draggedIndex = memes.firstIndex(where: { $0.id == draggedID }),
               let targetIndex = memes.firstIndex(where: { $0.id == targetID }) else { return }
         let categoryID = memes[targetIndex].categoryID
         guard memes[draggedIndex].categoryID == categoryID else { return }
         let item = memes.remove(at: draggedIndex)
-        let destination = memes.firstIndex(where: { $0.id == targetID }) ?? memes.endIndex
+        var destination = memes.firstIndex(where: { $0.id == targetID }) ?? memes.endIndex
+        if insertAfter, destination < memes.endIndex { destination += 1 }
+        memes.insert(item, at: destination)
+        normalizeSortOrders()
+        persist()
+    }
+
+    public func reorderToEnd(draggedID: UUID, categoryID: UUID?) {
+        guard let draggedIndex = memes.firstIndex(where: { $0.id == draggedID }),
+              memes[draggedIndex].categoryID == categoryID else { return }
+        let item = memes.remove(at: draggedIndex)
+        let destination = memes.lastIndex(where: { $0.categoryID == categoryID }).map { $0 + 1 } ?? memes.endIndex
         memes.insert(item, at: destination)
         normalizeSortOrders()
         persist()
     }
 
     public func copyToPasteboard(_ meme: MemeItem) {
-        guard let image = NSImage(contentsOf: repository.imageURL(for: meme)) else { return }
-        NSPasteboard.general.clearContents()
-        NSPasteboard.general.writeObjects([image])
+        guard let payload = ImageAssetData(fileURL: repository.imageURL(for: meme)) else { return }
+        payload.write(to: .general)
     }
 
     public func imageURL(for meme: MemeItem) -> URL { repository.imageURL(for: meme) }
@@ -151,9 +189,9 @@ public final class MemeStore: ObservableObject {
         }
         for meme in manifest.snapshot.memes {
             let url = imagesURL.appendingPathComponent(meme.fileName)
-            guard let image = NSImage(contentsOf: url) else { continue }
-            _ = addImage(
-                image,
+            guard let payload = ImageAssetData(fileURL: url) else { continue }
+            _ = addImageData(
+                payload,
                 categoryID: meme.categoryID.flatMap { categoryMap[$0] },
                 note: meme.note,
                 ocrText: meme.ocrText
@@ -161,11 +199,16 @@ public final class MemeStore: ObservableObject {
         }
     }
 
+    /// Assigns `sortOrder` from each item's position in `memes`, making the array
+    /// order the single source of truth. `reorder` moves items within the array,
+    /// so deriving order from stale `sortOrder` here would silently undo the drag.
     private func normalizeSortOrders() {
-        let grouped = Dictionary(grouping: memes.indices, by: { memes[$0].categoryID })
-        for (_, indices) in grouped {
-            let ordered = indices.sorted { memes[$0].sortOrder < memes[$1].sortOrder }
-            for (order, index) in ordered.enumerated() { memes[index].sortOrder = order }
+        var nextOrder = [UUID?: Int]()
+        for index in memes.indices {
+            let category = memes[index].categoryID
+            let order = nextOrder[category, default: 0]
+            memes[index].sortOrder = order
+            nextOrder[category] = order + 1
         }
     }
 

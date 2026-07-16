@@ -30,13 +30,19 @@ final class SettingsWindowController: NSObject {
         // a real title bar; translucency comes from the vibrancy background inside.
         let panel = NSPanel(
             contentRect: NSRect(x: 0, y: 0, width: 420, height: 660),
-            styleMask: [.titled, .closable],
+            styleMask: [.titled, .closable, .fullSizeContentView],
             backing: .buffered,
             defer: false
         )
         panel.title = "设置"
-        panel.isOpaque = false
-        panel.backgroundColor = .clear
+        panel.titleVisibility = .hidden
+        panel.titlebarAppearsTransparent = true
+        panel.titlebarSeparatorStyle = .none
+        // Settings is a standard macOS utility window. A native window
+        // background stays visually uniform instead of sampling different
+        // bands of the desktop wallpaper through the content.
+        panel.isOpaque = true
+        panel.backgroundColor = .windowBackgroundColor
         panel.isReleasedWhenClosed = false
         panel.isMovableByWindowBackground = true
         panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
@@ -46,7 +52,9 @@ final class SettingsWindowController: NSObject {
             screenshotSettingsStore: screenshotSettingsStore,
             hotKeyWarnings: hotKeyWarnings()
         )
-        panel.contentViewController = NSHostingController(rootView: content)
+        let hosting = NSHostingView(rootView: content)
+        hosting.autoresizingMask = [.width, .height]
+        panel.contentView = hosting
         self.panel = panel
         NSApp.activate(ignoringOtherApps: true)
         panel.center()
@@ -62,12 +70,13 @@ struct SettingsPanelView: View {
     @State private var customDraft: CustomCategoryDraft?
 
     var body: some View {
-        Form {
-            clipboardSection
-            categorySection
-            screenshotSection
+        ScrollView {
+            VStack(alignment: .leading, spacing: 22) {
+                clipboardSection
+                categorySection
+                screenshotSection
             if hasHotKeyConflict || !hotKeyWarnings.isEmpty {
-                Section {
+                    SettingsSection(title: "提醒") {
                     if hasHotKeyConflict {
                         Label("剪贴板和截图快捷键不能相同", systemImage: "exclamationmark.triangle")
                             .font(.caption)
@@ -80,11 +89,14 @@ struct SettingsPanelView: View {
                     }
                 }
             }
+            }
+            .padding(.horizontal, 20)
+            .padding(.bottom, 20)
         }
-        .formStyle(.grouped)
-        .scrollContentBackground(.hidden)
+        .scrollIndicators(.hidden)
+        .controlSize(.small)
+        .padding(.top, 28)
         .frame(width: 420, height: 660)
-        .background(VisualEffectBackground())
         .onAppear { refreshAccessibilityTrust() }
         .sheet(item: $customDraft) { draft in
             CustomCategoryEditorSheet(draft: draft) { saveCustomCategory($0) }
@@ -92,45 +104,48 @@ struct SettingsPanelView: View {
     }
 
     private var clipboardSection: some View {
-        Section("剪贴板历史") {
-            LabeledContent("最多保存") {
+        SettingsSection(title: "剪贴板历史") {
+            SettingsRow {
+                LabeledContent("最多保存") {
                 Stepper("\(clipboardStore.settings.maxEntries) 条", value: maxEntriesBinding, in: 10...1_000, step: 10)
             }
-            Toggle("保存图片", isOn: savesImagesBinding)
-            Toggle("复制后自动粘贴", isOn: autoPasteBinding)
-            HotKeyRecorderRow(title: "剪贴板快捷键", hotKey: clipboardHotKeyBinding)
+            }
+            SettingsDivider()
+            SettingsRow { Toggle("保存图片", isOn: savesImagesBinding) }
+            SettingsDivider()
+            SettingsRow { Toggle("复制后自动粘贴", isOn: autoPasteBinding) }
+            SettingsDivider()
+            SettingsRow { HotKeyRecorderRow(title: "剪贴板快捷键", hotKey: clipboardHotKeyBinding) }
             if clipboardStore.settings.autoPaste {
-                PermissionStatusRow(
+                SettingsDivider()
+                SettingsRow { PermissionStatusRow(
                     isTrusted: accessibilityTrusted,
                     onRefresh: refreshAccessibilityTrust,
                     onRequest: requestAccessibilityTrust
-                )
+                ) }
             }
-            Button(role: .destructive) {
+            SettingsDivider()
+            SettingsRow { Button(role: .destructive) {
                 clipboardStore.clearHistory()
             } label: {
                 Label("清空剪贴板历史", systemImage: "trash")
-            }
+            } }
         }
     }
 
     private var categorySection: some View {
-        Section {
+        SettingsSection(title: "剪贴板分类", footer: "自定义分类按正则表达式筛选文本条目。") {
             let keys = clipboardStore.settings.orderedCategoryKeys
             ForEach(Array(keys.enumerated()), id: \.element.storageValue) { index, key in
-                categoryRow(key: key, index: index, total: keys.count)
+                SettingsRow { categoryRow(key: key, index: index, total: keys.count) }
+                if index != keys.count - 1 { SettingsDivider() }
             }
-            Button {
+            SettingsDivider()
+            SettingsRow { Button {
                 customDraft = CustomCategoryDraft()
             } label: {
                 Label("添加自定义分类…", systemImage: "plus")
-            }
-        } header: {
-            Text("剪贴板分类")
-        } footer: {
-            Text("自定义分类按正则表达式筛选文本条目。")
-                .font(.caption)
-                .foregroundStyle(.secondary)
+            } }
         }
     }
 
@@ -200,15 +215,18 @@ struct SettingsPanelView: View {
     }
 
     private var screenshotSection: some View {
-        Section("截图") {
-            Picker("默认模式", selection: screenshotModeBinding) {
+        SettingsSection(title: "截图") {
+            SettingsRow { Picker("默认模式", selection: screenshotModeBinding) {
                 ForEach(ScreenshotMode.allCases, id: \.self) { mode in
                     Text(mode.displayName).tag(mode)
                 }
-            }
-            HotKeyRecorderRow(title: "截图快捷键", hotKey: screenshotHotKeyBinding)
-            Toggle("记住上次模式", isOn: remembersScreenshotModeBinding)
-            Toggle("截图后打开编辑", isOn: opensEditorAfterCaptureBinding)
+            } }
+            SettingsDivider()
+            SettingsRow { HotKeyRecorderRow(title: "截图快捷键", hotKey: screenshotHotKeyBinding) }
+            SettingsDivider()
+            SettingsRow { Toggle("记住上次模式", isOn: remembersScreenshotModeBinding) }
+            SettingsDivider()
+            SettingsRow { Toggle("截图后打开编辑", isOn: opensEditorAfterCaptureBinding) }
         }
     }
 
@@ -280,6 +298,50 @@ struct SettingsPanelView: View {
         let options = ["AXTrustedCheckOptionPrompt": true] as CFDictionary
         accessibilityTrusted = AXIsProcessTrustedWithOptions(options)
     }
+}
+
+/// Settings deliberately use the window's single vibrancy surface. Section
+/// structure comes from typography and separators, not a second translucent
+/// card layered on top of the window material.
+private struct SettingsSection<Content: View>: View {
+    let title: String
+    var footer: String?
+    let content: Content
+
+    init(title: String, footer: String? = nil, @ViewBuilder content: () -> Content) {
+        self.title = title
+        self.footer = footer
+        self.content = content()
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text(title).font(.headline)
+            VStack(spacing: 0) { content }
+            if let footer {
+                Text(footer)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+        }
+    }
+}
+
+private struct SettingsRow<Content: View>: View {
+    let content: Content
+
+    init(@ViewBuilder content: () -> Content) {
+        self.content = content()
+    }
+
+    var body: some View {
+        content
+            .frame(maxWidth: .infinity, minHeight: 38, alignment: .leading)
+    }
+}
+
+private struct SettingsDivider: View {
+    var body: some View { Divider() }
 }
 
 struct CustomCategoryDraft: Identifiable {

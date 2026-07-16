@@ -20,6 +20,9 @@ public final class ClipboardHistoryStore: ObservableObject {
         }
     }
     @Published public private(set) var lastError: String?
+    /// While the meme library is capturing clipboard images, history recording is
+    /// paused so the captured content doesn't also pile up in the clipboard list.
+    public var isRecordingPaused = false
 
     public let repository: ClipboardHistoryRepository
 
@@ -76,9 +79,15 @@ public final class ClipboardHistoryStore: ObservableObject {
 
     @discardableResult
     public func addImage(_ image: NSImage, note: String? = nil, sourceApp: String? = nil) -> Bool {
+        guard let data = image.pngData else { return false }
+        return addImageData(ImageAssetData(data: data, fileExtension: "png"), note: note, sourceApp: sourceApp)
+    }
+
+    @discardableResult
+    public func addImageData(_ payload: ImageAssetData, note: String? = nil, sourceApp: String? = nil) -> Bool {
         guard settings.savesImages else { return false }
         do {
-            let stored = try repository.saveImage(image)
+            let stored = try repository.saveImageData(payload.data, fileExtension: payload.fileExtension)
             guard !ClipboardHistoryPolicy.shouldMergeWithLatest(latest: orderedEntries().first, contentHash: stored.contentHash) else {
                 try repository.removeImage(named: stored.fileName)
                 return false
@@ -139,8 +148,8 @@ public final class ClipboardHistoryStore: ObservableObject {
             pasteboard.setString(text, forType: .string)
         case .image:
             guard let url = repository.imageURL(for: entry),
-                  let image = NSImage(contentsOf: url) else { return false }
-            pasteboard.writeObjects([image])
+                  let payload = ImageAssetData(fileURL: url) else { return false }
+            payload.write(to: pasteboard)
         }
         suppressedChangeCount = pasteboard.changeCount
         observedChangeCount = pasteboard.changeCount
@@ -174,12 +183,15 @@ public final class ClipboardHistoryStore: ObservableObject {
             suppressedChangeCount = nil
             return
         }
+        // Keep observedChangeCount current (done above) so resuming won't capture
+        // whatever was copied while the meme library was grabbing images.
+        guard !isRecordingPaused else { return }
         // The copy happened within the last polling interval, so the frontmost
         // app is a good approximation of where the content came from.
         let sourceApp = NSWorkspace.shared.frontmostApplication?.localizedName
         if let text = pasteboard.string(forType: .string), addText(text, sourceApp: sourceApp) { return }
-        if settings.savesImages, let image = NSImage(pasteboard: pasteboard) {
-            _ = addImage(image, sourceApp: sourceApp)
+        if settings.savesImages, let image = ImageAssetData.read(from: pasteboard) {
+            _ = addImageData(image, sourceApp: sourceApp)
         }
     }
 

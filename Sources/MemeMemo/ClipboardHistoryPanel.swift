@@ -6,17 +6,24 @@ import SwiftUI
 @MainActor
 final class ClipboardHistoryPanelController: NSObject {
     private let store: ClipboardHistoryStore
+    private let memeStore: MemeStore
     private var panel: NSPanel?
     private var hoverCard: NSPanel?
     private var resignKeyObserver: NSObjectProtocol?
 
-    init(store: ClipboardHistoryStore) {
+    init(store: ClipboardHistoryStore, memeStore: MemeStore) {
         self.store = store
+        self.memeStore = memeStore
     }
 
     func toggle() {
         if panel?.isVisible == true { hide() }
         else { show() }
+    }
+
+    func preview(category: ClipboardContentCategory) {
+        store.settings.activeCategoryKey = .builtin(category)
+        show()
     }
 
     func hide() {
@@ -35,14 +42,17 @@ final class ClipboardHistoryPanelController: NSObject {
             },
             onDetailEntry: { [weak self] entry in
                 self?.updateHoverCard(entry: entry)
+            },
+            onAddToMemes: { [weak self] entry in
+                self?.addToMemes(entry)
             }
         )
-        if let effectView = panel.contentView as? NSVisualEffectView {
-            effectView.subviews.forEach { $0.removeFromSuperview() }
+        if let container = panel.contentView {
+            container.subviews.forEach { $0.removeFromSuperview() }
             let hosting = NSHostingView(rootView: content)
             hosting.autoresizingMask = [.width, .height]
-            hosting.frame = effectView.bounds
-            effectView.addSubview(hosting)
+            hosting.frame = container.bounds
+            container.addSubview(hosting)
         }
         let key = store.settings.activeCategoryKey
         resize(
@@ -51,6 +61,11 @@ final class ClipboardHistoryPanelController: NSObject {
         )
         position(panel)
         panel.makeKeyAndOrderFront(nil)
+    }
+
+    private func addToMemes(_ entry: ClipboardEntry) {
+        guard let url = store.imageURL(for: entry), let payload = ImageAssetData(fileURL: url) else { return }
+        _ = memeStore.addImageData(payload, note: entry.text)
     }
 
     private func makePanel() -> NSPanel {
@@ -67,7 +82,7 @@ final class ClipboardHistoryPanelController: NSObject {
         panel.isReleasedWhenClosed = false
         panel.level = .floating
         panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .transient]
-        panel.contentView = Self.makeVibrancyView(cornerRadius: 16)
+        panel.contentView = Self.makeNeutralContainer(cornerRadius: 16)
 
         resignKeyObserver = NotificationCenter.default.addObserver(
             forName: NSWindow.didResignKeyNotification,
@@ -79,14 +94,15 @@ final class ClipboardHistoryPanelController: NSObject {
         return panel
     }
 
-    static func makeVibrancyView(cornerRadius: CGFloat) -> NSVisualEffectView {
-        let effectView = NSVisualEffectView()
-        effectView.material = .popover
-        effectView.blendingMode = .behindWindow
-        effectView.state = .active
-        // maskImage (not a layer mask) so the window server rounds the blur itself.
-        effectView.maskImage = .cornerMask(radius: cornerRadius)
-        return effectView
+    static func makeNeutralContainer(cornerRadius: CGFloat) -> NSView {
+        let view = NSView()
+        view.wantsLayer = true
+        view.layer?.backgroundColor = NSColor.windowBackgroundColor.cgColor
+        view.layer?.cornerRadius = cornerRadius
+        view.layer?.cornerCurve = .continuous
+        view.layer?.masksToBounds = true
+        view.autoresizingMask = [.width, .height]
+        return view
     }
 
     /// The screen the panel lives on, falling back to wherever the mouse is.
@@ -133,16 +149,16 @@ final class ClipboardHistoryPanelController: NSObject {
         let card = hoverCard ?? makeHoverCard()
         hoverCard = card
 
-        let content = ClipboardDetailCard(entry: entry, imageURL: store.imageURL(for: entry))
-        let hosting = NSHostingView(rootView: content)
-        var size = hosting.fittingSize
         let visibleFrame = activeScreen?.visibleFrame ?? panel.frame
-        size.height = min(size.height, visibleFrame.height * 0.7)
-        if let effectView = card.contentView as? NSVisualEffectView {
-            effectView.subviews.forEach { $0.removeFromSuperview() }
+        let imageURL = store.imageURL(for: entry)
+        let size = ClipboardDetailLayout.cardSize(for: entry, imageURL: imageURL, availableHeight: visibleFrame.height)
+        let content = ClipboardDetailCard(entry: entry, imageURL: imageURL, cardHeight: size.height)
+        let hosting = NSHostingView(rootView: content)
+        if let container = card.contentView {
+            container.subviews.forEach { $0.removeFromSuperview() }
             hosting.frame = NSRect(origin: .zero, size: size)
             hosting.autoresizingMask = [.width, .height]
-            effectView.addSubview(hosting)
+            container.addSubview(hosting)
         }
 
         let mouse = NSEvent.mouseLocation
@@ -175,7 +191,7 @@ final class ClipboardHistoryPanelController: NSObject {
         card.isReleasedWhenClosed = false
         card.level = .floating
         card.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .transient]
-        card.contentView = Self.makeVibrancyView(cornerRadius: 12)
+        card.contentView = Self.makeNeutralContainer(cornerRadius: 12)
         return card
     }
 
@@ -196,6 +212,7 @@ private final class KeyableClipboardPanel: NSPanel {
 private struct ClipboardDetailCard: View {
     let entry: ClipboardEntry
     let imageURL: URL?
+    let cardHeight: CGFloat
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
@@ -217,26 +234,25 @@ private struct ClipboardDetailCard: View {
             .foregroundStyle(.secondary)
         }
         .padding(12)
-        .frame(width: 264, alignment: .leading)
+        .frame(width: ClipboardDetailLayout.cardWidth, height: cardHeight, alignment: .topLeading)
     }
 
     @ViewBuilder
     private var preview: some View {
-        if entry.kind == .image, let imageURL, let image = NSImage(contentsOf: imageURL) {
-            Image(nsImage: image)
-                .resizable()
-                .scaledToFit()
-                .frame(maxHeight: 180)
+        if entry.kind == .image, let imageURL {
+            AnimatedImageFileView(url: imageURL)
+                .frame(maxWidth: .infinity)
+                .frame(height: ClipboardDetailLayout.previewHeight(for: entry, imageURL: imageURL))
                 .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
         } else if entry.contentCategory == .code {
             Text(CodeHighlighter.highlight(entry.text ?? ""))
                 .font(.system(size: 11, design: .monospaced))
-                .lineLimit(30)
+                .lineLimit(12)
                 .frame(maxWidth: .infinity, alignment: .leading)
         } else {
             Text(entry.text ?? entry.previewText)
                 .font(.system(size: 12))
-                .lineLimit(30)
+                .lineLimit(12)
                 .frame(maxWidth: .infinity, alignment: .leading)
         }
     }
@@ -253,6 +269,45 @@ private struct ClipboardDetailCard: View {
     }
 }
 
+private enum ClipboardDetailLayout {
+    static let cardWidth: CGFloat = 264
+    private static let horizontalPadding: CGFloat = 12
+    private static let verticalChrome: CGFloat = 161
+    private static let maximumPreviewHeight: CGFloat = 210
+    private static let maximumLines = 12
+
+    static func cardSize(for entry: ClipboardEntry, imageURL: URL?, availableHeight: CGFloat) -> NSSize {
+        let preview = previewHeight(for: entry, imageURL: imageURL)
+        let desired = verticalChrome + preview
+        let maximum = min(460, availableHeight * 0.68)
+        return NSSize(width: cardWidth, height: min(max(desired, 118), maximum))
+    }
+
+    static func previewHeight(for entry: ClipboardEntry, imageURL: URL?) -> CGFloat {
+        let contentWidth = cardWidth - horizontalPadding * 2
+        if entry.kind == .image, let imageURL, let image = NSImage(contentsOf: imageURL) {
+            let size = image.representations.first.map {
+                NSSize(width: $0.pixelsWide, height: $0.pixelsHigh)
+            } ?? image.size
+            guard size.width > 0, size.height > 0 else { return 140 }
+            return min(maximumPreviewHeight, max(72, contentWidth * size.height / size.width))
+        }
+
+        let isCode = entry.contentCategory == .code
+        let font = isCode
+            ? NSFont.monospacedSystemFont(ofSize: 11, weight: .regular)
+            : NSFont.systemFont(ofSize: 12)
+        let text = isCode ? ClipboardPanelLayout.codePreviewLines(entry.text).joined(separator: "\n") : (entry.text ?? entry.previewText)
+        let bounds = (text as NSString).boundingRect(
+            with: NSSize(width: contentWidth, height: .greatestFiniteMagnitude),
+            options: [.usesLineFragmentOrigin, .usesFontLeading],
+            attributes: [.font: font]
+        )
+        let lineHeight = ceil(font.ascender - font.descender + font.leading)
+        return max(lineHeight, min(ceil(bounds.height), lineHeight * CGFloat(maximumLines)))
+    }
+}
+
 // MARK: - Panel content
 
 struct ClipboardHistoryPanelView: View {
@@ -260,9 +315,11 @@ struct ClipboardHistoryPanelView: View {
     let onDone: () -> Void
     let onContentChange: (CGFloat) -> Void
     let onDetailEntry: (ClipboardEntry?) -> Void
+    let onAddToMemes: (ClipboardEntry) -> Void
 
     @State private var query = ""
     @State private var selectedID: UUID?
+    @State private var keyboardSelection = false
 
     private var activeKey: ClipboardCategoryKey { store.settings.activeCategoryKey }
     private var entries: [ClipboardEntry] { store.orderedEntries(query: query, key: activeKey) }
@@ -278,7 +335,10 @@ struct ClipboardHistoryPanelView: View {
                     content
                 }
                 .onChange(of: selectedID) { _, id in
-                    if let id { proxy.scrollTo(id, anchor: .center) }
+                    // Hover must never scroll the view underneath the pointer;
+                    // doing so made a different cell appear selected. Only
+                    // keyboard navigation is allowed to reveal an offscreen row.
+                    if keyboardSelection, let id { proxy.scrollTo(id, anchor: .center) }
                     onDetailEntry(entries.first(where: { $0.id == id }))
                 }
             }
@@ -370,7 +430,12 @@ struct ClipboardHistoryPanelView: View {
                     )
                     .id(entry.id)
                     .onTapGesture { copy(entry) }
-                    .onHover { if $0 { selectedID = entry.id } }
+                    .onHover {
+                        if $0 {
+                            keyboardSelection = false
+                            selectedID = entry.id
+                        }
+                    }
                     .contextMenu { entryMenu(entry) }
                 }
             }
@@ -387,7 +452,12 @@ struct ClipboardHistoryPanelView: View {
                     .id(entry.id)
                     .contentShape(Rectangle())
                     .onTapGesture { copy(entry) }
-                    .onHover { if $0 { selectedID = entry.id } }
+                    .onHover {
+                        if $0 {
+                            keyboardSelection = false
+                            selectedID = entry.id
+                        }
+                    }
                     .contextMenu { entryMenu(entry) }
                 }
             }
@@ -396,6 +466,14 @@ struct ClipboardHistoryPanelView: View {
 
     @ViewBuilder
     private func entryMenu(_ entry: ClipboardEntry) -> some View {
+        if entry.kind == .image {
+            Button {
+                onAddToMemes(entry)
+            } label: {
+                Label("添加到表情包", systemImage: "photo.badge.plus")
+            }
+            Divider()
+        }
         Button(entry.isPinned ? "取消置顶" : "置顶") { store.togglePinned(id: entry.id) }
         Button("删除", role: .destructive) { delete(entry) }
     }
@@ -464,6 +542,7 @@ struct ClipboardHistoryPanelView: View {
         guard !entries.isEmpty else { return }
         let currentIndex = selectedID.flatMap { id in entries.firstIndex(where: { $0.id == id }) } ?? 0
         let nextIndex = min(max(currentIndex + delta, 0), entries.count - 1)
+        keyboardSelection = true
         selectedID = entries[nextIndex].id
     }
 }
@@ -504,7 +583,7 @@ private struct CodeEntryRow: View {
     private var lineCount: Int { ClipboardPanelLayout.previewLineCount(entry.text) }
 
     var body: some View {
-        HStack(alignment: .top, spacing: 6) {
+        HStack(alignment: .center, spacing: 6) {
             Text(CodeHighlighter.highlight(previewCode))
                 .font(.system(size: 11, design: .monospaced))
                 .lineLimit(ClipboardPanelLayout.codePreviewMaxLines)
@@ -518,8 +597,7 @@ private struct CodeEntryRow: View {
             Spacer(minLength: 0)
         }
         .padding(.horizontal, 10)
-        .padding(.vertical, ClipboardPanelLayout.codeRowPadding / 2)
-        .frame(height: ClipboardPanelLayout.codeRowHeight(lineCount: lineCount), alignment: .top)
+        .frame(height: ClipboardPanelLayout.codeRowHeight(lineCount: lineCount), alignment: .center)
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(
             RoundedRectangle(cornerRadius: 7, style: .continuous)
@@ -528,10 +606,7 @@ private struct CodeEntryRow: View {
     }
 
     private var previewCode: String {
-        let lines = (entry.text ?? "")
-            .trimmingCharacters(in: .whitespacesAndNewlines)
-            .components(separatedBy: .newlines)
-        return lines.prefix(ClipboardPanelLayout.codePreviewMaxLines).joined(separator: "\n")
+        ClipboardPanelLayout.codePreviewLines(entry.text).joined(separator: "\n")
     }
 }
 
@@ -546,10 +621,9 @@ private struct ImageEntryCell: View {
         ZStack {
             RoundedRectangle(cornerRadius: 8, style: .continuous)
                 .fill(.quinary)
-            if let imageURL, let image = NSImage(contentsOf: imageURL) {
-                Image(nsImage: image)
-                    .resizable()
-                    .scaledToFit()
+            if let imageURL {
+                AnimatedImageFileView(url: imageURL)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
                     .padding(3)
             } else {
                 Image(systemName: "photo")

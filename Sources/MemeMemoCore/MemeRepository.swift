@@ -59,9 +59,14 @@ public final class MemeRepository: @unchecked Sendable {
     }
 
     @discardableResult
-    public func saveImageData(_ data: Data, named id: UUID = UUID()) throws -> StoredImage {
+    public func saveImageData(
+        _ data: Data,
+        named id: UUID = UUID(),
+        fileExtension: String = "png"
+    ) throws -> StoredImage {
         try prepare()
-        let fileName = "\(id.uuidString.lowercased()).png"
+        let safeExtension = fileExtension.lowercased().trimmingCharacters(in: CharacterSet(charactersIn: "."))
+        let fileName = "\(id.uuidString.lowercased()).\(safeExtension.isEmpty ? "png" : safeExtension)"
         try data.write(to: imagesURL.appendingPathComponent(fileName), options: .atomic)
         return StoredImage(fileName: fileName, contentHash: SHA256.hash(data: data).hexString)
     }

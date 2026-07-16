@@ -10,11 +10,11 @@ public enum ClipboardPanelLayout {
     public static let segmentedHeight: CGFloat = 22
     public static let sectionSpacing: CGFloat = 8
 
-    public static let textRowHeight: CGFloat = 34
-    public static let listSpacing: CGFloat = 2
+    public static let textRowHeight: CGFloat = 30
+    public static let listSpacing: CGFloat = 1
 
-    public static let codeLineHeight: CGFloat = 15
-    public static let codeRowPadding: CGFloat = 12
+    public static let codeLineHeight: CGFloat = 14
+    public static let codeRowPadding: CGFloat = 8
     public static let codePreviewMaxLines = 3
 
     public static let imageColumns = 3
@@ -31,14 +31,19 @@ public enum ClipboardPanelLayout {
         return (content / CGFloat(imageColumns)).rounded(.down)
     }
 
-    /// Code snippets show at most `codePreviewMaxLines` lines, but never pad
-    /// short snippets with blank space.
-    public static func previewLineCount(_ text: String?) -> Int {
+    /// Returns only lines that contain content. This makes "at most three
+    /// lines" literal: a one-line snippet occupies one row, while blank
+    /// separator lines never reserve phantom height.
+    public static func codePreviewLines(_ text: String?) -> [String] {
         let lines = (text ?? "")
-            .trimmingCharacters(in: .whitespacesAndNewlines)
             .components(separatedBy: .newlines)
-            .count
-        return min(max(lines, 1), codePreviewMaxLines)
+            .filter { !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
+        let preview = Array(lines.prefix(codePreviewMaxLines))
+        return preview.isEmpty ? [""] : preview
+    }
+
+    public static func previewLineCount(_ text: String?) -> Int {
+        codePreviewLines(text).count
     }
 
     public static func codeRowHeight(lineCount: Int) -> CGFloat {

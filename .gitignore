@@ -5,3 +5,5 @@ Tests/MemeMemoCoreTests/MemeFilterTests.swift
 .DS_Store
 /Docs
 .DS_Store
+/.agents
+.DS_Store

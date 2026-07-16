@@ -110,4 +110,7 @@ final class StatusItemController: NSObject {
     @objc private func screenshotSmart() { services.captureScreenshot(requestedMode: .smartWindow) }
     @objc private func openSettings() { settingsWindow.show() }
     @objc private func quit() { NSApp.terminate(nil) }
+
+    func previewSettings() { settingsWindow.show() }
+    func previewMemes() { togglePopover() }
 }
