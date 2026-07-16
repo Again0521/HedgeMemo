@@ -80,6 +80,98 @@ public enum ClipboardEntryKind: String, Codable, Sendable {
     case image
 }
 
+public enum ClipboardContentCategory: String, Codable, CaseIterable, Sendable {
+    case all
+    case image
+    case text
+    case code
+
+    public var displayName: String {
+        switch self {
+        case .all: "全部"
+        case .image: "图片"
+        case .text: "文字"
+        case .code: "代码"
+        }
+    }
+
+    public var systemImage: String {
+        switch self {
+        case .all: "square.grid.2x2"
+        case .image: "photo"
+        case .text: "text.alignleft"
+        case .code: "chevron.left.forwardslash.chevron.right"
+        }
+    }
+}
+
+/// Heuristic classifier that separates pasted source code from ordinary prose.
+/// Scores independent signals so that no single one (a lone brace, a lone colon)
+/// is enough to call something code.
+public enum ClipboardCodeDetector {
+    private static let keywords = [
+        "func ", "function ", "class ", "def ", "return ", "import ", "#include", "#define",
+        "var ", "let ", "const ", "public ", "private ", "static ", "struct ", "enum ",
+        "interface ", "package ", "extends ", "implements ", "async ", "await ", "yield ",
+        "console.log", "print(", "printf(", "println(", "system.out",
+        "select ", "insert into", "update ", "delete from", "where ", "<?php", "#!/",
+    ]
+
+    private static let operators = ["=>", "->", "::", "&&", "||", "==", "!=", ">=", "<=", "+=", "??"]
+
+    public static func isCode(_ raw: String) -> Bool {
+        let text = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard text.count >= 6 else { return false }
+        guard !isLikelyLink(text) else { return false }
+        guard cjkRatio(text) <= 0.3 else { return false }
+        return score(text) >= 3
+    }
+
+    private static func score(_ text: String) -> Int {
+        let lowered = text.lowercased()
+        let lines = text.components(separatedBy: .newlines)
+        var score = 0
+
+        if keywords.contains(where: { lowered.contains($0) }) { score += 2 }
+        if operators.contains(where: { text.contains($0) }) { score += 1 }
+        if lines.contains(where: { line in
+            let trimmed = line.trimmingCharacters(in: .whitespaces)
+            return trimmed.hasSuffix(";") || trimmed.hasSuffix("{") || trimmed.hasSuffix("}") || trimmed.hasSuffix("):")
+        }) { score += 2 }
+        if text.contains("{") && text.contains("}") { score += 1 }
+        if text.contains("(") && text.contains(")") { score += 1 }
+        if lines.count > 1, lines.contains(where: { $0.hasPrefix("  ") || $0.hasPrefix("\t") }) { score += 1 }
+        if lines.contains(where: { line in
+            let trimmed = line.trimmingCharacters(in: .whitespaces)
+            return trimmed.hasPrefix("//") || trimmed.hasPrefix("/*") || trimmed.hasPrefix("* ") || trimmed.hasPrefix("#!")
+        }) { score += 1 }
+        if symbolRatio(text) > 0.08 { score += 1 }
+        return score
+    }
+
+    private static func isLikelyLink(_ text: String) -> Bool {
+        guard !text.contains(where: \.isNewline) else { return false }
+        let lowered = text.lowercased()
+        let prefixes = ["http://", "https://", "ftp://", "magnet:", "mailto:", "file://"]
+        return prefixes.contains(where: { lowered.hasPrefix($0) })
+    }
+
+    private static func cjkRatio(_ text: String) -> Double {
+        let letters = text.unicodeScalars.filter { CharacterSet.alphanumerics.contains($0) }
+        guard !letters.isEmpty else { return 0 }
+        let cjk = letters.filter { (0x4E00...0x9FFF).contains(Int($0.value)) }
+        return Double(cjk.count) / Double(letters.count)
+    }
+
+    private static func symbolRatio(_ text: String) -> Double {
+        let symbols = CharacterSet(charactersIn: "{}()[];<>=+*/%&|!$#@\\_")
+        let meaningful = text.unicodeScalars.filter { !CharacterSet.whitespacesAndNewlines.contains($0) }
+        guard !meaningful.isEmpty else { return 0 }
+        let hits = meaningful.filter { symbols.contains($0) }
+        return Double(hits.count) / Double(meaningful.count)
+    }
+}
+
 public enum ClipboardItemSize: String, Codable, CaseIterable, Sendable {
     case compact
     case regular
@@ -217,10 +309,21 @@ public struct ClipboardEntry: Codable, Hashable, Identifiable, Sendable {
         }
     }
 
+    public var contentCategory: ClipboardContentCategory {
+        switch kind {
+        case .image: .image
+        case .text: ClipboardCodeDetector.isCode(text ?? "") ? .code : .text
+        }
+    }
+
     public func matches(query: String) -> Bool {
         let normalized = query.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !normalized.isEmpty else { return true }
         return previewText.localizedCaseInsensitiveContains(normalized)
+    }
+
+    public func matches(category: ClipboardContentCategory) -> Bool {
+        category == .all || contentCategory == category
     }
 }
 
@@ -235,9 +338,13 @@ public struct ClipboardHistorySnapshot: Codable, Sendable {
 }
 
 public enum ClipboardHistoryPolicy {
-    public static func ordered(_ entries: [ClipboardEntry], query: String = "") -> [ClipboardEntry] {
+    public static func ordered(
+        _ entries: [ClipboardEntry],
+        query: String = "",
+        category: ClipboardContentCategory = .all
+    ) -> [ClipboardEntry] {
         entries
-            .filter { $0.matches(query: query) }
+            .filter { $0.matches(query: query) && $0.matches(category: category) }
             .sorted { lhs, rhs in
                 if lhs.isPinned != rhs.isPinned { return lhs.isPinned && !rhs.isPinned }
                 if lhs.isPinned {

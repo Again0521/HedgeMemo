@@ -47,8 +47,8 @@ public final class ClipboardHistoryStore: ObservableObject {
         timer = nil
     }
 
-    public func orderedEntries(query: String = "") -> [ClipboardEntry] {
-        ClipboardHistoryPolicy.ordered(entries, query: query)
+    public func orderedEntries(query: String = "", category: ClipboardContentCategory = .all) -> [ClipboardEntry] {
+        ClipboardHistoryPolicy.ordered(entries, query: query, category: category)
     }
 
     @discardableResult
