@@ -43,9 +43,11 @@ final class AppServices: ObservableObject {
         })
         clipboardStore.$settings
             .dropFirst()
-            .sink { [weak self, weak panelController, weak hotKey] settings in
+            .map { $0.hotKey ?? .defaultClipboard }
+            .removeDuplicates()
+            .sink { [weak self, weak panelController, weak hotKey] definition in
                 guard let self, let panelController else { return }
-                let status = hotKey?.registerClipboardHotKey(settings.hotKey ?? .defaultClipboard) {
+                let status = hotKey?.registerClipboardHotKey(definition) {
                     panelController.toggle()
                 } ?? OSStatus(eventHotKeyInvalidErr)
                 Task { @MainActor in self.updateHotKeyWarning(.clipboard, status: status) }
@@ -53,8 +55,10 @@ final class AppServices: ObservableObject {
             .store(in: &cancellables)
         screenshotSettingsStore.$settings
             .dropFirst()
-            .sink { [weak self, weak hotKey] settings in
-                let status = hotKey?.registerScreenshotHotKey(settings.hotKey ?? .defaultScreenshot) { [weak self] in
+            .map { $0.hotKey ?? .defaultScreenshot }
+            .removeDuplicates()
+            .sink { [weak self, weak hotKey] definition in
+                let status = hotKey?.registerScreenshotHotKey(definition) { [weak self] in
                     self?.captureScreenshot()
                 } ?? OSStatus(eventHotKeyInvalidErr)
                 Task { @MainActor in self?.updateHotKeyWarning(.screenshot, status: status) }

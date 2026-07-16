@@ -6,9 +6,15 @@ import Foundation
 @MainActor
 public final class ClipboardHistoryStore: ObservableObject {
     @Published public private(set) var entries: [ClipboardEntry] = []
+    // Mutating `settings` inside its own didSet re-enters the @Published setter;
+    // without this guard normalize() recurses until the stack overflows.
+    private var isNormalizingSettings = false
     @Published public var settings: ClipboardHistorySettings {
         didSet {
+            guard !isNormalizingSettings else { return }
+            isNormalizingSettings = true
             settings.normalize()
+            isNormalizingSettings = false
             trimToLimit()
             persist()
         }
@@ -47,7 +53,7 @@ public final class ClipboardHistoryStore: ObservableObject {
         timer = nil
     }
 
-    public func orderedEntries(query: String = "", category: ClipboardContentCategory = .all) -> [ClipboardEntry] {
+    public func orderedEntries(query: String = "", category: ClipboardContentCategory? = nil) -> [ClipboardEntry] {
         ClipboardHistoryPolicy.ordered(entries, query: query, category: category)
     }
 
@@ -132,8 +138,15 @@ public final class ClipboardHistoryStore: ObservableObject {
         }
         suppressedChangeCount = pasteboard.changeCount
         observedChangeCount = pasteboard.changeCount
+        markUsed(id: entry.id)
         if autoPaste { pasteIntoFocusedAppIfAllowed() }
         return true
+    }
+
+    private func markUsed(id: UUID) {
+        guard let index = entries.firstIndex(where: { $0.id == id }) else { return }
+        entries[index].lastUsedAt = .now
+        persist()
     }
 
     @discardableResult

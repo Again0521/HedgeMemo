@@ -20,7 +20,7 @@ final class ScreenshotService: NSObject {
     }
 
     private var selectionController: ManualScreenshotSelectionController?
-    private var smartWindowPreviewController: SmartWindowPreviewController?
+    private var windowPickerController: SmartWindowPickerController?
 
     func capture(mode: ScreenshotMode, completion: @escaping (Result<NSImage, Error>) -> Void) {
         guard Self.hasScreenCaptureAccess() else {
@@ -54,20 +54,24 @@ final class ScreenshotService: NSObject {
         controller.begin()
     }
 
+    /// Interactive pick: an overlay follows the mouse and highlights the window
+    /// underneath; clicking captures it, Esc cancels. This replaces the old
+    /// point-in-time detection, which failed whenever the capture was triggered
+    /// from the menu bar (the pointer was over the menu, never over a window).
     private func captureSmartWindow(completion: @escaping (Result<NSImage, Error>) -> Void) {
-        guard let window = Self.windowUnderPointer() else {
-            completion(.failure(ScreenshotError.noWindowAtPointer))
-            return
+        let picker = SmartWindowPickerController(
+            windowProvider: { Self.windowUnderPointer() },
+            toViewSpace: { Self.quartzToAppKit($0) }
+        ) { [weak self] window in
+            self?.windowPickerController = nil
+            guard let window else { return }
+            // Let the overlay disappear before capturing so it never shows in the shot.
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.08) {
+                self?.finishSmartWindowCapture(window: window, completion: completion)
+            }
         }
-        let previewRect = Self.quartzToAppKit(window.bounds).insetBy(dx: -3, dy: -3)
-        let preview = SmartWindowPreviewController(rect: previewRect)
-        smartWindowPreviewController = preview
-        preview.show()
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.22) { [weak self] in
-            preview.hide()
-            self?.smartWindowPreviewController = nil
-            self?.finishSmartWindowCapture(window: window, completion: completion)
-        }
+        windowPickerController = picker
+        picker.begin()
     }
 
     private func finishSmartWindowCapture(window: CapturableWindow, completion: @escaping (Result<NSImage, Error>) -> Void) {
@@ -167,50 +171,75 @@ private struct CapturableWindow {
 }
 
 @MainActor
-private final class SmartWindowPreviewController {
-    private let rect: CGRect
-    private var window: NSWindow?
+private final class SmartWindowPickerController {
+    private let windowProvider: () -> CapturableWindow?
+    private let toViewSpace: (CGRect) -> CGRect
+    private let onComplete: (CapturableWindow?) -> Void
+    private var overlay: NSWindow?
 
-    init(rect: CGRect) {
-        self.rect = rect
+    init(
+        windowProvider: @escaping () -> CapturableWindow?,
+        toViewSpace: @escaping (CGRect) -> CGRect,
+        onComplete: @escaping (CapturableWindow?) -> Void
+    ) {
+        self.windowProvider = windowProvider
+        self.toViewSpace = toViewSpace
+        self.onComplete = onComplete
     }
 
-    func show() {
-        let window = SmartWindowPreviewWindow(
-            contentRect: rect,
+    func begin() {
+        let frame = NSScreen.screens.reduce(CGRect.null) { partial, screen in
+            partial.union(screen.frame)
+        }
+        let overlay = ScreenshotOverlayWindow(
+            contentRect: frame,
             styleMask: [.borderless],
             backing: .buffered,
             defer: false
         )
-        window.contentView = SmartWindowPreviewView(frame: NSRect(origin: .zero, size: rect.size))
-        window.setFrame(rect, display: true)
-        window.orderFrontRegardless()
-        self.window = window
+        let view = SmartWindowPickerView(
+            frame: NSRect(origin: .zero, size: frame.size),
+            windowProvider: windowProvider,
+            highlightRect: { [toViewSpace] bounds in
+                let global = toViewSpace(bounds)
+                return CGRect(
+                    x: global.minX - frame.minX,
+                    y: global.minY - frame.minY,
+                    width: global.width,
+                    height: global.height
+                )
+            },
+            onComplete: { [weak self] window in self?.finish(window: window) }
+        )
+        overlay.contentView = view
+        overlay.setFrame(frame, display: true)
+        overlay.makeKeyAndOrderFront(nil)
+        NSApp.activate(ignoringOtherApps: true)
+        self.overlay = overlay
     }
 
-    func hide() {
-        window?.orderOut(nil)
-        window = nil
+    private func finish(window: CapturableWindow?) {
+        overlay?.orderOut(nil)
+        overlay = nil
+        onComplete(window)
     }
 }
 
-private final class SmartWindowPreviewWindow: NSWindow {
-    override var canBecomeKey: Bool { false }
-    override var canBecomeMain: Bool { false }
+private final class SmartWindowPickerView: NSView {
+    private let windowProvider: () -> CapturableWindow?
+    private let highlightRect: (CGRect) -> CGRect
+    private let onComplete: (CapturableWindow?) -> Void
+    private var target: CapturableWindow?
 
-    override init(contentRect: NSRect, styleMask style: NSWindow.StyleMask, backing backingStoreType: NSWindow.BackingStoreType, defer flag: Bool) {
-        super.init(contentRect: contentRect, styleMask: style, backing: backingStoreType, defer: flag)
-        backgroundColor = .clear
-        isOpaque = false
-        ignoresMouseEvents = true
-        level = .screenSaver
-        collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .transient]
-        hasShadow = false
-    }
-}
-
-private final class SmartWindowPreviewView: NSView {
-    override init(frame frameRect: NSRect) {
+    init(
+        frame frameRect: NSRect,
+        windowProvider: @escaping () -> CapturableWindow?,
+        highlightRect: @escaping (CGRect) -> CGRect,
+        onComplete: @escaping (CapturableWindow?) -> Void
+    ) {
+        self.windowProvider = windowProvider
+        self.highlightRect = highlightRect
+        self.onComplete = onComplete
         super.init(frame: frameRect)
         wantsLayer = true
         layer?.backgroundColor = NSColor.clear.cgColor
@@ -220,17 +249,63 @@ private final class SmartWindowPreviewView: NSView {
         fatalError("init(coder:) has not been implemented")
     }
 
-    override func draw(_ dirtyRect: NSRect) {
-        let outer = bounds.insetBy(dx: 3, dy: 3)
-        let glow = NSBezierPath(roundedRect: outer, xRadius: 8, yRadius: 8)
-        NSColor.controlAccentColor.withAlphaComponent(0.22).setFill()
-        glow.lineWidth = 8
-        glow.stroke()
+    override var acceptsFirstResponder: Bool { true }
 
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        window?.makeFirstResponder(self)
+        window?.acceptsMouseMovedEvents = true
+        refreshTarget()
+    }
+
+    override func updateTrackingAreas() {
+        super.updateTrackingAreas()
+        trackingAreas.forEach(removeTrackingArea)
+        addTrackingArea(NSTrackingArea(
+            rect: bounds,
+            options: [.activeAlways, .mouseMoved, .inVisibleRect],
+            owner: self
+        ))
+    }
+
+    override func mouseMoved(with event: NSEvent) {
+        refreshTarget()
+    }
+
+    override func mouseDown(with event: NSEvent) {
+        onComplete(target)
+    }
+
+    override func keyDown(with event: NSEvent) {
+        if event.keyCode == 53 {
+            onComplete(nil)
+        } else {
+            super.keyDown(with: event)
+        }
+    }
+
+    private func refreshTarget() {
+        target = windowProvider()
+        needsDisplay = true
+    }
+
+    override func draw(_ dirtyRect: NSRect) {
+        let dimmingPath = NSBezierPath(rect: bounds)
+        let selection = target.map { highlightRect($0.bounds) }
+        if let selection {
+            dimmingPath.append(NSBezierPath(rect: selection))
+        }
+        dimmingPath.windingRule = .evenOdd
+        NSColor.black.withAlphaComponent(0.22).setFill()
+        dimmingPath.fill()
+
+        guard let selection else { return }
+        let border = NSBezierPath(roundedRect: selection.insetBy(dx: 1.5, dy: 1.5), xRadius: 8, yRadius: 8)
         NSColor.controlAccentColor.setStroke()
-        let border = NSBezierPath(roundedRect: outer, xRadius: 7, yRadius: 7)
         border.lineWidth = 3
         border.stroke()
+        NSColor.controlAccentColor.withAlphaComponent(0.10).setFill()
+        NSBezierPath(roundedRect: selection, xRadius: 8, yRadius: 8).fill()
     }
 }
 

@@ -26,38 +26,33 @@ final class SettingsWindowController: NSObject {
             panel.makeKeyAndOrderFront(nil)
             return
         }
+        // A plain titled window keeps the system's rounded corners and shadow;
+        // translucency comes from the SwiftUI vibrancy background inside.
         let panel = NSPanel(
-            contentRect: NSRect(x: 0, y: 0, width: 400, height: 520),
+            contentRect: NSRect(x: 0, y: 0, width: 380, height: 540),
             styleMask: [.titled, .closable, .fullSizeContentView],
             backing: .buffered,
             defer: false
         )
-        panel.title = "设置"
+        panel.title = "MemeMemo 设置"
         panel.titleVisibility = .hidden
         panel.titlebarAppearsTransparent = true
+        panel.isOpaque = false
+        panel.backgroundColor = .clear
         panel.isReleasedWhenClosed = false
         panel.isMovableByWindowBackground = true
         panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
-        panel.applyTranslucentChrome(cornerRadius: 12)
 
         let content = SettingsPanelView(
             clipboardStore: clipboardStore,
             screenshotSettingsStore: screenshotSettingsStore,
-            hotKeyWarnings: hotKeyWarnings(),
-            onClose: { [weak self] in self?.hide() }
+            hotKeyWarnings: hotKeyWarnings()
         )
-        let hosting = NSHostingView(rootView: content)
-        hosting.autoresizingMask = [.width, .height]
-        panel.contentView?.addSubview(hosting)
-        hosting.frame = panel.contentView?.bounds ?? .zero
+        panel.contentViewController = NSHostingController(rootView: content)
         self.panel = panel
         NSApp.activate(ignoringOtherApps: true)
         panel.center()
         panel.makeKeyAndOrderFront(nil)
-    }
-
-    private func hide() {
-        panel?.orderOut(nil)
     }
 }
 
@@ -65,24 +60,14 @@ struct SettingsPanelView: View {
     @ObservedObject var clipboardStore: ClipboardHistoryStore
     @ObservedObject var screenshotSettingsStore: ScreenshotSettingsStore
     let hotKeyWarnings: [String]
-    let onClose: () -> Void
     @State private var accessibilityTrusted = AXIsProcessTrusted()
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 16) {
-            HStack {
-                Text("设置").font(.headline)
-                Spacer()
-                Button(action: onClose) {
-                    Image(systemName: "xmark")
-                }
-                .buttonStyle(.borderless)
-                .help("关闭")
-            }
-            ScrollView {
-                VStack(alignment: .leading, spacing: 16) {
-                    clipboardSection
-                    screenshotSection
+        Form {
+            clipboardSection
+            screenshotSection
+            if hasHotKeyConflict || !hotKeyWarnings.isEmpty {
+                Section {
                     if hasHotKeyConflict {
                         Label("剪贴板和截图快捷键不能相同", systemImage: "exclamationmark.triangle")
                             .font(.caption)
@@ -96,57 +81,52 @@ struct SettingsPanelView: View {
                 }
             }
         }
-        .padding(20)
-        .frame(width: 400, height: 520)
+        .formStyle(.grouped)
+        .scrollContentBackground(.hidden)
+        .frame(width: 380, height: 540)
         .background(VisualEffectBackground())
         .onAppear { refreshAccessibilityTrust() }
     }
 
     private var clipboardSection: some View {
-        GroupBox("剪贴板历史") {
-            VStack(alignment: .leading, spacing: 12) {
-                Stepper(value: maxEntriesBinding, in: 10...1_000, step: 10) {
-                    Text("最多保存 \(clipboardStore.settings.maxEntries) 条")
-                }
-                Toggle("保存图片", isOn: savesImagesBinding)
-                Toggle("复制后自动粘贴", isOn: autoPasteBinding)
-                Picker("条目大小", selection: itemSizeBinding) {
-                    ForEach(ClipboardItemSize.allCases, id: \.self) { size in
-                        Text(size.displayName).tag(size)
-                    }
-                }
-                .pickerStyle(.segmented)
-                HotKeyRecorderRow(title: "剪贴板快捷键", hotKey: clipboardHotKeyBinding)
-                if clipboardStore.settings.autoPaste {
-                    PermissionStatusRow(
-                        isTrusted: accessibilityTrusted,
-                        onRefresh: refreshAccessibilityTrust,
-                        onRequest: requestAccessibilityTrust
-                    )
-                }
-                Button(role: .destructive) {
-                    clipboardStore.clearHistory()
-                } label: {
-                    Label("清空剪贴板历史", systemImage: "trash")
+        Section("剪贴板历史") {
+            Stepper(value: maxEntriesBinding, in: 10...1_000, step: 10) {
+                Text("最多保存 \(clipboardStore.settings.maxEntries) 条")
+            }
+            Toggle("保存图片", isOn: savesImagesBinding)
+            Toggle("复制后自动粘贴", isOn: autoPasteBinding)
+            Picker("条目大小", selection: itemSizeBinding) {
+                ForEach(ClipboardItemSize.allCases, id: \.self) { size in
+                    Text(size.displayName).tag(size)
                 }
             }
-            .padding(.vertical, 4)
+            .pickerStyle(.segmented)
+            HotKeyRecorderRow(title: "剪贴板快捷键", hotKey: clipboardHotKeyBinding)
+            if clipboardStore.settings.autoPaste {
+                PermissionStatusRow(
+                    isTrusted: accessibilityTrusted,
+                    onRefresh: refreshAccessibilityTrust,
+                    onRequest: requestAccessibilityTrust
+                )
+            }
+            Button(role: .destructive) {
+                clipboardStore.clearHistory()
+            } label: {
+                Label("清空剪贴板历史", systemImage: "trash")
+            }
         }
     }
 
     private var screenshotSection: some View {
-        GroupBox("截图") {
-            VStack(alignment: .leading, spacing: 12) {
-                Picker("默认模式", selection: screenshotModeBinding) {
-                    ForEach(ScreenshotMode.allCases, id: \.self) { mode in
-                        Text(mode.displayName).tag(mode)
-                    }
+        Section("截图") {
+            Picker("默认模式", selection: screenshotModeBinding) {
+                ForEach(ScreenshotMode.allCases, id: \.self) { mode in
+                    Text(mode.displayName).tag(mode)
                 }
-                HotKeyRecorderRow(title: "截图快捷键", hotKey: screenshotHotKeyBinding)
-                Toggle("记住上次模式", isOn: remembersScreenshotModeBinding)
-                Toggle("截图后打开编辑", isOn: opensEditorAfterCaptureBinding)
             }
-            .padding(.vertical, 4)
+            HotKeyRecorderRow(title: "截图快捷键", hotKey: screenshotHotKeyBinding)
+            Toggle("记住上次模式", isOn: remembersScreenshotModeBinding)
+            Toggle("截图后打开编辑", isOn: opensEditorAfterCaptureBinding)
         }
     }
 

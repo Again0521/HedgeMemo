@@ -36,9 +36,10 @@ final class ScreenshotEditorPanelController {
         panel.title = "截图编辑"
         panel.titleVisibility = .hidden
         panel.titlebarAppearsTransparent = true
+        panel.isOpaque = false
+        panel.backgroundColor = .clear
         panel.isReleasedWhenClosed = false
         panel.collectionBehavior = [.fullScreenAuxiliary, .managed]
-        panel.applyTranslucentChrome(cornerRadius: 12)
         return panel
     }
 
@@ -62,7 +63,6 @@ private struct ScreenshotEditorPanelView: View {
     var body: some View {
         VStack(spacing: 0) {
             toolbar
-                .background(VisualEffectBackground(material: .titlebar))
             Divider()
             ScreenshotEditorCanvas(
                 image: image,
@@ -72,6 +72,7 @@ private struct ScreenshotEditorPanelView: View {
             .background(Color.black.opacity(0.08))
         }
         .frame(minWidth: 520, minHeight: 420)
+        .background(VisualEffectBackground())
     }
 
     private var toolbar: some View {

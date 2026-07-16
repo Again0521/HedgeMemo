@@ -3,9 +3,15 @@ import Foundation
 
 @MainActor
 public final class ScreenshotSettingsStore: ObservableObject {
+    // Mutating `settings` inside its own didSet re-enters the @Published setter;
+    // without this guard normalize() recurses until the stack overflows.
+    private var isNormalizingSettings = false
     @Published public var settings: ScreenshotSettings {
         didSet {
+            guard !isNormalizingSettings else { return }
+            isNormalizingSettings = true
             settings.normalize()
+            isNormalizingSettings = false
             persist()
         }
     }

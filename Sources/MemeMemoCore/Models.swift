@@ -81,14 +81,12 @@ public enum ClipboardEntryKind: String, Codable, Sendable {
 }
 
 public enum ClipboardContentCategory: String, Codable, CaseIterable, Sendable {
-    case all
     case image
     case text
     case code
 
     public var displayName: String {
         switch self {
-        case .all: "全部"
         case .image: "图片"
         case .text: "文字"
         case .code: "代码"
@@ -97,7 +95,6 @@ public enum ClipboardContentCategory: String, Codable, CaseIterable, Sendable {
 
     public var systemImage: String {
         switch self {
-        case .all: "square.grid.2x2"
         case .image: "photo"
         case .text: "text.alignleft"
         case .code: "chevron.left.forwardslash.chevron.right"
@@ -210,7 +207,9 @@ public struct HotKeyDefinition: Codable, Equatable, Hashable, Sendable {
         self.shift = shift
     }
 
-    public static let defaultClipboard = HotKeyDefinition(keyCode: 49, key: "Space", option: true)
+    public static let defaultClipboard = HotKeyDefinition(keyCode: 9, key: "V", command: true, shift: true)
+    /// The pre-⇧⌘V default; persisted settings still carrying it are migrated forward.
+    public static let legacyClipboard = HotKeyDefinition(keyCode: 49, key: "Space", option: true)
     public static let defaultScreenshot = HotKeyDefinition(keyCode: 23, key: "5", control: true, shift: true)
 
     public var isUsable: Bool {
@@ -245,24 +244,34 @@ public struct ClipboardHistorySettings: Codable, Equatable, Sendable {
     public var itemSize: ClipboardItemSize
     public var autoPaste: Bool
     public var hotKey: HotKeyDefinition?
+    // Optional so snapshots written before this field existed still decode.
+    public var lastCategory: ClipboardContentCategory?
 
     public init(
         maxEntries: Int = 100,
         savesImages: Bool = true,
         itemSize: ClipboardItemSize = .regular,
         autoPaste: Bool = false,
-        hotKey: HotKeyDefinition? = .defaultClipboard
+        hotKey: HotKeyDefinition? = .defaultClipboard,
+        lastCategory: ClipboardContentCategory? = .text
     ) {
         self.maxEntries = max(10, min(maxEntries, 1_000))
         self.savesImages = savesImages
         self.itemSize = itemSize
         self.autoPaste = autoPaste
         self.hotKey = hotKey
+        self.lastCategory = lastCategory
+    }
+
+    public var activeCategory: ClipboardContentCategory {
+        get { lastCategory ?? .text }
+        set { lastCategory = newValue }
     }
 
     public mutating func normalize() {
         maxEntries = max(10, min(maxEntries, 1_000))
-        if hotKey == nil { hotKey = .defaultClipboard }
+        if hotKey == nil || hotKey == .legacyClipboard { hotKey = .defaultClipboard }
+        if lastCategory == nil { lastCategory = .text }
     }
 }
 
@@ -274,6 +283,7 @@ public struct ClipboardEntry: Codable, Hashable, Identifiable, Sendable {
     public var contentHash: String
     public var createdAt: Date
     public var updatedAt: Date
+    public var lastUsedAt: Date?
     public var isPinned: Bool
     public var pinnedOrder: Int?
 
@@ -285,6 +295,7 @@ public struct ClipboardEntry: Codable, Hashable, Identifiable, Sendable {
         contentHash: String,
         createdAt: Date = .now,
         updatedAt: Date = .now,
+        lastUsedAt: Date? = nil,
         isPinned: Bool = false,
         pinnedOrder: Int? = nil
     ) {
@@ -295,6 +306,7 @@ public struct ClipboardEntry: Codable, Hashable, Identifiable, Sendable {
         self.contentHash = contentHash
         self.createdAt = createdAt
         self.updatedAt = updatedAt
+        self.lastUsedAt = lastUsedAt
         self.isPinned = isPinned
         self.pinnedOrder = pinnedOrder
     }
@@ -322,8 +334,9 @@ public struct ClipboardEntry: Codable, Hashable, Identifiable, Sendable {
         return previewText.localizedCaseInsensitiveContains(normalized)
     }
 
-    public func matches(category: ClipboardContentCategory) -> Bool {
-        category == .all || contentCategory == category
+    public func matches(category: ClipboardContentCategory?) -> Bool {
+        guard let category else { return true }
+        return contentCategory == category
     }
 }
 
@@ -341,7 +354,7 @@ public enum ClipboardHistoryPolicy {
     public static func ordered(
         _ entries: [ClipboardEntry],
         query: String = "",
-        category: ClipboardContentCategory = .all
+        category: ClipboardContentCategory? = nil
     ) -> [ClipboardEntry] {
         entries
             .filter { $0.matches(query: query) && $0.matches(category: category) }
