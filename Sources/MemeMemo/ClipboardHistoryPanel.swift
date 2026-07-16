@@ -45,6 +45,7 @@ final class ClipboardHistoryPanelController: NSObject {
         panel.hidesOnDeactivate = true
         panel.level = .floating
         panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .transient]
+        panel.applyTranslucentChrome(cornerRadius: 14)
         return panel
     }
 
@@ -67,13 +68,14 @@ struct ClipboardHistoryPanelView: View {
 
     @State private var query = ""
     @State private var selectedID: UUID?
+    @State private var category: ClipboardContentCategory = .all
 
-    private var entries: [ClipboardEntry] { store.orderedEntries(query: query) }
+    private var entries: [ClipboardEntry] { store.orderedEntries(query: query, category: category) }
 
     var body: some View {
         VStack(spacing: 10) {
             header
-            Divider()
+            categoryBar
             ScrollViewReader { proxy in
                 ScrollView {
                     LazyVStack(spacing: 6) {
@@ -107,15 +109,18 @@ struct ClipboardHistoryPanelView: View {
         }
         .padding(12)
         .frame(width: 430, height: 520)
+        .background(VisualEffectBackground())
         .background(KeyCaptureView { event in handleKey(event) }.frame(width: 0, height: 0))
         .onAppear { ensureSelection() }
         .onChange(of: query) { _, _ in ensureSelection() }
+        .onChange(of: category) { _, _ in ensureSelection() }
         .onChange(of: store.entries) { _, _ in ensureSelection() }
     }
 
     private var header: some View {
         HStack(spacing: 8) {
             Image(systemName: "doc.on.clipboard")
+                .foregroundStyle(.secondary)
             TextField("搜索剪贴板", text: $query)
                 .textFieldStyle(.roundedBorder)
             Button(action: onDone) {
@@ -124,6 +129,16 @@ struct ClipboardHistoryPanelView: View {
             .buttonStyle(.borderless)
             .help("关闭")
         }
+    }
+
+    private var categoryBar: some View {
+        Picker("类型", selection: $category) {
+            ForEach(ClipboardContentCategory.allCases, id: \.self) { item in
+                Label(item.displayName, systemImage: item.systemImage).tag(item)
+            }
+        }
+        .pickerStyle(.segmented)
+        .labelsHidden()
     }
 
     private func ensureSelection() {
@@ -192,20 +207,28 @@ private struct ClipboardEntryRow: View {
 
     private var rowHeight: CGFloat {
         switch itemSize {
-        case .compact: 46
-        case .regular: 58
-        case .large: 74
+        case .compact: 56
+        case .regular: 64
+        case .large: 78
+        }
+    }
+
+    private var title: String {
+        switch entry.contentCategory {
+        case .image: "图片"
+        case .code: "代码"
+        case .text, .all: entry.previewText
         }
     }
 
     var body: some View {
-        HStack(spacing: 10) {
+        HStack(spacing: 12) {
             thumbnail
             VStack(alignment: .leading, spacing: 3) {
                 HStack(spacing: 5) {
-                    Text(entry.previewText)
-                        .font(.system(size: 13, weight: entry.isPinned ? .semibold : .regular))
-                        .lineLimit(itemSize == .large ? 3 : 2)
+                    Text(title)
+                        .font(.system(size: 15, weight: .semibold))
+                        .lineLimit(1)
                     if entry.isPinned {
                         Image(systemName: "pin.fill")
                             .font(.caption2)
@@ -213,32 +236,34 @@ private struct ClipboardEntryRow: View {
                     }
                 }
                 Text(entry.createdAt, style: .relative)
-                    .font(.caption2)
+                    .font(.system(size: 12))
                     .foregroundStyle(.secondary)
             }
             Spacer()
         }
-        .padding(.horizontal, 8)
+        .padding(.horizontal, 10)
         .frame(height: rowHeight)
-        .background(isSelected ? Color.accentColor.opacity(0.15) : Color.secondary.opacity(0.08))
-        .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+        .frame(maxWidth: .infinity)
+        .background(isSelected ? Color.accentColor.opacity(0.18) : Color.secondary.opacity(0.10))
+        .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
     }
 
     @ViewBuilder
     private var thumbnail: some View {
-        let side = rowHeight - 16
+        let side = rowHeight - 20
         if entry.kind == .image, let imageURL, let image = NSImage(contentsOf: imageURL) {
             Image(nsImage: image)
                 .resizable()
                 .scaledToFill()
                 .frame(width: side, height: side)
-                .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
+                .clipShape(RoundedRectangle(cornerRadius: 7, style: .continuous))
         } else {
-            Image(systemName: entry.kind == .text ? "text.alignleft" : "photo")
+            Image(systemName: entry.contentCategory.systemImage)
                 .font(.system(size: 18))
+                .foregroundStyle(.secondary)
                 .frame(width: side, height: side)
-                .background(Color.secondary.opacity(0.12))
-                .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
+                .background(Color.secondary.opacity(0.14))
+                .clipShape(RoundedRectangle(cornerRadius: 7, style: .continuous))
         }
     }
 }

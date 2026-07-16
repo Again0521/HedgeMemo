@@ -74,4 +74,28 @@ expect(HotKeyPolicy.conflicts(customClipboardHotKey, customClipboardHotKey), "id
 expect(!HotKeyPolicy.conflicts(customClipboardHotKey, .defaultScreenshot), "different hotkeys must not conflict")
 expect(HotKeyPolicy.label(nil) == "未设置", "missing hotkey must have a stable label")
 
-print("MemeMemo whitebox checks passed (22 assertions).")
+let swiftSnippet = """
+func greet(name: String) -> String {
+    return "hi " + name
+}
+"""
+expect(ClipboardCodeDetector.isCode(swiftSnippet), "multi-line source with keywords and braces must be detected as code")
+expect(ClipboardCodeDetector.isCode("const total = items.reduce((a, b) => a + b, 0);"), "single-line JS with operators and terminator must be code")
+expect(!ClipboardCodeDetector.isCode("今天下午三点开会，请准时参加。"), "ordinary Chinese prose must not be code")
+expect(!ClipboardCodeDetector.isCode("Let's meet at 3pm."), "ordinary English prose must not be code")
+expect(!ClipboardCodeDetector.isCode("https://github.com/Again0521/memememo"), "a bare link must not be code")
+
+let codeEntry = ClipboardEntry(kind: .text, text: swiftSnippet, contentHash: "code")
+let proseEntry = ClipboardEntry(kind: .text, text: "周五下班一起吃饭", contentHash: "prose")
+let imageEntry = ClipboardEntry(kind: .image, text: nil, imageFileName: "x.png", contentHash: "img")
+expect(codeEntry.contentCategory == .code, "code entry must classify as code")
+expect(proseEntry.contentCategory == .text, "prose entry must classify as text")
+expect(imageEntry.contentCategory == .image, "image entry must classify as image")
+
+let mixed = [codeEntry, proseEntry, imageEntry]
+expect(ClipboardHistoryPolicy.ordered(mixed, category: .code).map(\.id) == [codeEntry.id], "category filter must isolate code")
+expect(ClipboardHistoryPolicy.ordered(mixed, category: .text).map(\.id) == [proseEntry.id], "category filter must isolate text")
+expect(ClipboardHistoryPolicy.ordered(mixed, category: .image).map(\.id) == [imageEntry.id], "category filter must isolate images")
+expect(Set(ClipboardHistoryPolicy.ordered(mixed, category: .all).map(\.id)) == Set(mixed.map(\.id)), "the all category must keep every entry")
+
+print("MemeMemo whitebox checks passed (33 assertions).")

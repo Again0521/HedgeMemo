@@ -38,6 +38,7 @@ final class ScreenshotEditorPanelController {
         panel.titlebarAppearsTransparent = true
         panel.isReleasedWhenClosed = false
         panel.collectionBehavior = [.fullScreenAuxiliary, .managed]
+        panel.applyTranslucentChrome(cornerRadius: 12)
         return panel
     }
 
@@ -61,6 +62,7 @@ private struct ScreenshotEditorPanelView: View {
     var body: some View {
         VStack(spacing: 0) {
             toolbar
+                .background(VisualEffectBackground(material: .titlebar))
             Divider()
             ScreenshotEditorCanvas(
                 image: image,

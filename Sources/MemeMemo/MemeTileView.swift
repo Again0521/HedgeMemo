@@ -6,6 +6,7 @@ import UniformTypeIdentifiers
 struct MemeTileView: View {
     let meme: MemeItem
     let imageURL: URL
+    let side: CGFloat
     let isManaging: Bool
     let isSelected: Bool
     let categories: [MemeCategory]
@@ -17,44 +18,55 @@ struct MemeTileView: View {
     @Binding var draggedID: UUID?
     let onReorder: (UUID, UUID) -> Void
 
+    private var hasNote: Bool {
+        !meme.note.isEmpty && meme.note != "未命名"
+    }
+
     var body: some View {
         Button(action: { if isManaging { onSelection(meme.id) } else { onCopy() } }) {
-            VStack(alignment: .leading, spacing: 5) {
+            ZStack {
+                RoundedRectangle(cornerRadius: 8, style: .continuous)
+                    .fill(.quaternary)
                 Group {
                     if let image = NSImage(contentsOf: imageURL) {
                         Image(nsImage: image)
                             .resizable()
-                            .scaledToFill()
+                            .scaledToFit()
                     } else {
                         Image(systemName: "photo")
                             .resizable()
                             .scaledToFit()
-                            .padding(18)
+                            .padding(20)
                             .foregroundStyle(.secondary)
                     }
                 }
-                .frame(height: 82)
-                .frame(maxWidth: .infinity)
-                .clipped()
-                .background(.quaternary)
-                .clipShape(RoundedRectangle(cornerRadius: 5))
-                Text(meme.note)
-                    .lineLimit(1)
-                    .font(.caption)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .foregroundStyle(.primary)
+                .padding(4)
             }
-            .padding(5)
+            .frame(width: side, height: side)
+            .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+            .overlay(alignment: .bottom) {
+                if hasNote {
+                    Text(meme.note)
+                        .font(.system(size: 10))
+                        .lineLimit(1)
+                        .foregroundStyle(.white)
+                        .padding(.horizontal, 5)
+                        .frame(maxWidth: .infinity)
+                        .padding(.vertical, 3)
+                        .background(.black.opacity(0.45))
+                }
+            }
+            .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
             .overlay(alignment: .topTrailing) {
                 if isManaging {
                     Image(systemName: isSelected ? "checkmark.circle.fill" : "circle")
                         .symbolRenderingMode(.hierarchical)
                         .foregroundStyle(isSelected ? Color.accentColor : Color.secondary)
-                        .padding(5)
+                        .padding(4)
                 }
             }
             .overlay {
-                RoundedRectangle(cornerRadius: 6)
+                RoundedRectangle(cornerRadius: 8, style: .continuous)
                     .stroke(isSelected ? Color.accentColor : Color.clear, lineWidth: 2)
             }
         }
@@ -69,7 +81,7 @@ struct MemeTileView: View {
             draggedID: $draggedID,
             onReorder: onReorder
         ))
-        .help("按住并拖动可排序")
+        .help(hasNote ? meme.note : "按住并拖动可排序")
     }
 
     @ViewBuilder
