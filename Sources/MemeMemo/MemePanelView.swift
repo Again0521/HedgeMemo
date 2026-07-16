@@ -89,7 +89,6 @@ struct MemePanelView: View {
         }
         .padding(12)
         .frame(width: 420)
-        .background(Color(nsColor: .windowBackgroundColor))
         .sheet(item: $editingMeme) { meme in
             NoteEditorSheet(meme: meme) { store.updateNote(id: meme.id, note: $0) }
         }

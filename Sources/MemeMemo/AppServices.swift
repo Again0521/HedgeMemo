@@ -31,7 +31,9 @@ final class AppServices: ObservableObject {
     func start() {
         guard !didStart else { return }
         didStart = true
-        clipboardStore.startMonitoring()
+        if !CommandLine.arguments.contains(where: { $0.hasPrefix("--preview-") }) {
+            clipboardStore.startMonitoring()
+        }
 
         let panelController = ClipboardHistoryPanelController(store: clipboardStore, memeStore: memeStore)
         let hotKey = GlobalHotKeyController()

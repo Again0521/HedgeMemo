@@ -8,7 +8,13 @@ final class ClipboardHistoryPanelController: NSObject {
     private let store: ClipboardHistoryStore
     private let memeStore: MemeStore
     private var panel: NSPanel?
-    private var hoverCard: NSPanel?
+    private var mainSurface: NSView?
+    private var detailSurface: NSView?
+    private var mainContent: AnyView?
+    private var detailContent: AnyView?
+    private var expandedMainFrame: NSRect?
+    private var modernDetailSize: NSSize?
+    private var modernDetailOnLeft = true
     private var resignKeyObserver: NSObjectProtocol?
 
     init(store: ClipboardHistoryStore, memeStore: MemeStore) {
@@ -41,18 +47,15 @@ final class ClipboardHistoryPanelController: NSObject {
                 self?.resize(contentHeight: contentHeight, animate: true)
             },
             onDetailEntry: { [weak self] entry in
-                self?.updateHoverCard(entry: entry)
+                DispatchQueue.main.async { self?.updateHoverCard(entry: entry) }
             },
             onAddToMemes: { [weak self] entry in
                 self?.addToMemes(entry)
             }
         )
-        if let container = panel.contentView {
-            container.subviews.forEach { $0.removeFromSuperview() }
-            let hosting = NSHostingView(rootView: content)
-            hosting.autoresizingMask = [.width, .height]
-            hosting.frame = container.bounds
-            container.addSubview(hosting)
+        mainContent = AnyView(content)
+        if #unavailable(macOS 26.0), let mainSurface {
+            SystemSurface.replaceContent(content, in: mainSurface)
         }
         let key = store.settings.activeCategoryKey
         resize(
@@ -77,12 +80,26 @@ final class ClipboardHistoryPanelController: NSObject {
         )
         panel.isOpaque = false
         panel.backgroundColor = .clear
-        panel.hasShadow = true
+        // NSGlassEffectView supplies its own rounded elevation. A window-level
+        // shadow follows the rectangular transparent host and exposes square
+        // corners (and, when the detail card is visible, the transparent gap).
+        panel.hasShadow = false
         panel.isMovableByWindowBackground = true
         panel.isReleasedWhenClosed = false
         panel.level = .floating
         panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .transient]
-        panel.contentView = Self.makeNeutralContainer(cornerRadius: 16)
+        if #available(macOS 26.0, *) {
+            panel.contentView = NSView()
+        } else {
+            let root = NSView()
+            root.autoresizingMask = [.width, .height]
+            let mainSurface = SystemSurface.container(material: .popover, cornerRadius: 16)
+            mainSurface.autoresizingMask = []
+            mainSurface.frame = root.bounds
+            root.addSubview(mainSurface)
+            panel.contentView = root
+            self.mainSurface = mainSurface
+        }
 
         resignKeyObserver = NotificationCenter.default.addObserver(
             forName: NSWindow.didResignKeyNotification,
@@ -94,17 +111,6 @@ final class ClipboardHistoryPanelController: NSObject {
         return panel
     }
 
-    static func makeNeutralContainer(cornerRadius: CGFloat) -> NSView {
-        let view = NSView()
-        view.wantsLayer = true
-        view.layer?.backgroundColor = NSColor.windowBackgroundColor.cgColor
-        view.layer?.cornerRadius = cornerRadius
-        view.layer?.cornerCurve = .continuous
-        view.layer?.masksToBounds = true
-        view.autoresizingMask = [.width, .height]
-        return view
-    }
-
     /// The screen the panel lives on, falling back to wherever the mouse is.
     private var activeScreen: NSScreen? {
         if let screen = panel?.screen { return screen }
@@ -114,6 +120,8 @@ final class ClipboardHistoryPanelController: NSObject {
 
     private func resize(contentHeight: CGFloat, animate: Bool) {
         guard let panel else { return }
+        if detailSurface != nil { hideHoverCard() }
+        if expandedMainFrame != nil { hideHoverCard() }
         let visibleFrame = activeScreen?.visibleFrame ?? NSRect(x: 0, y: 0, width: 900, height: 700)
         let height = ClipboardPanelLayout.panelHeight(
             contentHeight: contentHeight,
@@ -125,6 +133,12 @@ final class ClipboardHistoryPanelController: NSObject {
         frame.origin.y = max(top - height, visibleFrame.minY + 12)
         frame.size.width = ClipboardPanelLayout.panelWidth
         panel.setFrame(frame, display: true, animate: animate && panel.isVisible)
+        if #available(macOS 26.0, *) {
+            renderModernSurface(mainSize: frame.size)
+            return
+        }
+        guard let mainSurface else { return }
+        mainSurface.frame = panel.contentView?.bounds ?? NSRect(origin: .zero, size: frame.size)
     }
 
     private func position(_ panel: NSPanel) {
@@ -146,60 +160,141 @@ final class ClipboardHistoryPanelController: NSObject {
             hideHoverCard()
             return
         }
-        let card = hoverCard ?? makeHoverCard()
-        hoverCard = card
-
         let visibleFrame = activeScreen?.visibleFrame ?? panel.frame
         let imageURL = store.imageURL(for: entry)
         let size = ClipboardDetailLayout.cardSize(for: entry, imageURL: imageURL, availableHeight: visibleFrame.height)
         let content = ClipboardDetailCard(entry: entry, imageURL: imageURL, cardHeight: size.height)
-        let hosting = NSHostingView(rootView: content)
-        if let container = card.contentView {
-            container.subviews.forEach { $0.removeFromSuperview() }
-            hosting.frame = NSRect(origin: .zero, size: size)
-            hosting.autoresizingMask = [.width, .height]
-            container.addSubview(hosting)
+        if #available(macOS 26.0, *) {
+            updateModernDetail(content: AnyView(content), size: size, visibleFrame: visibleFrame)
+            return
         }
-
-        let mouse = NSEvent.mouseLocation
-        var x = panel.frame.minX - size.width - 10
-        if x < visibleFrame.minX + 8 {
-            x = panel.frame.maxX + 10
-        }
-        let y = min(
-            max(mouse.y - size.height / 2, visibleFrame.minY + 8),
-            visibleFrame.maxY - size.height - 8
+        guard let mainSurface else { return }
+        let mainFrame = panel.convertToScreen(mainSurface.frame)
+        let gap: CGFloat = 10
+        let placeLeft = mainFrame.minX - size.width - gap >= visibleFrame.minX + 8
+        let combinedHeight = max(mainFrame.height, size.height)
+        let combinedWidth = mainFrame.width + gap + size.width
+        let combinedFrame = NSRect(
+            x: placeLeft ? mainFrame.minX - size.width - gap : mainFrame.minX,
+            y: mainFrame.maxY - combinedHeight,
+            width: combinedWidth,
+            height: combinedHeight
         )
-        card.setFrame(NSRect(x: x, y: y, width: size.width, height: size.height), display: true)
-        if card.parent == nil {
-            panel.addChildWindow(card, ordered: .above)
-        }
-        card.orderFront(nil)
-    }
+        panel.setFrame(combinedFrame, display: true)
 
-    private func makeHoverCard() -> NSPanel {
-        let card = NSPanel(
-            contentRect: NSRect(x: 0, y: 0, width: 260, height: 160),
-            styleMask: [.borderless, .nonactivatingPanel],
-            backing: .buffered,
-            defer: false
+        let mainX = placeLeft ? size.width + gap : 0
+        mainSurface.frame = NSRect(
+            x: mainX,
+            y: combinedHeight - mainFrame.height,
+            width: mainFrame.width,
+            height: mainFrame.height
         )
-        card.isOpaque = false
-        card.backgroundColor = .clear
-        card.hasShadow = true
-        card.ignoresMouseEvents = true
-        card.isReleasedWhenClosed = false
-        card.level = .floating
-        card.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .transient]
-        card.contentView = Self.makeNeutralContainer(cornerRadius: 12)
-        return card
+
+        let detail = detailSurface ?? SystemSurface.container(material: .popover, cornerRadius: 12)
+        detail.autoresizingMask = []
+        detail.frame = NSRect(
+            x: placeLeft ? 0 : mainFrame.width + gap,
+            y: combinedHeight - size.height,
+            width: size.width,
+            height: size.height
+        )
+        if detail.superview == nil { panel.contentView?.addSubview(detail) }
+        SystemSurface.replaceContent(content, in: detail)
+        detailSurface = detail
     }
 
     private func hideHoverCard() {
-        guard let hoverCard else { return }
-        hoverCard.parent?.removeChildWindow(hoverCard)
-        hoverCard.orderOut(nil)
+        if #available(macOS 26.0, *), let panel, let mainFrame = expandedMainFrame {
+            detailContent = nil
+            modernDetailSize = nil
+            expandedMainFrame = nil
+            panel.setFrame(mainFrame, display: true)
+            renderModernSurface(mainSize: mainFrame.size)
+            return
+        }
+        guard let panel, let mainSurface, let detailSurface else { return }
+        let mainFrame = panel.convertToScreen(mainSurface.frame)
+        detailSurface.removeFromSuperview()
+        self.detailSurface = nil
+        panel.setFrame(mainFrame, display: true)
+        mainSurface.frame = panel.contentView?.bounds ?? NSRect(origin: .zero, size: mainFrame.size)
     }
+
+    @available(macOS 26.0, *)
+    private func updateModernDetail(content: AnyView, size: NSSize, visibleFrame: NSRect) {
+        guard let panel else { return }
+        let mainFrame = expandedMainFrame ?? panel.frame
+        let gap: CGFloat = 10
+        let placeLeft = mainFrame.minX - size.width - gap >= visibleFrame.minX + 8
+        let combinedSize = NSSize(
+            width: mainFrame.width + gap + size.width,
+            height: max(mainFrame.height, size.height)
+        )
+        let combinedFrame = NSRect(
+            x: placeLeft ? mainFrame.minX - size.width - gap : mainFrame.minX,
+            y: mainFrame.maxY - combinedSize.height,
+            width: combinedSize.width,
+            height: combinedSize.height
+        )
+        expandedMainFrame = mainFrame
+        detailContent = content
+        modernDetailSize = size
+        modernDetailOnLeft = placeLeft
+        panel.setFrame(combinedFrame, display: true)
+        renderModernSurface(mainSize: mainFrame.size)
+    }
+
+    @available(macOS 26.0, *)
+    private func renderModernSurface(mainSize: NSSize) {
+        guard let panel, let mainContent else { return }
+        let root = ClipboardLiquidGlassLayout(
+            main: mainContent,
+            detail: detailContent,
+            mainSize: mainSize,
+            detailSize: modernDetailSize,
+            detailOnLeft: modernDetailOnLeft
+        )
+        let hosting = NSHostingView(rootView: root)
+        hosting.frame = panel.contentView?.bounds ?? NSRect(origin: .zero, size: panel.frame.size)
+        hosting.autoresizingMask = [.width, .height]
+        panel.contentView = hosting
+    }
+}
+
+@available(macOS 26.0, *)
+private struct ClipboardLiquidGlassLayout: View {
+    let main: AnyView
+    let detail: AnyView?
+    let mainSize: NSSize
+    let detailSize: NSSize?
+    let detailOnLeft: Bool
+
+    var body: some View {
+        GlassEffectContainer(spacing: 10) {
+            HStack(alignment: .top, spacing: 10) {
+                if detailOnLeft { detailSurface }
+                main
+                    .frame(width: mainSize.width, height: mainSize.height, alignment: .top)
+                    .clipShape(mainShape)
+                    .glassEffect(.regular, in: mainShape)
+                if !detailOnLeft { detailSurface }
+            }
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+    }
+
+    @ViewBuilder
+    private var detailSurface: some View {
+        if let detail, let detailSize {
+            detail
+                .frame(width: detailSize.width, height: detailSize.height, alignment: .top)
+                .clipShape(detailShape)
+                .glassEffect(.regular, in: detailShape)
+        }
+    }
+
+    private var mainShape: RoundedRectangle { RoundedRectangle(cornerRadius: 16, style: .continuous) }
+    private var detailShape: RoundedRectangle { RoundedRectangle(cornerRadius: 12, style: .continuous) }
 }
 
 /// Borderless panels refuse key status by default; the search field needs it.
@@ -601,7 +696,7 @@ private struct CodeEntryRow: View {
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(
             RoundedRectangle(cornerRadius: 7, style: .continuous)
-                .fill(isSelected ? AnyShapeStyle(Color.accentColor) : AnyShapeStyle(.quinary))
+                .fill(isSelected ? AnyShapeStyle(Color.accentColor) : AnyShapeStyle(.clear))
         )
     }
 

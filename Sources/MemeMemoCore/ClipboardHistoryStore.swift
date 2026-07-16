@@ -190,7 +190,7 @@ public final class ClipboardHistoryStore: ObservableObject {
         // app is a good approximation of where the content came from.
         let sourceApp = NSWorkspace.shared.frontmostApplication?.localizedName
         if let text = pasteboard.string(forType: .string), addText(text, sourceApp: sourceApp) { return }
-        if settings.savesImages, let image = ImageAssetData.read(from: pasteboard) {
+        if settings.savesImages, let image = ImageAssetData.read(from: pasteboard, allowFileURLs: false) {
             _ = addImageData(image, sourceApp: sourceApp)
         }
     }

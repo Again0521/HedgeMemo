@@ -14,10 +14,7 @@ final class ScreenshotEditorPanelController {
             onCancel: { [weak self] in self?.finish(image: nil) },
             onSave: { [weak self] editedImage in self?.finish(image: editedImage) }
         )
-        let hosting = NSHostingView(rootView: content)
-        hosting.frame = panel.contentView?.bounds ?? .zero
-        hosting.autoresizingMask = [.width, .height]
-        panel.contentView = hosting
+        SystemSurface.install(content, in: panel, material: .popover, cornerRadius: 18)
         self.panel = panel
         NSApp.activate(ignoringOtherApps: true)
         panel.makeKeyAndOrderFront(nil)
@@ -45,7 +42,7 @@ final class ScreenshotEditorPanelController {
         )
         panel.isOpaque = false
         panel.backgroundColor = .clear
-        panel.hasShadow = true
+        panel.hasShadow = false
         panel.isMovableByWindowBackground = true
         panel.isReleasedWhenClosed = false
         panel.level = .floating
@@ -91,7 +88,6 @@ private struct ScreenshotEditorPanelView: View {
                 allowsEditing: showsMarkupTools
             )
         }
-        .background(Color(nsColor: .windowBackgroundColor))
         .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
         .overlay {
             RoundedRectangle(cornerRadius: 18, style: .continuous)
@@ -184,7 +180,6 @@ private struct ScreenshotEditorPanelView: View {
         }
         .padding(.horizontal, 22)
         .frame(height: 58)
-        .background(Color(nsColor: .windowBackgroundColor))
     }
 
     private func share() {
@@ -227,7 +222,7 @@ private struct ScreenshotCanvasViewport: View {
                     .shadow(color: .black.opacity(0.18), radius: 10, y: 4)
             }
         }
-        .background(Color(nsColor: .controlBackgroundColor))
+        .background(Color.primary.opacity(0.025))
     }
 
     private var editor: some View {

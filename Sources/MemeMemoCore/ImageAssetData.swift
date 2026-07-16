@@ -20,21 +20,24 @@ public struct ImageAssetData: Sendable {
     }
 
     @MainActor
-    public static func read(from pasteboard: NSPasteboard) -> ImageAssetData? {
-        let options: [NSPasteboard.ReadingOptionKey: Any] = [.urlReadingFileURLsOnly: true]
-        if let url = (pasteboard.readObjects(forClasses: [NSURL.self], options: options) as? [URL])?.first,
-           let payload = ImageAssetData(fileURL: url) {
-            return payload
-        }
-
+    public static func read(from pasteboard: NSPasteboard, allowFileURLs: Bool = true) -> ImageAssetData? {
         for candidate in pasteboardCandidates {
             if let data = pasteboard.data(forType: candidate.type), NSImage(data: data) != nil {
                 return ImageAssetData(data: data, fileExtension: candidate.extension)
             }
         }
 
-        guard let image = NSImage(pasteboard: pasteboard), let data = image.pngData else { return nil }
-        return ImageAssetData(data: data, fileExtension: "png")
+        if let image = NSImage(pasteboard: pasteboard), let data = image.pngData {
+            return ImageAssetData(data: data, fileExtension: "png")
+        }
+
+        if allowFileURLs {
+            let options: [NSPasteboard.ReadingOptionKey: Any] = [.urlReadingFileURLsOnly: true]
+            if let url = (pasteboard.readObjects(forClasses: [NSURL.self], options: options) as? [URL])?.first {
+                return ImageAssetData(fileURL: url)
+            }
+        }
+        return nil
     }
 
     @MainActor

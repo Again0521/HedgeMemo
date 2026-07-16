@@ -38,11 +38,8 @@ final class SettingsWindowController: NSObject {
         panel.titleVisibility = .hidden
         panel.titlebarAppearsTransparent = true
         panel.titlebarSeparatorStyle = .none
-        // Settings is a standard macOS utility window. A native window
-        // background stays visually uniform instead of sampling different
-        // bands of the desktop wallpaper through the content.
-        panel.isOpaque = true
-        panel.backgroundColor = .windowBackgroundColor
+        panel.isOpaque = false
+        panel.backgroundColor = .clear
         panel.isReleasedWhenClosed = false
         panel.isMovableByWindowBackground = true
         panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
@@ -52,9 +49,7 @@ final class SettingsWindowController: NSObject {
             screenshotSettingsStore: screenshotSettingsStore,
             hotKeyWarnings: hotKeyWarnings()
         )
-        let hosting = NSHostingView(rootView: content)
-        hosting.autoresizingMask = [.width, .height]
-        panel.contentView = hosting
+        SystemSurface.install(content, in: panel, material: .popover)
         self.panel = panel
         NSApp.activate(ignoringOtherApps: true)
         panel.center()
