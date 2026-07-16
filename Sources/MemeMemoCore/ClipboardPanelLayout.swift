@@ -11,8 +11,11 @@ public enum ClipboardPanelLayout {
     public static let sectionSpacing: CGFloat = 8
 
     public static let textRowHeight: CGFloat = 34
-    public static let codeRowHeight: CGFloat = 62
     public static let listSpacing: CGFloat = 2
+
+    public static let codeLineHeight: CGFloat = 15
+    public static let codeRowPadding: CGFloat = 12
+    public static let codePreviewMaxLines = 3
 
     public static let imageColumns = 3
     public static let imageCellSpacing: CGFloat = 8
@@ -28,27 +31,40 @@ public enum ClipboardPanelLayout {
         return (content / CGFloat(imageColumns)).rounded(.down)
     }
 
-    public static func contentHeight(entryCount: Int, category: ClipboardContentCategory) -> CGFloat {
-        guard entryCount > 0 else { return emptyStateHeight }
-        switch category {
-        case .text:
-            return CGFloat(entryCount) * textRowHeight + CGFloat(entryCount - 1) * listSpacing
-        case .code:
-            return CGFloat(entryCount) * codeRowHeight + CGFloat(entryCount - 1) * listSpacing
-        case .image:
-            let rows = Int(ceil(Double(entryCount) / Double(imageColumns)))
+    /// Code snippets show at most `codePreviewMaxLines` lines, but never pad
+    /// short snippets with blank space.
+    public static func previewLineCount(_ text: String?) -> Int {
+        let lines = (text ?? "")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .components(separatedBy: .newlines)
+            .count
+        return min(max(lines, 1), codePreviewMaxLines)
+    }
+
+    public static func codeRowHeight(lineCount: Int) -> CGFloat {
+        let lines = min(max(lineCount, 1), codePreviewMaxLines)
+        return codeRowPadding + CGFloat(lines) * codeLineHeight
+    }
+
+    /// Height of the scrolling content for the given entries in a category.
+    public static func contentHeight(for entries: [ClipboardEntry], key: ClipboardCategoryKey?) -> CGFloat {
+        guard !entries.isEmpty else { return emptyStateHeight }
+        switch key {
+        case .builtin(.image):
+            let rows = Int(ceil(Double(entries.count) / Double(imageColumns)))
             return CGFloat(rows) * imageCellSide + CGFloat(rows - 1) * imageCellSpacing
+        case .builtin(.code):
+            let rows = entries.map { codeRowHeight(lineCount: previewLineCount($0.text)) }
+            return rows.reduce(0, +) + CGFloat(entries.count - 1) * listSpacing
+        default:
+            return CGFloat(entries.count) * textRowHeight + CGFloat(entries.count - 1) * listSpacing
         }
     }
 
-    /// Total panel height for the given content, clamped to the available screen height
-    /// (callers pass the screen's visible frame height, which excludes menu bar and Dock).
-    public static func panelHeight(
-        entryCount: Int,
-        category: ClipboardContentCategory,
-        availableHeight: CGFloat
-    ) -> CGFloat {
-        let desired = chromeHeight + contentHeight(entryCount: entryCount, category: category)
+    /// Total panel height, clamped to the available screen height (callers pass
+    /// the screen's visible frame height, which excludes menu bar and Dock).
+    public static func panelHeight(contentHeight: CGFloat, availableHeight: CGFloat) -> CGFloat {
+        let desired = chromeHeight + contentHeight
         let minimum = chromeHeight + emptyStateHeight
         let maximum = max(minimum, availableHeight)
         return min(max(desired, minimum), maximum)

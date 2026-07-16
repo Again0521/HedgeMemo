@@ -80,25 +80,91 @@ public enum ClipboardEntryKind: String, Codable, Sendable {
     case image
 }
 
+/// Built-in clipboard categories. The case order is the default display order.
 public enum ClipboardContentCategory: String, Codable, CaseIterable, Sendable {
-    case image
     case text
     case code
+    case link
+    case image
 
     public var displayName: String {
         switch self {
-        case .image: "图片"
-        case .text: "文字"
+        case .text: "文本"
         case .code: "代码"
+        case .link: "链接"
+        case .image: "图片"
         }
     }
 
     public var systemImage: String {
         switch self {
-        case .image: "photo"
         case .text: "text.alignleft"
         case .code: "chevron.left.forwardslash.chevron.right"
+        case .link: "link"
+        case .image: "photo"
         }
+    }
+}
+
+/// User-defined category that filters text entries with a regular expression.
+public struct CustomClipboardCategory: Codable, Equatable, Hashable, Identifiable, Sendable {
+    public let id: UUID
+    public var name: String
+    public var pattern: String
+
+    public init(id: UUID = UUID(), name: String, pattern: String) {
+        self.id = id
+        self.name = name
+        self.pattern = pattern
+    }
+
+    public var isPatternValid: Bool {
+        !pattern.isEmpty && (try? NSRegularExpression(pattern: pattern)) != nil
+    }
+
+    public func matches(_ text: String) -> Bool {
+        guard let regex = try? NSRegularExpression(pattern: pattern) else { return false }
+        let range = NSRange(text.startIndex..., in: text)
+        return regex.firstMatch(in: text, range: range) != nil
+    }
+}
+
+/// Identifies either a built-in category or a custom regex category,
+/// with a stable string form for persistence ("text", "custom:<uuid>", ...).
+public enum ClipboardCategoryKey: Hashable, Sendable {
+    case builtin(ClipboardContentCategory)
+    case custom(UUID)
+
+    private static let customPrefix = "custom:"
+
+    public var storageValue: String {
+        switch self {
+        case .builtin(let category): category.rawValue
+        case .custom(let id): Self.customPrefix + id.uuidString
+        }
+    }
+
+    public init?(storageValue: String) {
+        if let category = ClipboardContentCategory(rawValue: storageValue) {
+            self = .builtin(category)
+        } else if storageValue.hasPrefix(Self.customPrefix),
+                  let id = UUID(uuidString: String(storageValue.dropFirst(Self.customPrefix.count))) {
+            self = .custom(id)
+        } else {
+            return nil
+        }
+    }
+}
+
+public enum ClipboardLinkDetector {
+    public static func isLink(_ raw: String) -> Bool {
+        let text = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !text.isEmpty, !text.contains(where: \.isNewline), !text.contains(" ") else { return false }
+        let lowered = text.lowercased()
+        let prefixes = ["http://", "https://", "ftp://", "magnet:", "mailto:", "file://", "www."]
+        if prefixes.contains(where: { lowered.hasPrefix($0) }) { return true }
+        // Bare domains like example.com/path
+        return lowered.range(of: "^[a-z0-9][a-z0-9.-]*\\.[a-z]{2,}(/\\S*)?$", options: .regularExpression) != nil
     }
 }
 
@@ -147,10 +213,7 @@ public enum ClipboardCodeDetector {
     }
 
     private static func isLikelyLink(_ text: String) -> Bool {
-        guard !text.contains(where: \.isNewline) else { return false }
-        let lowered = text.lowercased()
-        let prefixes = ["http://", "https://", "ftp://", "magnet:", "mailto:", "file://"]
-        return prefixes.contains(where: { lowered.hasPrefix($0) })
+        ClipboardLinkDetector.isLink(text)
     }
 
     private static func cjkRatio(_ text: String) -> Double {
@@ -244,8 +307,11 @@ public struct ClipboardHistorySettings: Codable, Equatable, Sendable {
     public var itemSize: ClipboardItemSize
     public var autoPaste: Bool
     public var hotKey: HotKeyDefinition?
-    // Optional so snapshots written before this field existed still decode.
-    public var lastCategory: ClipboardContentCategory?
+    // Optional so snapshots written before these fields existed still decode.
+    // `lastCategory` and `categoryOrder` hold ClipboardCategoryKey storage values.
+    public var lastCategory: String?
+    public var categoryOrder: [String]?
+    public var customCategories: [CustomClipboardCategory]?
 
     public init(
         maxEntries: Int = 100,
@@ -253,7 +319,9 @@ public struct ClipboardHistorySettings: Codable, Equatable, Sendable {
         itemSize: ClipboardItemSize = .regular,
         autoPaste: Bool = false,
         hotKey: HotKeyDefinition? = .defaultClipboard,
-        lastCategory: ClipboardContentCategory? = .text
+        lastCategory: String? = ClipboardCategoryKey.builtin(.text).storageValue,
+        categoryOrder: [String]? = nil,
+        customCategories: [CustomClipboardCategory]? = nil
     ) {
         self.maxEntries = max(10, min(maxEntries, 1_000))
         self.savesImages = savesImages
@@ -261,17 +329,55 @@ public struct ClipboardHistorySettings: Codable, Equatable, Sendable {
         self.autoPaste = autoPaste
         self.hotKey = hotKey
         self.lastCategory = lastCategory
+        self.categoryOrder = categoryOrder
+        self.customCategories = customCategories
+        normalize()
     }
 
-    public var activeCategory: ClipboardContentCategory {
-        get { lastCategory ?? .text }
-        set { lastCategory = newValue }
+    public var activeCategoryKey: ClipboardCategoryKey {
+        get { lastCategory.flatMap(ClipboardCategoryKey.init(storageValue:)) ?? .builtin(.text) }
+        set { lastCategory = newValue.storageValue }
+    }
+
+    public var orderedCategoryKeys: [ClipboardCategoryKey] {
+        (categoryOrder ?? []).compactMap(ClipboardCategoryKey.init(storageValue:))
+    }
+
+    public func customCategory(id: UUID) -> CustomClipboardCategory? {
+        customCategories?.first(where: { $0.id == id })
     }
 
     public mutating func normalize() {
         maxEntries = max(10, min(maxEntries, 1_000))
         if hotKey == nil || hotKey == .legacyClipboard { hotKey = .defaultClipboard }
-        if lastCategory == nil { lastCategory = .text }
+        let customs = customCategories ?? []
+        customCategories = customs
+
+        func isValid(_ key: ClipboardCategoryKey) -> Bool {
+            switch key {
+            case .builtin: true
+            case .custom(let id): customs.contains(where: { $0.id == id })
+            }
+        }
+
+        // Keep the user's order, drop stale keys, then append anything missing:
+        // built-ins in their default order first, then remaining custom categories.
+        var seen = Set<String>()
+        var order = (categoryOrder ?? [])
+            .compactMap(ClipboardCategoryKey.init(storageValue:))
+            .filter { isValid($0) && seen.insert($0.storageValue).inserted }
+        for category in ClipboardContentCategory.allCases where seen.insert(category.rawValue).inserted {
+            order.append(.builtin(category))
+        }
+        for custom in customs {
+            let key = ClipboardCategoryKey.custom(custom.id)
+            if seen.insert(key.storageValue).inserted { order.append(key) }
+        }
+        categoryOrder = order.map(\.storageValue)
+
+        if !isValid(activeCategoryKey) || lastCategory == nil {
+            activeCategoryKey = .builtin(.text)
+        }
     }
 }
 
@@ -284,6 +390,8 @@ public struct ClipboardEntry: Codable, Hashable, Identifiable, Sendable {
     public var createdAt: Date
     public var updatedAt: Date
     public var lastUsedAt: Date?
+    public var useCount: Int?
+    public var sourceApp: String?
     public var isPinned: Bool
     public var pinnedOrder: Int?
 
@@ -296,6 +404,8 @@ public struct ClipboardEntry: Codable, Hashable, Identifiable, Sendable {
         createdAt: Date = .now,
         updatedAt: Date = .now,
         lastUsedAt: Date? = nil,
+        useCount: Int? = nil,
+        sourceApp: String? = nil,
         isPinned: Bool = false,
         pinnedOrder: Int? = nil
     ) {
@@ -307,6 +417,8 @@ public struct ClipboardEntry: Codable, Hashable, Identifiable, Sendable {
         self.createdAt = createdAt
         self.updatedAt = updatedAt
         self.lastUsedAt = lastUsedAt
+        self.useCount = useCount
+        self.sourceApp = sourceApp
         self.isPinned = isPinned
         self.pinnedOrder = pinnedOrder
     }
@@ -323,8 +435,13 @@ public struct ClipboardEntry: Codable, Hashable, Identifiable, Sendable {
 
     public var contentCategory: ClipboardContentCategory {
         switch kind {
-        case .image: .image
-        case .text: ClipboardCodeDetector.isCode(text ?? "") ? .code : .text
+        case .image:
+            return .image
+        case .text:
+            let content = text ?? ""
+            if ClipboardLinkDetector.isLink(content) { return .link }
+            if ClipboardCodeDetector.isCode(content) { return .code }
+            return .text
         }
     }
 
@@ -334,9 +451,17 @@ public struct ClipboardEntry: Codable, Hashable, Identifiable, Sendable {
         return previewText.localizedCaseInsensitiveContains(normalized)
     }
 
-    public func matches(category: ClipboardContentCategory?) -> Bool {
-        guard let category else { return true }
-        return contentCategory == category
+    public func matches(key: ClipboardCategoryKey?, customCategories: [CustomClipboardCategory] = []) -> Bool {
+        switch key {
+        case nil:
+            return true
+        case .builtin(let category):
+            return contentCategory == category
+        case .custom(let id):
+            guard kind == .text, let text,
+                  let custom = customCategories.first(where: { $0.id == id }) else { return false }
+            return custom.matches(text)
+        }
     }
 }
 
@@ -354,10 +479,11 @@ public enum ClipboardHistoryPolicy {
     public static func ordered(
         _ entries: [ClipboardEntry],
         query: String = "",
-        category: ClipboardContentCategory? = nil
+        key: ClipboardCategoryKey? = nil,
+        customCategories: [CustomClipboardCategory] = []
     ) -> [ClipboardEntry] {
         entries
-            .filter { $0.matches(query: query) && $0.matches(category: category) }
+            .filter { $0.matches(query: query) && $0.matches(key: key, customCategories: customCategories) }
             .sorted { lhs, rhs in
                 if lhs.isPinned != rhs.isPinned { return lhs.isPinned && !rhs.isPinned }
                 if lhs.isPinned {

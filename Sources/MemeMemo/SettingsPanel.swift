@@ -26,17 +26,15 @@ final class SettingsWindowController: NSObject {
             panel.makeKeyAndOrderFront(nil)
             return
         }
-        // A plain titled window keeps the system's rounded corners and shadow;
-        // translucency comes from the SwiftUI vibrancy background inside.
+        // A plain titled window keeps the system's rounded corners, shadow and
+        // a real title bar; translucency comes from the vibrancy background inside.
         let panel = NSPanel(
-            contentRect: NSRect(x: 0, y: 0, width: 380, height: 540),
-            styleMask: [.titled, .closable, .fullSizeContentView],
+            contentRect: NSRect(x: 0, y: 0, width: 420, height: 660),
+            styleMask: [.titled, .closable],
             backing: .buffered,
             defer: false
         )
-        panel.title = "MemeMemo 设置"
-        panel.titleVisibility = .hidden
-        panel.titlebarAppearsTransparent = true
+        panel.title = "设置"
         panel.isOpaque = false
         panel.backgroundColor = .clear
         panel.isReleasedWhenClosed = false
@@ -61,10 +59,12 @@ struct SettingsPanelView: View {
     @ObservedObject var screenshotSettingsStore: ScreenshotSettingsStore
     let hotKeyWarnings: [String]
     @State private var accessibilityTrusted = AXIsProcessTrusted()
+    @State private var customDraft: CustomCategoryDraft?
 
     var body: some View {
         Form {
             clipboardSection
+            categorySection
             screenshotSection
             if hasHotKeyConflict || !hotKeyWarnings.isEmpty {
                 Section {
@@ -83,15 +83,18 @@ struct SettingsPanelView: View {
         }
         .formStyle(.grouped)
         .scrollContentBackground(.hidden)
-        .frame(width: 380, height: 540)
+        .frame(width: 420, height: 660)
         .background(VisualEffectBackground())
         .onAppear { refreshAccessibilityTrust() }
+        .sheet(item: $customDraft) { draft in
+            CustomCategoryEditorSheet(draft: draft) { saveCustomCategory($0) }
+        }
     }
 
     private var clipboardSection: some View {
         Section("剪贴板历史") {
-            Stepper(value: maxEntriesBinding, in: 10...1_000, step: 10) {
-                Text("最多保存 \(clipboardStore.settings.maxEntries) 条")
+            LabeledContent("最多保存") {
+                Stepper("\(clipboardStore.settings.maxEntries) 条", value: maxEntriesBinding, in: 10...1_000, step: 10)
             }
             Toggle("保存图片", isOn: savesImagesBinding)
             Toggle("复制后自动粘贴", isOn: autoPasteBinding)
@@ -109,6 +112,91 @@ struct SettingsPanelView: View {
                 Label("清空剪贴板历史", systemImage: "trash")
             }
         }
+    }
+
+    private var categorySection: some View {
+        Section {
+            let keys = clipboardStore.settings.orderedCategoryKeys
+            ForEach(Array(keys.enumerated()), id: \.element.storageValue) { index, key in
+                categoryRow(key: key, index: index, total: keys.count)
+            }
+            Button {
+                customDraft = CustomCategoryDraft()
+            } label: {
+                Label("添加自定义分类…", systemImage: "plus")
+            }
+        } header: {
+            Text("剪贴板分类")
+        } footer: {
+            Text("自定义分类按正则表达式筛选文本条目。")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+        }
+    }
+
+    @ViewBuilder
+    private func categoryRow(key: ClipboardCategoryKey, index: Int, total: Int) -> some View {
+        HStack(spacing: 6) {
+            switch key {
+            case .builtin(let category):
+                Label(category.displayName, systemImage: category.systemImage)
+            case .custom(let id):
+                let custom = clipboardStore.settings.customCategory(id: id)
+                Label(custom?.name ?? "自定义", systemImage: "tag")
+                if let pattern = custom?.pattern {
+                    Text(pattern)
+                        .font(.system(size: 10, design: .monospaced))
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                }
+            }
+            Spacer()
+            if case .custom(let id) = key {
+                HoverIconButton(systemImage: "pencil", help: "编辑") {
+                    if let custom = clipboardStore.settings.customCategory(id: id) {
+                        customDraft = CustomCategoryDraft(category: custom)
+                    }
+                }
+                HoverIconButton(systemImage: "trash", tint: .red, help: "删除") {
+                    deleteCustomCategory(id: id)
+                }
+            }
+            HoverIconButton(systemImage: "chevron.up", help: "上移") {
+                moveCategory(key, delta: -1)
+            }
+            .disabled(index == 0)
+            .opacity(index == 0 ? 0.3 : 1)
+            HoverIconButton(systemImage: "chevron.down", help: "下移") {
+                moveCategory(key, delta: 1)
+            }
+            .disabled(index == total - 1)
+            .opacity(index == total - 1 ? 0.3 : 1)
+        }
+    }
+
+    private func moveCategory(_ key: ClipboardCategoryKey, delta: Int) {
+        var order = clipboardStore.settings.orderedCategoryKeys
+        guard let index = order.firstIndex(of: key) else { return }
+        let target = index + delta
+        guard order.indices.contains(target) else { return }
+        order.swapAt(index, target)
+        clipboardStore.settings.categoryOrder = order.map(\.storageValue)
+    }
+
+    private func saveCustomCategory(_ category: CustomClipboardCategory) {
+        var customs = clipboardStore.settings.customCategories ?? []
+        if let index = customs.firstIndex(where: { $0.id == category.id }) {
+            customs[index] = category
+        } else {
+            customs.append(category)
+        }
+        clipboardStore.settings.customCategories = customs
+    }
+
+    private func deleteCustomCategory(id: UUID) {
+        var customs = clipboardStore.settings.customCategories ?? []
+        customs.removeAll { $0.id == id }
+        clipboardStore.settings.customCategories = customs
     }
 
     private var screenshotSection: some View {
@@ -191,6 +279,69 @@ struct SettingsPanelView: View {
     private func requestAccessibilityTrust() {
         let options = ["AXTrustedCheckOptionPrompt": true] as CFDictionary
         accessibilityTrusted = AXIsProcessTrustedWithOptions(options)
+    }
+}
+
+struct CustomCategoryDraft: Identifiable {
+    let id: UUID
+    var name: String
+    var pattern: String
+    let isNew: Bool
+
+    init() {
+        id = UUID()
+        name = ""
+        pattern = ""
+        isNew = true
+    }
+
+    init(category: CustomClipboardCategory) {
+        id = category.id
+        name = category.name
+        pattern = category.pattern
+        isNew = false
+    }
+}
+
+private struct CustomCategoryEditorSheet: View {
+    @State var draft: CustomCategoryDraft
+    let onSave: (CustomClipboardCategory) -> Void
+    @Environment(\.dismiss) private var dismiss
+
+    private var category: CustomClipboardCategory {
+        CustomClipboardCategory(id: draft.id, name: draft.name, pattern: draft.pattern)
+    }
+
+    private var isPatternValid: Bool { category.isPatternValid }
+    private var canSave: Bool {
+        !draft.name.trimmingCharacters(in: .whitespaces).isEmpty && isPatternValid
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            Text(draft.isNew ? "新建自定义分类" : "编辑自定义分类")
+                .font(.headline)
+            TextField("分类名称", text: $draft.name)
+            TextField("正则表达式，例如 ^\\d{6}$", text: $draft.pattern)
+                .font(.system(size: 12, design: .monospaced))
+            if !draft.pattern.isEmpty && !isPatternValid {
+                Label("正则表达式无效", systemImage: "exclamationmark.triangle")
+                    .font(.caption)
+                    .foregroundStyle(.orange)
+            }
+            HStack {
+                Spacer()
+                Button("取消") { dismiss() }
+                Button("保存") {
+                    onSave(category)
+                    dismiss()
+                }
+                .keyboardShortcut(.defaultAction)
+                .disabled(!canSave)
+            }
+        }
+        .padding(20)
+        .frame(width: 320)
     }
 }
 

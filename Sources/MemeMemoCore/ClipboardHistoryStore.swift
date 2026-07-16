@@ -53,24 +53,29 @@ public final class ClipboardHistoryStore: ObservableObject {
         timer = nil
     }
 
-    public func orderedEntries(query: String = "", category: ClipboardContentCategory? = nil) -> [ClipboardEntry] {
-        ClipboardHistoryPolicy.ordered(entries, query: query, category: category)
+    public func orderedEntries(query: String = "", key: ClipboardCategoryKey? = nil) -> [ClipboardEntry] {
+        ClipboardHistoryPolicy.ordered(
+            entries,
+            query: query,
+            key: key,
+            customCategories: settings.customCategories ?? []
+        )
     }
 
     @discardableResult
-    public func addText(_ text: String) -> Bool {
+    public func addText(_ text: String, sourceApp: String? = nil) -> Bool {
         let cleaned = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !cleaned.isEmpty else { return false }
         let hash = Data(cleaned.utf8).clipboardContentHash
         guard !ClipboardHistoryPolicy.shouldMergeWithLatest(latest: orderedEntries().first, contentHash: hash) else { return false }
-        entries.append(ClipboardEntry(kind: .text, text: text, contentHash: hash))
+        entries.append(ClipboardEntry(kind: .text, text: text, contentHash: hash, sourceApp: sourceApp))
         trimToLimit()
         persist()
         return true
     }
 
     @discardableResult
-    public func addImage(_ image: NSImage, note: String? = nil) -> Bool {
+    public func addImage(_ image: NSImage, note: String? = nil, sourceApp: String? = nil) -> Bool {
         guard settings.savesImages else { return false }
         do {
             let stored = try repository.saveImage(image)
@@ -82,7 +87,8 @@ public final class ClipboardHistoryStore: ObservableObject {
                 kind: .image,
                 text: note,
                 imageFileName: stored.fileName,
-                contentHash: stored.contentHash
+                contentHash: stored.contentHash,
+                sourceApp: sourceApp
             ))
             trimToLimit()
             persist()
@@ -146,6 +152,7 @@ public final class ClipboardHistoryStore: ObservableObject {
     private func markUsed(id: UUID) {
         guard let index = entries.firstIndex(where: { $0.id == id }) else { return }
         entries[index].lastUsedAt = .now
+        entries[index].useCount = (entries[index].useCount ?? 0) + 1
         persist()
     }
 
@@ -167,9 +174,12 @@ public final class ClipboardHistoryStore: ObservableObject {
             suppressedChangeCount = nil
             return
         }
-        if let text = pasteboard.string(forType: .string), addText(text) { return }
+        // The copy happened within the last polling interval, so the frontmost
+        // app is a good approximation of where the content came from.
+        let sourceApp = NSWorkspace.shared.frontmostApplication?.localizedName
+        if let text = pasteboard.string(forType: .string), addText(text, sourceApp: sourceApp) { return }
         if settings.savesImages, let image = NSImage(pasteboard: pasteboard) {
-            _ = addImage(image)
+            _ = addImage(image, sourceApp: sourceApp)
         }
     }
 

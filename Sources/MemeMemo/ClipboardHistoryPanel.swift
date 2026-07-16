@@ -30,10 +30,10 @@ final class ClipboardHistoryPanelController: NSObject {
         let content = ClipboardHistoryPanelView(
             store: store,
             onDone: { [weak self] in self?.hide() },
-            onContentChange: { [weak self] count, category in
-                self?.resize(entryCount: count, category: category, animate: true)
+            onContentChange: { [weak self] contentHeight in
+                self?.resize(contentHeight: contentHeight, animate: true)
             },
-            onHoverEntry: { [weak self] entry in
+            onDetailEntry: { [weak self] entry in
                 self?.updateHoverCard(entry: entry)
             }
         )
@@ -44,9 +44,9 @@ final class ClipboardHistoryPanelController: NSObject {
             hosting.frame = effectView.bounds
             effectView.addSubview(hosting)
         }
+        let key = store.settings.activeCategoryKey
         resize(
-            entryCount: store.orderedEntries(category: store.settings.activeCategory).count,
-            category: store.settings.activeCategory,
+            contentHeight: ClipboardPanelLayout.contentHeight(for: store.orderedEntries(key: key), key: key),
             animate: false
         )
         position(panel)
@@ -96,12 +96,11 @@ final class ClipboardHistoryPanelController: NSObject {
         return NSScreen.screens.first(where: { $0.frame.contains(mouse) }) ?? NSScreen.main
     }
 
-    private func resize(entryCount: Int, category: ClipboardContentCategory, animate: Bool) {
+    private func resize(contentHeight: CGFloat, animate: Bool) {
         guard let panel else { return }
         let visibleFrame = activeScreen?.visibleFrame ?? NSRect(x: 0, y: 0, width: 900, height: 700)
         let height = ClipboardPanelLayout.panelHeight(
-            entryCount: entryCount,
-            category: category,
+            contentHeight: contentHeight,
             availableHeight: visibleFrame.height - 24
         )
         var frame = panel.frame
@@ -124,7 +123,7 @@ final class ClipboardHistoryPanelController: NSObject {
         panel.setFrameOrigin(origin)
     }
 
-    // MARK: - Hover detail card
+    // MARK: - Detail card
 
     private func updateHoverCard(entry: ClipboardEntry?) {
         guard let entry, let panel, panel.isVisible else {
@@ -134,9 +133,11 @@ final class ClipboardHistoryPanelController: NSObject {
         let card = hoverCard ?? makeHoverCard()
         hoverCard = card
 
-        let content = ClipboardHoverDetailCard(entry: entry, imageURL: store.imageURL(for: entry))
+        let content = ClipboardDetailCard(entry: entry, imageURL: store.imageURL(for: entry))
         let hosting = NSHostingView(rootView: content)
-        let size = hosting.fittingSize
+        var size = hosting.fittingSize
+        let visibleFrame = activeScreen?.visibleFrame ?? panel.frame
+        size.height = min(size.height, visibleFrame.height * 0.7)
         if let effectView = card.contentView as? NSVisualEffectView {
             effectView.subviews.forEach { $0.removeFromSuperview() }
             hosting.frame = NSRect(origin: .zero, size: size)
@@ -144,7 +145,6 @@ final class ClipboardHistoryPanelController: NSObject {
             effectView.addSubview(hosting)
         }
 
-        let visibleFrame = activeScreen?.visibleFrame ?? panel.frame
         let mouse = NSEvent.mouseLocation
         var x = panel.frame.minX - size.width - 10
         if x < visibleFrame.minX + 8 {
@@ -163,7 +163,7 @@ final class ClipboardHistoryPanelController: NSObject {
 
     private func makeHoverCard() -> NSPanel {
         let card = NSPanel(
-            contentRect: NSRect(x: 0, y: 0, width: 240, height: 160),
+            contentRect: NSRect(x: 0, y: 0, width: 260, height: 160),
             styleMask: [.borderless, .nonactivatingPanel],
             backing: .buffered,
             defer: false
@@ -191,30 +191,22 @@ private final class KeyableClipboardPanel: NSPanel {
     override var canBecomeKey: Bool { true }
 }
 
-// MARK: - Hover detail card content
+// MARK: - Detail card content
 
-private struct ClipboardHoverDetailCard: View {
+private struct ClipboardDetailCard: View {
     let entry: ClipboardEntry
     let imageURL: URL?
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
-            if entry.kind == .image, let imageURL, let image = NSImage(contentsOf: imageURL) {
-                Image(nsImage: image)
-                    .resizable()
-                    .scaledToFit()
-                    .frame(maxHeight: 90)
-                    .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
-            } else {
-                Text(entry.previewText)
-                    .font(.system(size: 12, weight: .semibold))
-                    .lineLimit(2)
-            }
+            preview
             Divider()
             VStack(alignment: .leading, spacing: 3) {
+                detailRow("来源", entry.sourceApp ?? "未知")
                 detailRow("类型", entry.contentCategory.displayName)
                 detailRow("收录时间", entry.createdAt.formatted(date: .abbreviated, time: .shortened))
                 detailRow("上次使用", entry.lastUsedAt?.formatted(date: .abbreviated, time: .shortened) ?? "还未使用")
+                detailRow("使用次数", "\(entry.useCount ?? 0) 次")
             }
             Divider()
             VStack(alignment: .leading, spacing: 2) {
@@ -225,7 +217,28 @@ private struct ClipboardHoverDetailCard: View {
             .foregroundStyle(.secondary)
         }
         .padding(12)
-        .frame(width: 232, alignment: .leading)
+        .frame(width: 264, alignment: .leading)
+    }
+
+    @ViewBuilder
+    private var preview: some View {
+        if entry.kind == .image, let imageURL, let image = NSImage(contentsOf: imageURL) {
+            Image(nsImage: image)
+                .resizable()
+                .scaledToFit()
+                .frame(maxHeight: 180)
+                .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
+        } else if entry.contentCategory == .code {
+            Text(CodeHighlighter.highlight(entry.text ?? ""))
+                .font(.system(size: 11, design: .monospaced))
+                .lineLimit(30)
+                .frame(maxWidth: .infinity, alignment: .leading)
+        } else {
+            Text(entry.text ?? entry.previewText)
+                .font(.system(size: 12))
+                .lineLimit(30)
+                .frame(maxWidth: .infinity, alignment: .leading)
+        }
     }
 
     private func detailRow(_ label: String, _ value: String) -> some View {
@@ -245,15 +258,14 @@ private struct ClipboardHoverDetailCard: View {
 struct ClipboardHistoryPanelView: View {
     @ObservedObject var store: ClipboardHistoryStore
     let onDone: () -> Void
-    let onContentChange: (Int, ClipboardContentCategory) -> Void
-    let onHoverEntry: (ClipboardEntry?) -> Void
+    let onContentChange: (CGFloat) -> Void
+    let onDetailEntry: (ClipboardEntry?) -> Void
 
     @State private var query = ""
     @State private var selectedID: UUID?
-    @State private var hoveredID: UUID?
 
-    private var category: ClipboardContentCategory { store.settings.activeCategory }
-    private var entries: [ClipboardEntry] { store.orderedEntries(query: query, category: category) }
+    private var activeKey: ClipboardCategoryKey { store.settings.activeCategoryKey }
+    private var entries: [ClipboardEntry] { store.orderedEntries(query: query, key: activeKey) }
 
     var body: some View {
         VStack(spacing: ClipboardPanelLayout.sectionSpacing) {
@@ -267,11 +279,12 @@ struct ClipboardHistoryPanelView: View {
                 }
                 .onChange(of: selectedID) { _, id in
                     if let id { proxy.scrollTo(id, anchor: .center) }
+                    onDetailEntry(entries.first(where: { $0.id == id }))
                 }
             }
             .overlay {
                 if entries.isEmpty {
-                    ContentUnavailableView(emptyTitle, systemImage: category.systemImage)
+                    ContentUnavailableView(emptyTitle, systemImage: emptySymbol)
                 }
             }
         }
@@ -280,48 +293,67 @@ struct ClipboardHistoryPanelView: View {
         .background(KeyCaptureView { event in handleKey(event) }.frame(width: 0, height: 0))
         .onAppear {
             ensureSelection()
-            onContentChange(entries.count, category)
+            reportContentHeight()
         }
         .onChange(of: query) { _, _ in selectionAndSizeChanged() }
-        .onChange(of: category) { _, _ in selectionAndSizeChanged() }
+        .onChange(of: store.settings.lastCategory) { _, _ in selectionAndSizeChanged() }
         .onChange(of: store.entries) { _, _ in selectionAndSizeChanged() }
-        .onChange(of: hoveredID) { _, id in
-            onHoverEntry(entries.first(where: { $0.id == id }))
-        }
-        .onDisappear { onHoverEntry(nil) }
+        .onDisappear { onDetailEntry(nil) }
     }
 
     private var emptyTitle: String {
-        switch category {
-        case .image: "没有图片记录"
-        case .text: "没有文字记录"
-        case .code: "没有代码记录"
+        switch activeKey {
+        case .builtin(let category):
+            switch category {
+            case .image: "没有图片记录"
+            case .text: "没有文本记录"
+            case .code: "没有代码记录"
+            case .link: "没有链接记录"
+            }
+        case .custom:
+            "没有匹配的记录"
+        }
+    }
+
+    private var emptySymbol: String {
+        switch activeKey {
+        case .builtin(let category): category.systemImage
+        case .custom: "tag"
         }
     }
 
     private func selectionAndSizeChanged() {
         ensureSelection()
-        onContentChange(entries.count, category)
+        reportContentHeight()
+    }
+
+    private func reportContentHeight() {
+        onContentChange(ClipboardPanelLayout.contentHeight(for: entries, key: activeKey))
+    }
+
+    private func title(for key: ClipboardCategoryKey) -> String {
+        switch key {
+        case .builtin(let category): category.displayName
+        case .custom(let id): store.settings.customCategory(id: id)?.name ?? "自定义"
+        }
     }
 
     private var categoryBar: some View {
-        HStack(spacing: 6) {
-            ForEach(ClipboardContentCategory.allCases, id: \.self) { item in
-                CategoryChip(
-                    title: item.displayName,
-                    isSelected: category == item
-                ) {
-                    store.settings.activeCategory = item
+        ScrollView(.horizontal, showsIndicators: false) {
+            HStack(spacing: 6) {
+                ForEach(store.settings.orderedCategoryKeys, id: \.storageValue) { key in
+                    CategoryChip(title: title(for: key), isSelected: activeKey == key) {
+                        store.settings.activeCategoryKey = key
+                    }
                 }
             }
-            Spacer()
         }
     }
 
     @ViewBuilder
     private var content: some View {
-        switch category {
-        case .image:
+        switch activeKey {
+        case .builtin(.image):
             LazyVGrid(
                 columns: Array(
                     repeating: GridItem(.fixed(ClipboardPanelLayout.imageCellSide), spacing: ClipboardPanelLayout.imageCellSpacing),
@@ -334,29 +366,28 @@ struct ClipboardHistoryPanelView: View {
                     ImageEntryCell(
                         entry: entry,
                         imageURL: store.imageURL(for: entry),
-                        isSelected: selectedID == entry.id,
-                        isHovered: hoveredID == entry.id
+                        isSelected: selectedID == entry.id
                     )
                     .id(entry.id)
                     .onTapGesture { copy(entry) }
-                    .onHover { hoveredID = $0 ? entry.id : (hoveredID == entry.id ? nil : hoveredID) }
+                    .onHover { if $0 { selectedID = entry.id } }
                     .contextMenu { entryMenu(entry) }
                 }
             }
-        case .text, .code:
+        default:
             LazyVStack(spacing: ClipboardPanelLayout.listSpacing) {
                 ForEach(entries) { entry in
                     Group {
-                        if category == .code {
-                            CodeEntryRow(entry: entry, isSelected: selectedID == entry.id, isHovered: hoveredID == entry.id)
+                        if activeKey == .builtin(.code) {
+                            CodeEntryRow(entry: entry, isSelected: selectedID == entry.id)
                         } else {
-                            TextEntryRow(entry: entry, isSelected: selectedID == entry.id, isHovered: hoveredID == entry.id)
+                            TextEntryRow(entry: entry, isSelected: selectedID == entry.id)
                         }
                     }
                     .id(entry.id)
                     .contentShape(Rectangle())
                     .onTapGesture { copy(entry) }
-                    .onHover { hoveredID = $0 ? entry.id : (hoveredID == entry.id ? nil : hoveredID) }
+                    .onHover { if $0 { selectedID = entry.id } }
                     .contextMenu { entryMenu(entry) }
                 }
             }
@@ -400,7 +431,7 @@ struct ClipboardHistoryPanelView: View {
             store.togglePinned(id: selectedID)
             return true
         }
-        let columns = category == .image ? ClipboardPanelLayout.imageColumns : 1
+        let columns = activeKey == .builtin(.image) ? ClipboardPanelLayout.imageColumns : 1
         switch event.keyCode {
         case 36, 76:
             guard let entry = entries.first(where: { $0.id == selectedID }) else { return true }
@@ -442,7 +473,6 @@ struct ClipboardHistoryPanelView: View {
 private struct TextEntryRow: View {
     let entry: ClipboardEntry
     let isSelected: Bool
-    let isHovered: Bool
 
     var body: some View {
         HStack(spacing: 6) {
@@ -462,11 +492,7 @@ private struct TextEntryRow: View {
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(
             RoundedRectangle(cornerRadius: 7, style: .continuous)
-                .fill(
-                    isSelected
-                        ? AnyShapeStyle(Color.accentColor)
-                        : isHovered ? AnyShapeStyle(.quaternary) : AnyShapeStyle(.clear)
-                )
+                .fill(isSelected ? AnyShapeStyle(Color.accentColor) : AnyShapeStyle(.clear))
         )
     }
 }
@@ -474,13 +500,14 @@ private struct TextEntryRow: View {
 private struct CodeEntryRow: View {
     let entry: ClipboardEntry
     let isSelected: Bool
-    let isHovered: Bool
+
+    private var lineCount: Int { ClipboardPanelLayout.previewLineCount(entry.text) }
 
     var body: some View {
         HStack(alignment: .top, spacing: 6) {
             Text(CodeHighlighter.highlight(previewCode))
                 .font(.system(size: 11, design: .monospaced))
-                .lineLimit(3, reservesSpace: true)
+                .lineLimit(ClipboardPanelLayout.codePreviewMaxLines)
                 .lineSpacing(1)
                 .foregroundStyle(isSelected ? Color.white : Color.primary)
             if entry.isPinned {
@@ -491,16 +518,12 @@ private struct CodeEntryRow: View {
             Spacer(minLength: 0)
         }
         .padding(.horizontal, 10)
-        .padding(.vertical, 5)
-        .frame(height: ClipboardPanelLayout.codeRowHeight, alignment: .top)
+        .padding(.vertical, ClipboardPanelLayout.codeRowPadding / 2)
+        .frame(height: ClipboardPanelLayout.codeRowHeight(lineCount: lineCount), alignment: .top)
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(
             RoundedRectangle(cornerRadius: 7, style: .continuous)
-                .fill(
-                    isSelected
-                        ? AnyShapeStyle(Color.accentColor)
-                        : isHovered ? AnyShapeStyle(.quaternary) : AnyShapeStyle(.quinary)
-                )
+                .fill(isSelected ? AnyShapeStyle(Color.accentColor) : AnyShapeStyle(.quinary))
         )
     }
 
@@ -508,7 +531,7 @@ private struct CodeEntryRow: View {
         let lines = (entry.text ?? "")
             .trimmingCharacters(in: .whitespacesAndNewlines)
             .components(separatedBy: .newlines)
-        return lines.prefix(3).joined(separator: "\n")
+        return lines.prefix(ClipboardPanelLayout.codePreviewMaxLines).joined(separator: "\n")
     }
 }
 
@@ -516,7 +539,6 @@ private struct ImageEntryCell: View {
     let entry: ClipboardEntry
     let imageURL: URL?
     let isSelected: Bool
-    let isHovered: Bool
 
     private var side: CGFloat { ClipboardPanelLayout.imageCellSide }
 
@@ -549,10 +571,7 @@ private struct ImageEntryCell: View {
         .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
         .overlay {
             RoundedRectangle(cornerRadius: 8, style: .continuous)
-                .stroke(
-                    isSelected ? Color.accentColor : isHovered ? Color.secondary.opacity(0.4) : Color.clear,
-                    lineWidth: 2
-                )
+                .stroke(isSelected ? Color.accentColor : Color.clear, lineWidth: 2)
         }
     }
 }
