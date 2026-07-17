@@ -28,6 +28,9 @@ final class MemeMemoAppDelegate: NSObject, NSApplicationDelegate {
         if arguments.contains("--preview-verify-layout") {
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { services.verifyClipboardLayout() }
         }
+        if arguments.contains("--preview-clipboard-stress") {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { services.previewClipboardStress() }
+        }
         if let index = arguments.firstIndex(of: "--preview-screenshot"), arguments.indices.contains(index + 1) {
             let imageURL = URL(fileURLWithPath: arguments[index + 1])
             DispatchQueue.main.async { services.previewScreenshotEditor(imageURL: imageURL) }

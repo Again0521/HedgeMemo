@@ -1,5 +1,4 @@
 import AppKit
-import Combine
 import MemeMemoCore
 import SwiftUI
 
@@ -15,6 +14,10 @@ final class ClipboardHistoryPanelController: NSObject {
     private var detailEntryID: UUID?
     private var resignKeyObserver: NSObjectProtocol?
     private var clickOutsideMonitor: Any?
+    /// The main list's rect in screen coordinates — the single source of truth.
+    /// The window may grow to also hold the detail card, but the main surface
+    /// must keep exactly this screen position, so hovering never moves the list.
+    private var mainScreenFrame: NSRect = .zero
 
     init(store: ClipboardHistoryStore, memeStore: MemeStore) {
         self.store = store
@@ -82,9 +85,6 @@ final class ClipboardHistoryPanelController: NSObject {
         )
         panel.isOpaque = false
         panel.backgroundColor = .clear
-        // The window's opaque region is exactly the rounded glass/vibrancy
-        // surface (everything else is clear), so the system drop shadow follows
-        // the rounded shape and lifts the panel off the content behind it.
         panel.hasShadow = true
         panel.isMovableByWindowBackground = true
         panel.isReleasedWhenClosed = false
@@ -133,6 +133,7 @@ final class ClipboardHistoryPanelController: NSObject {
         let pinnedTop = min(panel.frame.maxY, visibleFrame.maxY - 12)
         frame.origin.y = max(pinnedTop - height, visibleFrame.minY + 12)
         panel.setFrame(frame, display: true, animate: animate && panel.isVisible)
+        mainScreenFrame = frame
     }
 
     private func position(_ panel: NSPanel) {
@@ -145,6 +146,7 @@ final class ClipboardHistoryPanelController: NSObject {
             y: min(max(mouse.y - 24 - size.height, visibleFrame.minY + 12), visibleFrame.maxY - size.height - 12)
         )
         panel.setFrameOrigin(origin)
+        mainScreenFrame = panel.frame
     }
 
     // MARK: - Detail window
@@ -163,8 +165,8 @@ final class ClipboardHistoryPanelController: NSObject {
         let visibleFrame = activeScreen?.visibleFrame ?? panel.frame
         let imageURL = store.imageURL(for: entry)
         let size = ClipboardDetailLayout.cardSize(for: entry, imageURL: imageURL, availableHeight: visibleFrame.height)
-        let content = ClipboardDetailCard(entry: entry, imageURL: imageURL, cardHeight: size.height)
 
+        let content = ClipboardDetailCard(entry: entry, imageURL: imageURL, cardHeight: size.height)
         let detail = detailPanel ?? makeDetailPanel()
         detailPanel = detail
         if let detailSurface { SystemSurface.replaceContent(content, in: detailSurface) }
@@ -179,13 +181,11 @@ final class ClipboardHistoryPanelController: NSObject {
             visibleFrame.maxY - size.height - 8
         )
         detail.setFrame(NSRect(x: x, y: y, width: size.width, height: size.height), display: true)
-        // As a child of the main panel the detail shares its active-window
-        // appearance (so the two glass surfaces match) and rides above it.
-        if detail.parent == nil {
-            panel.addChildWindow(detail, ordered: .above)
-        } else {
-            detail.orderFront(nil)
-        }
+        // Never addChildWindow here: reordering a child window fires
+        // window-ordering notifications into the search field's remote
+        // completion view (NSRemoteView) and trips an AppKit assertion —
+        // an instant crash the moment the detail card appears in real use.
+        detail.order(.above, relativeTo: panel.windowNumber)
     }
 
     private func makeDetailPanel() -> NSPanel {
@@ -210,9 +210,6 @@ final class ClipboardHistoryPanelController: NSObject {
 
     private func hideDetail() {
         detailEntryID = nil
-        if let detailPanel, let panel, detailPanel.parent != nil {
-            panel.removeChildWindow(detailPanel)
-        }
         detailPanel?.orderOut(nil)
     }
 
@@ -236,6 +233,50 @@ final class ClipboardHistoryPanelController: NSObject {
         }
     }
 
+    // MARK: - Visual stress preview (--preview-clipboard-stress)
+
+    /// Replays the reported user flow for screenshot inspection: dense fake
+    /// data, panel opened at the bottom of the screen, then a category switch
+    /// through the real SwiftUI onChange → onContentChange → resize chain,
+    /// then the hover detail card. The panel stays open (preview mode).
+    func previewStress() {
+        var fakes: [ClipboardEntry] = (1...40).map {
+            ClipboardEntry(
+                kind: .text,
+                text: $0 == 20
+                    ? Array(repeating: "很长的第二十条压力测试内容，用来把详情卡撑得比第一张高很多。", count: 12).joined(separator: "\n")
+                    : "压力测试条目 \($0)",
+                contentHash: "stress-\($0)"
+            )
+        }
+        fakes.append(ClipboardEntry(kind: .text, text: "let a = 1;\nlet b = 2;", contentHash: "stress-code"))
+        store.injectPreviewEntries(fakes)
+
+        store.settings.activeCategoryKey = .builtin(.image)
+        show()
+        if let panel, let screen = panel.screen ?? NSScreen.main {
+            let visible = screen.visibleFrame
+            panel.setFrameOrigin(NSPoint(x: visible.midX - panel.frame.width / 2, y: visible.minY + 12))
+        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 2.0) { [weak self] in
+            // The real user action: switching the category chip.
+            self?.store.settings.activeCategoryKey = .builtin(.text)
+        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 4.0) { [weak self] in
+            guard let self else { return }
+            if let first = self.store.orderedEntries(key: .builtin(.text)).first {
+                self.updateDetail(entry: first)
+            }
+        }
+        // Hover a different entry with a much larger card: the main list's
+        // screen position must not move by a single point.
+        DispatchQueue.main.asyncAfter(deadline: .now() + 6.0) { [weak self] in
+            guard let self else { return }
+            let entries = self.store.orderedEntries(key: .builtin(.text))
+            if entries.count > 20 { self.updateDetail(entry: entries[20]) }
+        }
+    }
+
     // MARK: - Layout self-check (--preview-verify-layout)
 
     /// Reproduces the reported failure end-to-end: open the panel at the very
@@ -252,65 +293,95 @@ final class ClipboardHistoryPanelController: NSObject {
         let visible = screen.visibleFrame
         // Bottom of the screen, like invoking the hotkey with the mouse there.
         panel.setFrameOrigin(NSPoint(x: visible.midX - panel.frame.width / 2, y: visible.minY + 12))
+        mainScreenFrame = panel.frame
         // Force maximum growth, exactly what switching to a dense category does.
         resize(contentHeight: 10_000, animate: true)
-        // Hover detail for a synthetic entry.
-        updateDetail(entry: ClipboardEntry(kind: .text, text: "自检条目", contentHash: "self-check"))
 
-        DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) { [weak self] in
-            guard let self, let panel = self.panel else {
-                completion(false, "self-check: panel disappeared")
-                return
-            }
-            var failures = [String]()
-            var report = [String]()
-
-            let frame = panel.frame
-            report.append("visible=\(visible) panel=\(frame)")
-            if frame.minY < visible.minY - 1 || frame.maxY > visible.maxY + 1 {
-                failures.append("panel frame leaves the visible screen vertically")
-            }
-
-            let contentBounds = panel.contentView?.bounds ?? .zero
-            if let hosting = SystemSurface.hostingFrame(of: self.mainSurface) {
-                report.append("contentBounds=\(contentBounds) hosting=\(hosting)")
-                if abs(hosting.height - contentBounds.height) > 1 || abs(hosting.minY - contentBounds.minY) > 1 {
-                    failures.append("hosted content is not frame-locked to the window (top clipping)")
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) { [weak self] in
+            guard let self else { return }
+            let mainBeforeHovers = self.mainScreenFrame
+            // Hover two entries with very different card sizes.
+            self.updateDetail(entry: ClipboardEntry(kind: .text, text: "自检条目", contentHash: "self-check-small"))
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
+                self.updateDetail(entry: ClipboardEntry(
+                    kind: .text,
+                    text: Array(repeating: "自检长内容行", count: 30).joined(separator: "\n"),
+                    contentHash: "self-check-large"
+                ))
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) {
+                    self.evaluateSelfCheck(visible: visible, mainBeforeHovers: mainBeforeHovers, completion: completion)
                 }
-            } else {
-                failures.append("main surface has no hosted content")
             }
-
-            if let detail = self.detailPanel, detail.isVisible {
-                report.append("detail=\(detail.frame)")
-                if detail.frame.minY < visible.minY - 1 || detail.frame.maxY > visible.maxY + 1 {
-                    failures.append("detail frame leaves the visible screen vertically")
-                }
-            } else {
-                failures.append("detail card did not show")
-            }
-
-            let mainConfig = SystemSurface.backdropConfiguration(of: self.mainSurface)
-            let detailConfig = SystemSurface.backdropConfiguration(of: self.detailSurface)
-            if let mainConfig, let detailConfig {
-                report.append("mainMaterial=\(mainConfig.material.rawValue)/\(mainConfig.state.rawValue) detailMaterial=\(detailConfig.material.rawValue)/\(detailConfig.state.rawValue)")
-                if mainConfig.material != detailConfig.material {
-                    failures.append("main and detail materials differ")
-                }
-                if mainConfig.state != .active || detailConfig.state != .active {
-                    failures.append("backdrops are not forced active (mismatched appearance)")
-                }
-            } else {
-                failures.append("backdrop configuration missing (glass path still in use?)")
-            }
-
-            self.hide()
-            let passed = failures.isEmpty
-            let summary = (passed ? "LAYOUT SELF-CHECK PASSED" : "LAYOUT SELF-CHECK FAILED")
-                + (failures.isEmpty ? "" : "\n" + failures.map { "  ✗ \($0)" }.joined(separator: "\n"))
-                + "\n" + report.map { "  · \($0)" }.joined(separator: "\n")
-            completion(passed, summary)
         }
+    }
+
+    private func evaluateSelfCheck(
+        visible: NSRect,
+        mainBeforeHovers: NSRect,
+        completion: @escaping (Bool, String) -> Void
+    ) {
+        guard let panel else {
+            completion(false, "self-check: panel disappeared")
+            return
+        }
+        var failures = [String]()
+        var report = [String]()
+
+        let frame = panel.frame
+        report.append("visible=\(visible) window=\(frame) main=\(mainScreenFrame)")
+        if frame.minY < visible.minY - 1 || frame.maxY > visible.maxY + 1 {
+            failures.append("window frame leaves the visible screen vertically")
+        }
+        if mainScreenFrame.minY < visible.minY - 1 || mainScreenFrame.maxY > visible.maxY + 1 {
+            failures.append("main list leaves the visible screen vertically")
+        }
+        // The core regression: hovering different entries must never move the list.
+        if abs(mainScreenFrame.minX - mainBeforeHovers.minX) > 0.5
+            || abs(mainScreenFrame.minY - mainBeforeHovers.minY) > 0.5
+            || abs(mainScreenFrame.width - mainBeforeHovers.width) > 0.5
+            || abs(mainScreenFrame.height - mainBeforeHovers.height) > 0.5 {
+            failures.append("main list moved while hovering (\(mainBeforeHovers) -> \(mainScreenFrame))")
+        }
+
+        let contentBounds = panel.contentView?.bounds ?? .zero
+        if let hosting = SystemSurface.hostingFrame(of: mainSurface) {
+            report.append("contentBounds=\(contentBounds) hosting=\(hosting)")
+            if abs(hosting.height - contentBounds.height) > 1 || abs(hosting.minY - contentBounds.minY) > 1 {
+                failures.append("hosted content is not frame-locked to the window (top clipping)")
+            }
+        } else {
+            failures.append("main surface has no hosted content")
+        }
+        if let detail = detailPanel, detail.isVisible {
+            report.append("detail=\(detail.frame)")
+            if detail.frame.minY < visible.minY - 1 || detail.frame.maxY > visible.maxY + 1 {
+                failures.append("detail frame leaves the visible screen vertically")
+            }
+            if detail.frame == panel.frame {
+                failures.append("detail preview must size independently from the clipboard panel")
+            }
+        } else {
+            failures.append("detail card did not show")
+        }
+        let mainKind = SystemSurface.backdropKind(of: mainSurface)
+        let detailKind = SystemSurface.backdropKind(of: detailSurface)
+        if let mainKind, let detailKind {
+            report.append("mainBackdrop=\(mainKind) detailBackdrop=\(detailKind)")
+            if mainKind != detailKind { failures.append("main and detail backdrops differ") }
+            if case .vibrancy(let material, let state) = mainKind {
+                if material != .popover { failures.append("fallback material must be .popover") }
+                if state != .active { failures.append("fallback backdrops must be forced active") }
+            }
+        } else {
+            failures.append("backdrop missing on a surface")
+        }
+
+        hide()
+        let passed = failures.isEmpty
+        let summary = (passed ? "LAYOUT SELF-CHECK PASSED" : "LAYOUT SELF-CHECK FAILED")
+            + (failures.isEmpty ? "" : "\n" + failures.map { "  ✗ \($0)" }.joined(separator: "\n"))
+            + "\n" + report.map { "  · \($0)" }.joined(separator: "\n")
+        completion(passed, summary)
     }
 }
 
@@ -452,11 +523,13 @@ struct ClipboardHistoryPanelView: View {
     let onTogglePin: (ClipboardEntry) -> Void
 
     @State private var query = ""
-    @State private var selectedID: UUID?
+    @State private var hoveredID: UUID?
+    @State private var keyboardSelectedID: UUID?
     @State private var keyboardSelection = false
 
     private var activeKey: ClipboardCategoryKey { store.settings.activeCategoryKey }
     private var entries: [ClipboardEntry] { store.orderedEntries(query: query, key: activeKey) }
+    private var activeSelectionID: UUID? { hoveredID ?? keyboardSelectedID }
 
     var body: some View {
         VStack(spacing: ClipboardPanelLayout.sectionSpacing) {
@@ -468,7 +541,7 @@ struct ClipboardHistoryPanelView: View {
                 ScrollView {
                     content
                 }
-                .onChange(of: selectedID) { _, id in
+                .onChange(of: activeSelectionID) { _, id in
                     // Hover must never scroll the view underneath the pointer;
                     // doing so made a different cell appear selected. Only
                     // keyboard navigation is allowed to reveal an offscreen row.
@@ -486,7 +559,7 @@ struct ClipboardHistoryPanelView: View {
         .frame(width: ClipboardPanelLayout.panelWidth)
         .background(KeyCaptureView { event in handleKey(event) }.frame(width: 0, height: 0))
         .onAppear {
-            ensureSelection()
+            validateSelection()
             reportContentHeight()
         }
         .onChange(of: query) { _, _ in selectionAndSizeChanged() }
@@ -516,7 +589,7 @@ struct ClipboardHistoryPanelView: View {
     }
 
     private func selectionAndSizeChanged() {
-        ensureSelection()
+        validateSelection()
         reportContentHeight()
     }
 
@@ -559,17 +632,12 @@ struct ClipboardHistoryPanelView: View {
                     ImageEntryCell(
                         entry: entry,
                         imageURL: store.imageURL(for: entry),
-                        isSelected: selectedID == entry.id,
+                        isSelected: activeSelectionID == entry.id,
                         onTogglePin: { onTogglePin(entry) }
                     )
                     .id(entry.id)
                     .onTapGesture { copy(entry) }
-                    .onHover {
-                        if $0 {
-                            keyboardSelection = false
-                            selectedID = entry.id
-                        }
-                    }
+                    .onHover { updateHover($0, entry: entry) }
                     .contextMenu { entryMenu(entry) }
                 }
             }
@@ -580,13 +648,13 @@ struct ClipboardHistoryPanelView: View {
                         if activeKey == .builtin(.code) {
                             CodeEntryRow(
                                 entry: entry,
-                                isSelected: selectedID == entry.id,
+                                isSelected: activeSelectionID == entry.id,
                                 onTogglePin: { onTogglePin(entry) }
                             )
                         } else {
                             TextEntryRow(
                                 entry: entry,
-                                isSelected: selectedID == entry.id,
+                                isSelected: activeSelectionID == entry.id,
                                 onTogglePin: { onTogglePin(entry) }
                             )
                         }
@@ -598,12 +666,7 @@ struct ClipboardHistoryPanelView: View {
                     .id(entry.id)
                     .contentShape(Rectangle())
                     .onTapGesture { copy(entry) }
-                    .onHover {
-                        if $0 {
-                            keyboardSelection = false
-                            selectedID = entry.id
-                        }
-                    }
+                    .onHover { updateHover($0, entry: entry) }
                     .contextMenu { entryMenu(entry) }
                 }
             }
@@ -625,13 +688,20 @@ struct ClipboardHistoryPanelView: View {
         Button("删除", role: .destructive) { delete(entry) }
     }
 
-    private func ensureSelection() {
-        guard !entries.isEmpty else {
-            selectedID = nil
-            return
+    private func validateSelection() {
+        let ids = Set(entries.map(\.id))
+        if let hoveredID, !ids.contains(hoveredID) { self.hoveredID = nil }
+        if let keyboardSelectedID, !ids.contains(keyboardSelectedID) { self.keyboardSelectedID = nil }
+    }
+
+    private func updateHover(_ isHovered: Bool, entry: ClipboardEntry) {
+        if isHovered {
+            keyboardSelection = false
+            keyboardSelectedID = nil
+            hoveredID = entry.id
+        } else if hoveredID == entry.id {
+            hoveredID = nil
         }
-        if let selectedID, entries.contains(where: { $0.id == selectedID }) { return }
-        selectedID = entries.first?.id
     }
 
     private func copy(_ entry: ClipboardEntry) {
@@ -641,7 +711,7 @@ struct ClipboardHistoryPanelView: View {
 
     private func delete(_ entry: ClipboardEntry) {
         store.delete(id: entry.id)
-        ensureSelection()
+        validateSelection()
     }
 
     private func handleKey(_ event: NSEvent) -> Bool {
@@ -652,18 +722,18 @@ struct ClipboardHistoryPanelView: View {
             }
             return true
         }
-        if flags.contains(.command), event.charactersIgnoringModifiers?.lowercased() == "p", let selectedID {
+        if flags.contains(.command), event.charactersIgnoringModifiers?.lowercased() == "p", let selectedID = activeSelectionID {
             store.togglePinned(id: selectedID)
             return true
         }
         let columns = activeKey == .builtin(.image) ? ClipboardPanelLayout.imageColumns : 1
         switch event.keyCode {
         case 36, 76:
-            guard let entry = entries.first(where: { $0.id == selectedID }) else { return true }
+            guard let entry = entries.first(where: { $0.id == activeSelectionID }) else { return true }
             copy(entry)
             return true
         case 51, 117:
-            if let entry = entries.first(where: { $0.id == selectedID }) { delete(entry) }
+            if let entry = entries.first(where: { $0.id == activeSelectionID }) { delete(entry) }
             return true
         case 53:
             onDone()
@@ -687,10 +757,15 @@ struct ClipboardHistoryPanelView: View {
 
     private func moveSelection(delta: Int) {
         guard !entries.isEmpty else { return }
-        let currentIndex = selectedID.flatMap { id in entries.firstIndex(where: { $0.id == id }) } ?? 0
-        let nextIndex = min(max(currentIndex + delta, 0), entries.count - 1)
+        let nextIndex: Int
+        if let currentIndex = activeSelectionID.flatMap({ id in entries.firstIndex(where: { $0.id == id }) }) {
+            nextIndex = min(max(currentIndex + delta, 0), entries.count - 1)
+        } else {
+            nextIndex = 0
+        }
         keyboardSelection = true
-        selectedID = entries[nextIndex].id
+        hoveredID = nil
+        keyboardSelectedID = entries[nextIndex].id
     }
 }
 

@@ -89,6 +89,10 @@ struct MemePanelView: View {
         }
         .padding(12)
         .frame(width: 420)
+        // NSPopover draws its own (popover) material; overlay the same `.menu`
+        // backdrop every other surface uses so the whole app matches the
+        // system right-click / menu bar menu material.
+        .background(MenuBackdrop().ignoresSafeArea())
         .sheet(item: $editingMeme) { meme in
             NoteEditorSheet(meme: meme) { store.updateNote(id: meme.id, note: $0) }
         }

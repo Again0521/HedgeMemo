@@ -182,6 +182,18 @@ public final class ClipboardHistoryStore: ObservableObject {
 
     public func clearError() { lastError = nil }
 
+    /// Preview/self-check only: swap the in-memory list without touching the
+    /// persisted history, so UI stress flows can run against dense fake data.
+    /// Persistence is disabled from this point on for the whole process —
+    /// otherwise any later mutation (a settings change, a clipboard event)
+    /// would overwrite the user's real history with the fakes.
+    public func injectPreviewEntries(_ previewEntries: [ClipboardEntry]) {
+        isPersistenceDisabled = true
+        entries = previewEntries
+    }
+
+    private var isPersistenceDisabled = false
+
     private func inspectPasteboard() {
         let pasteboard = NSPasteboard.general
         guard pasteboard.changeCount != observedChangeCount else { return }
@@ -230,6 +242,7 @@ public final class ClipboardHistoryStore: ObservableObject {
     }
 
     private func persist() {
+        guard !isPersistenceDisabled else { return }
         do {
             try repository.save(ClipboardHistorySnapshot(entries: entries, settings: settings))
         } catch {

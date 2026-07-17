@@ -3,35 +3,61 @@ import SwiftUI
 
 @MainActor
 enum SystemSurface {
-    /// Every floating surface uses NSVisualEffectView, never NSGlassEffectView.
-    /// The glass view lays out its `contentView` itself: when the SwiftUI
-    /// content is taller than the window it bottom-aligns and the top of the
-    /// panel (search field, category bar) gets clipped away. The visual-effect
-    /// pipeline keeps the hosting view frame-locked to the window, which is
-    /// predictable and testable.
+    enum BackdropKind: Equatable {
+        case glass
+        case vibrancy(NSVisualEffectView.Material, NSVisualEffectView.State)
+    }
+
+    /// The Maccy recipe: on macOS 26+ the backdrop is an NSGlassEffectView used
+    /// purely as a background layer — the SwiftUI content is a SIBLING view on
+    /// top, never `glass.contentView` (letting the glass view manage content
+    /// bottom-aligns it and clips the top of the panel). Earlier systems fall
+    /// back to popover vibrancy. Content stays frame-locked to the window.
     static func container(
         material: NSVisualEffectView.Material,
         cornerRadius: CGFloat? = nil
     ) -> NSView {
         let container = SystemSurfaceView()
         container.autoresizingMask = [.width, .height]
+        if let cornerRadius {
+            container.wantsLayer = true
+            container.layer?.cornerRadius = cornerRadius
+            container.layer?.cornerCurve = .continuous
+            container.layer?.masksToBounds = true
+        }
 
-        let backdrop = NSVisualEffectView()
-        backdrop.material = material
-        backdrop.blendingMode = .behindWindow
-        // Forced active: the detail card is an ignores-mouse child window that
-        // can never become key, so `.followsWindowActiveState` rendered it in
-        // the inactive appearance — a visibly different material from the key
-        // main panel. `.active` gives every surface the same dense frost.
-        backdrop.state = .active
+        let backdrop: NSView
+        if #available(macOS 26.0, *) {
+            let glass = NSGlassEffectView()
+            glass.style = .regular
+            glass.cornerRadius = cornerRadius ?? 0
+            backdrop = glass
+        } else {
+            let effect = NSVisualEffectView()
+            effect.material = material
+            effect.blendingMode = .behindWindow
+            // Forced active: the detail card is an ignores-mouse child window
+            // that can never become key; the default follows-window state would
+            // render it in a visibly different inactive material.
+            effect.state = .active
+            if let cornerRadius {
+                effect.maskImage = .cornerMask(radius: cornerRadius)
+            }
+            backdrop = effect
+        }
         backdrop.frame = container.bounds
         backdrop.autoresizingMask = [.width, .height]
-        if let cornerRadius {
-            backdrop.maskImage = .cornerMask(radius: cornerRadius)
-        }
         container.backdrop = backdrop
         container.addSubview(backdrop)
         return container
+    }
+
+    /// Introspection for the self-check.
+    static func backdropKind(of view: NSView?) -> BackdropKind? {
+        guard let surface = view as? SystemSurfaceView, let backdrop = surface.backdrop else { return nil }
+        if #available(macOS 26.0, *), backdrop is NSGlassEffectView { return .glass }
+        if let effect = backdrop as? NSVisualEffectView { return .vibrancy(effect.material, effect.state) }
+        return nil
     }
 
     static func install<Content: View>(
@@ -58,17 +84,31 @@ enum SystemSurface {
         (container as? SystemSurfaceView)?.hostingView = hosting
     }
 
-    /// Introspection for the layout/material self-check.
-    static func backdropConfiguration(of view: NSView?) -> (material: NSVisualEffectView.Material, state: NSVisualEffectView.State)? {
-        guard let surface = view as? SystemSurfaceView, let backdrop = surface.backdrop else { return nil }
-        return (backdrop.material, backdrop.state)
-    }
-
     /// Frame of the hosted SwiftUI content, for verifying it stays aligned
     /// with the window instead of overflowing past the top edge.
     static func hostingFrame(of view: NSView?) -> NSRect? {
         (view as? SystemSurfaceView)?.hostingView?.frame
     }
+}
+
+/// SwiftUI wrapper over the same backdrop as SystemSurface, for content hosted
+/// inside system chrome we don't control (the meme NSPopover). Glass on
+/// macOS 26+, popover vibrancy earlier — identical to every other surface.
+struct MenuBackdrop: NSViewRepresentable {
+    func makeNSView(context: Context) -> NSView {
+        if #available(macOS 26.0, *) {
+            let glass = NSGlassEffectView()
+            glass.style = .regular
+            return glass
+        }
+        let view = NSVisualEffectView()
+        view.material = .popover
+        view.blendingMode = .behindWindow
+        view.state = .active
+        return view
+    }
+
+    func updateNSView(_ nsView: NSView, context: Context) {}
 }
 
 /// `NSHostingView` may otherwise report itself as opaque and let AppKit draw a
@@ -80,7 +120,7 @@ final class TransparentHostingView<Content: View>: NSHostingView<Content> {
 }
 
 private final class SystemSurfaceView: NSView {
-    weak var backdrop: NSVisualEffectView?
+    weak var backdrop: NSView?
     weak var hostingView: NSView?
 }
 

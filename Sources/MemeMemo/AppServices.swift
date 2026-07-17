@@ -104,6 +104,10 @@ final class AppServices: ObservableObject {
         clipboardPanelController?.preview(category: category)
     }
 
+    func previewClipboardStress() {
+        clipboardPanelController?.previewStress()
+    }
+
     /// Runs the clipboard panel layout/material self-check and terminates the
     /// process with a nonzero status on failure (used by --preview-verify-layout).
     func verifyClipboardLayout() {
