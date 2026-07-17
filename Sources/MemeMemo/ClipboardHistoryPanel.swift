@@ -8,8 +8,12 @@ final class ClipboardHistoryPanelController: NSObject {
     private let memeStore: MemeStore
     private let pinnedWindows: PinnedClipboardWindowsController
     private var panel: NSPanel?
+    /// Transparent host for the two independent rounded glass cards. Keeping
+    /// both cards in one NSPanel gives them the same active/inactive material.
+    private var canvas: NSView?
+    private var mainShadow: RoundedCardShadowView?
+    private var detailShadow: RoundedCardShadowView?
     private var mainSurface: NSView?
-    private var detailPanel: NSPanel?
     private var detailSurface: NSView?
     private var detailEntryID: UUID?
     private var resignKeyObserver: NSObjectProtocol?
@@ -18,6 +22,7 @@ final class ClipboardHistoryPanelController: NSObject {
     /// The window may grow to also hold the detail card, but the main surface
     /// must keep exactly this screen position, so hovering never moves the list.
     private var mainScreenFrame: NSRect = .zero
+    private var detailScreenFrame: NSRect?
 
     init(store: ClipboardHistoryStore, memeStore: MemeStore) {
         self.store = store
@@ -91,8 +96,23 @@ final class ClipboardHistoryPanelController: NSObject {
         panel.level = .floating
         panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .transient]
 
+        let canvas = NSView(frame: panel.contentView?.bounds ?? .zero)
+        canvas.wantsLayer = true
+        canvas.layer?.backgroundColor = .clear
+        canvas.autoresizingMask = [.width, .height]
+        panel.contentView = canvas
+        self.canvas = canvas
+
         let surface = SystemSurface.container(material: .popover, cornerRadius: 16)
-        panel.contentView = surface
+        surface.frame = canvas.bounds
+        surface.autoresizingMask = []
+        let shadow = RoundedCardShadowView(cornerRadius: 16)
+        shadow.frame = shadow.frame(for: canvas.bounds)
+        shadow.autoresizingMask = []
+        canvas.addSubview(shadow)
+        canvas.addSubview(surface)
+        shadow.isHidden = true
+        mainShadow = shadow
         mainSurface = surface
 
         if !CommandLine.arguments.contains(where: { $0.hasPrefix("--preview-") }) {
@@ -114,17 +134,19 @@ final class ClipboardHistoryPanelController: NSObject {
         return NSScreen.screens.first(where: { $0.frame.contains(mouse) }) ?? NSScreen.main
     }
 
-    /// Only the main panel changes size, anchored by its top edge so the list
-    /// never jumps under the pointer. The detail card lives in its own window.
+    /// Only the main card changes size, anchored by its top edge so the list
+    /// never jumps under the pointer. The preview is temporarily hidden before
+    /// sizing, then can be added back as a sibling card in the same window.
     private func resize(contentHeight: CGFloat, animate: Bool) {
         guard let panel else { return }
         hideDetail()
         let visibleFrame = activeScreen?.visibleFrame ?? NSRect(x: 0, y: 0, width: 900, height: 700)
         let height = ClipboardPanelLayout.panelHeight(
             contentHeight: contentHeight,
-            availableHeight: visibleFrame.height - 24
+            availableHeight: visibleFrame.height - RoundedCardShadowView.shadowInset * 2
         )
-        var frame = panel.frame
+        let currentMainFrame = mainScreenFrame.isEmpty ? panel.frame : mainScreenFrame
+        var frame = currentMainFrame
         frame.size.width = ClipboardPanelLayout.panelWidth
         frame.size.height = height
         // Keep the top edge where it was when possible. Clamp both screen edges
@@ -132,12 +154,15 @@ final class ClipboardHistoryPanelController: NSObject {
         // taller than a short text category, and a one-sided clamp can hide the
         // search field above the menu bar after that switch.
         frame.origin.y = ClipboardPanelLayout.constrainedOriginY(
-            preferredTop: panel.frame.maxY,
+            preferredTop: currentMainFrame.maxY,
             height: height,
             visibleMinY: visibleFrame.minY,
-            visibleMaxY: visibleFrame.maxY
+            visibleMaxY: visibleFrame.maxY,
+            inset: RoundedCardShadowView.shadowInset
         )
         panel.setFrame(frame, display: true, animate: animate && panel.isVisible)
+        mainShadow?.isHidden = true
+        mainSurface?.frame = panel.contentView?.bounds ?? .zero
         mainScreenFrame = frame
     }
 
@@ -146,19 +171,20 @@ final class ClipboardHistoryPanelController: NSObject {
         let screen = NSScreen.screens.first(where: { $0.frame.contains(mouse) }) ?? NSScreen.main
         let visibleFrame = screen?.visibleFrame ?? NSRect(x: 0, y: 0, width: 900, height: 700)
         let size = panel.frame.size
+        let inset = RoundedCardShadowView.shadowInset
         let origin = NSPoint(
-            x: min(max(mouse.x - size.width / 2, visibleFrame.minX + 12), visibleFrame.maxX - size.width - 12),
-            y: min(max(mouse.y - 24 - size.height, visibleFrame.minY + 12), visibleFrame.maxY - size.height - 12)
+            x: min(max(mouse.x - size.width / 2, visibleFrame.minX + inset), visibleFrame.maxX - size.width - inset),
+            y: min(max(mouse.y - 24 - size.height, visibleFrame.minY + inset), visibleFrame.maxY - size.height - inset)
         )
         panel.setFrameOrigin(origin)
         mainScreenFrame = panel.frame
     }
 
-    // MARK: - Detail window
+    // MARK: - Detail card
 
-    /// Shows the detail as a separate side window. It is top-aligned with the
-    /// main panel and only the detail window resizes as the hovered entry
-    /// changes — the main list stays put, so nothing "runs around".
+    /// Shows the detail as a second glass card inside the same transparent
+    /// panel. Separate cards preserve the gap and individual rounded corners,
+    /// while one host window guarantees one active material state.
     private func updateDetail(entry: ClipboardEntry?) {
         guard let entry, let panel, panel.isVisible else {
             hideDetail()
@@ -169,54 +195,69 @@ final class ClipboardHistoryPanelController: NSObject {
 
         let visibleFrame = activeScreen?.visibleFrame ?? panel.frame
         let imageURL = store.imageURL(for: entry)
-        let size = ClipboardDetailLayout.cardSize(for: entry, imageURL: imageURL, availableHeight: visibleFrame.height)
+        let size = ClipboardDetailLayout.cardSize(
+            for: entry,
+            imageURL: imageURL,
+            availableHeight: visibleFrame.height - RoundedCardShadowView.shadowInset * 2
+        )
 
         let content = ClipboardDetailCard(entry: entry, imageURL: imageURL, cardHeight: size.height)
-        let detail = detailPanel ?? makeDetailPanel()
-        detailPanel = detail
-        if let detailSurface { SystemSurface.replaceContent(content, in: detailSurface) }
+        let detail = detailSurface ?? makeDetailSurface()
+        detailSurface = detail
+        if detail.superview == nil {
+            let shadow = RoundedCardShadowView(cornerRadius: 12)
+            canvas?.addSubview(shadow)
+            canvas?.addSubview(detail)
+            detailShadow = shadow
+        }
+        SystemSurface.replaceContent(content, in: detail)
 
-        let mainFrame = panel.frame
+        let mainFrame = mainScreenFrame.isEmpty ? panel.frame : mainScreenFrame
         let gap: CGFloat = 10
-        let placeLeft = mainFrame.minX - size.width - gap >= visibleFrame.minX + 8
+        let inset = RoundedCardShadowView.shadowInset
+        let placeLeft = mainFrame.minX - size.width - gap - inset >= visibleFrame.minX + 8
         let x = placeLeft ? mainFrame.minX - size.width - gap : mainFrame.maxX + gap
         // Top-align with the main panel; clamp so a tall card stays on-screen.
         let y = min(
-            max(mainFrame.maxY - size.height, visibleFrame.minY + 8),
-            visibleFrame.maxY - size.height - 8
+            max(mainFrame.maxY - size.height, visibleFrame.minY + inset),
+            visibleFrame.maxY - size.height - inset
         )
-        detail.setFrame(NSRect(x: x, y: y, width: size.width, height: size.height), display: true)
-        // Keep the preview independent from the searchable main panel. On
-        // macOS 26, relative ordering sends a window-order notification into
-        // the text field's remote completion view and can trip an AppKit
-        // assertion. A normal front order keeps the preview above the list
-        // without participating in that fragile relative-order path.
-        detail.orderFrontRegardless()
+        let detailFrame = NSRect(x: x, y: y, width: size.width, height: size.height)
+        let cardsUnion = mainFrame.union(detailFrame)
+        let hostFrame = cardsUnion.insetBy(dx: -inset, dy: -inset)
+        panel.hasShadow = false
+        panel.setFrame(hostFrame, display: true, animate: false)
+        guard let canvas else { return }
+        let mainCardFrame = mainFrame.offsetBy(dx: -hostFrame.minX, dy: -hostFrame.minY)
+        let detailCardFrame = detailFrame.offsetBy(dx: -hostFrame.minX, dy: -hostFrame.minY)
+        mainShadow?.frame = mainShadow?.frame(for: mainCardFrame) ?? .zero
+        mainSurface?.frame = mainCardFrame
+        detailShadow?.frame = detailShadow?.frame(for: detailCardFrame) ?? .zero
+        detail.frame = detailCardFrame
+        mainShadow?.isHidden = false
+        detailShadow?.isHidden = false
+        detail.isHidden = false
+        canvas.needsLayout = true
+        mainScreenFrame = mainFrame
+        detailScreenFrame = detailFrame
     }
 
-    private func makeDetailPanel() -> NSPanel {
-        let detail = NSPanel(
-            contentRect: NSRect(x: 0, y: 0, width: ClipboardDetailLayout.cardWidth, height: 200),
-            styleMask: [.borderless, .nonactivatingPanel],
-            backing: .buffered,
-            defer: false
-        )
-        detail.isOpaque = false
-        detail.backgroundColor = .clear
-        detail.hasShadow = true
-        detail.ignoresMouseEvents = true
-        detail.isReleasedWhenClosed = false
-        detail.level = .floating
-        detail.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .transient]
+    private func makeDetailSurface() -> NSView {
         let surface = SystemSurface.container(material: .popover, cornerRadius: 12)
-        detail.contentView = surface
-        detailSurface = surface
-        return detail
+        surface.autoresizingMask = []
+        return surface
     }
 
     private func hideDetail() {
         detailEntryID = nil
-        detailPanel?.orderOut(nil)
+        detailScreenFrame = nil
+        detailShadow?.isHidden = true
+        detailSurface?.isHidden = true
+        guard let panel, !mainScreenFrame.isEmpty, panel.frame != mainScreenFrame else { return }
+        panel.hasShadow = true
+        panel.setFrame(mainScreenFrame, display: panel.isVisible, animate: false)
+        mainShadow?.isHidden = true
+        mainSurface?.frame = panel.contentView?.bounds ?? .zero
     }
 
     // MARK: - Click-outside dismissal
@@ -349,21 +390,21 @@ final class ClipboardHistoryPanelController: NSObject {
             failures.append("main list moved while hovering (\(mainBeforeHovers) -> \(mainScreenFrame))")
         }
 
-        let contentBounds = panel.contentView?.bounds ?? .zero
+        let mainBounds = mainSurface?.bounds ?? .zero
         if let hosting = SystemSurface.hostingFrame(of: mainSurface) {
-            report.append("contentBounds=\(contentBounds) hosting=\(hosting)")
-            if abs(hosting.height - contentBounds.height) > 1 || abs(hosting.minY - contentBounds.minY) > 1 {
+            report.append("mainBounds=\(mainBounds) hosting=\(hosting)")
+            if abs(hosting.height - mainBounds.height) > 1 || abs(hosting.minY - mainBounds.minY) > 1 {
                 failures.append("hosted content is not frame-locked to the window (top clipping)")
             }
         } else {
             failures.append("main surface has no hosted content")
         }
-        if let detail = detailPanel, detail.isVisible {
-            report.append("detail=\(detail.frame)")
-            if detail.frame.minY < visible.minY - 1 || detail.frame.maxY > visible.maxY + 1 {
+        if let detail = detailScreenFrame, detailSurface?.isHidden == false {
+            report.append("detail=\(detail)")
+            if detail.minY < visible.minY - 1 || detail.maxY > visible.maxY + 1 {
                 failures.append("detail frame leaves the visible screen vertically")
             }
-            if detail.frame == panel.frame {
+            if detail == mainScreenFrame {
                 failures.append("detail preview must size independently from the clipboard panel")
             }
         } else {

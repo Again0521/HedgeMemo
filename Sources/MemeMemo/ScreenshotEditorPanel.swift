@@ -12,12 +12,17 @@ final class ScreenshotEditorPanelController {
         let content = ScreenshotEditorPanelView(
             image: image,
             onCancel: { [weak self] in self?.finish(image: nil) },
-            onSave: { [weak self] editedImage in self?.finish(image: editedImage) }
+            onSave: { [weak self] editedImage in self?.finish(image: editedImage) },
+            onRenderAndSave: { [weak self] request in self?.renderAndFinish(request) }
         )
         SystemSurface.install(content, in: panel, material: .popover, cornerRadius: 18)
         self.panel = panel
         NSApp.activate(ignoringOtherApps: true)
+        // A capture editor is an active, transient operation.  Ordering it
+        // regardless of the current app prevents the captured app from
+        // immediately covering the editor again after ScreenCaptureKit exits.
         panel.makeKeyAndOrderFront(nil)
+        panel.orderFrontRegardless()
     }
 
     private func makePanel(for image: NSImage) -> NSPanel {
@@ -43,20 +48,42 @@ final class ScreenshotEditorPanelController {
         panel.isOpaque = false
         panel.backgroundColor = .clear
         panel.hasShadow = false
-        panel.isMovableByWindowBackground = true
+        // The canvas owns mouse drags for pen, crop, arrows, and rectangles.
+        // Letting a borderless panel move from its background steals those
+        // drags before the canvas can complete an annotation.
+        panel.isMovableByWindowBackground = false
         panel.isReleasedWhenClosed = false
         panel.level = .floating
         panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .transient]
+        panel.hidesOnDeactivate = false
         panel.setFrame(panelFrame, display: false)
         return panel
     }
 
     private func finish(image: NSImage?) {
+        let completion = dismissAndTakeCompletion()
+        completion?(image)
+    }
+
+    /// Dismiss before producing a potentially large, annotated bitmap.  The
+    /// old sequence left the editor key while rendering, which made the cursor
+    /// appear busy after pressing 完成 even though the user had finished.
+    private func renderAndFinish(_ request: ScreenshotRenderRequest) {
+        guard let completion = dismissAndTakeCompletion() else { return }
+        Task {
+            let rendered = await Task.detached(priority: .userInitiated) {
+                ScreenshotRenderedImage(ScreenshotRenderer.render(image: request.image, state: request.state))
+            }.value
+            completion(rendered.image)
+        }
+    }
+
+    private func dismissAndTakeCompletion() -> ((NSImage?) -> Void)? {
         panel?.orderOut(nil)
         panel = nil
         let completion = onComplete
         onComplete = nil
-        completion?(image)
+        return completion
     }
 }
 
@@ -68,12 +95,12 @@ private struct ScreenshotEditorPanelView: View {
     let image: NSImage
     let onCancel: () -> Void
     let onSave: (NSImage) -> Void
+    let onRenderAndSave: (ScreenshotRenderRequest) -> Void
 
     @State private var mode: ScreenshotEditorMode = .pen
     @State private var color: MarkupColor = .red
-    @State private var width: MarkupWidth = .medium
+    @State private var lineWidth = 4.0
     @State private var canvas = ScreenshotCanvasState()
-    @State private var showsMarkupTools = false
     @State private var isFinishing = false
 
     var body: some View {
@@ -84,9 +111,8 @@ private struct ScreenshotEditorPanelView: View {
                 image: image,
                 mode: $mode,
                 color: $color,
-                width: $width,
-                state: $canvas,
-                allowsEditing: showsMarkupTools
+                lineWidth: $lineWidth,
+                state: $canvas
             )
         }
         .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
@@ -97,91 +123,131 @@ private struct ScreenshotEditorPanelView: View {
     }
 
     private var toolbar: some View {
-        HStack(spacing: 14) {
-            Button(action: onCancel) {
-                Label("截屏", systemImage: "xmark.circle.fill")
-            }
-            .buttonStyle(.plain)
-            .keyboardShortcut(.cancelAction)
-            .frame(width: 180, alignment: .leading)
-
-            Spacer(minLength: 12)
-
-            if showsMarkupTools {
-                Picker("工具", selection: $mode) {
-                    ForEach(ScreenshotEditorMode.allCases, id: \.self) { mode in
-                        Image(systemName: mode.systemImage)
-                            .help(mode.title)
-                            .tag(mode)
-                    }
-                }
-                .labelsHidden()
-                .pickerStyle(.segmented)
-                .frame(width: 248)
-
-                Divider().frame(height: 20)
-
-                HStack(spacing: 5) {
-                    ForEach(MarkupColor.allCases, id: \.self) { swatch in
-                        ColorSwatch(color: swatch, isSelected: color == swatch) { color = swatch }
-                    }
-                }
-                .opacity(mode.usesStyle ? 1 : 0.35)
-                .disabled(!mode.usesStyle)
-
-                Picker("粗细", selection: $width) {
-                    ForEach(MarkupWidth.allCases, id: \.self) { option in
-                        Text(option.title).tag(option)
-                    }
-                }
-                .labelsHidden()
-                .pickerStyle(.menu)
-                .frame(width: 64)
-                .opacity(mode.usesStyle ? 1 : 0.35)
-                .disabled(!mode.usesStyle)
-            }
-
-            Spacer(minLength: 12)
-
-            HStack(spacing: 14) {
-                if showsMarkupTools {
-                    Button {
-                        canvas.undo()
-                    } label: {
-                        Image(systemName: "arrow.uturn.backward")
-                    }
-                    .help("撤销")
-                    .disabled(!canvas.canUndo)
-                }
-
-                Button {
-                    showsMarkupTools.toggle()
-                } label: {
-                    Image(systemName: "pencil.tip.crop.circle")
-                }
-                .help(showsMarkupTools ? "隐藏标注工具" : "显示标注工具")
-
-                Button(role: .destructive, action: onCancel) {
-                    Image(systemName: "trash")
-                }
-                .help("删除截图")
-
-                Button(action: share) {
-                    Image(systemName: "square.and.arrow.up")
-                }
-                .help("共享")
-
-                Button("完成") {
-                    finishEditing()
-                }
-                .keyboardShortcut(.defaultAction)
-                .buttonStyle(.borderedProminent)
-                .disabled(isFinishing)
-            }
-            .frame(width: 220, alignment: .trailing)
+        ViewThatFits(in: .horizontal) {
+            fullToolbar
+            compactToolbar
         }
-        .padding(.horizontal, 22)
-        .frame(height: 58)
+        .padding(.horizontal, 18)
+        .padding(.vertical, 9)
+    }
+
+    /// Wide editors use one native-toolbar-like row.  The fixed minimum width
+    /// makes `ViewThatFits` choose the compact version before any trailing
+    /// action can be clipped by a small/portrait capture window.
+    private var fullToolbar: some View {
+        HStack(spacing: 14) {
+            closeButton
+                .frame(width: 150, alignment: .leading)
+
+            Spacer(minLength: 12)
+
+            markupTools
+                .fixedSize(horizontal: true, vertical: false)
+
+            Spacer(minLength: 12)
+
+            actionButtons
+                .fixedSize(horizontal: true, vertical: false)
+        }
+        .frame(minWidth: 1_030)
+    }
+
+    /// Portrait and narrow captures keep the cancel/complete actions in the
+    /// first row, then give the editing controls their own uncompressed row.
+    /// This is deliberately not a clipped/scaled version of the wide toolbar.
+    private var compactToolbar: some View {
+        VStack(spacing: 8) {
+            HStack(spacing: 12) {
+                closeButton
+                Spacer(minLength: 8)
+                actionButtons
+            }
+            ScrollView(.horizontal, showsIndicators: false) {
+                markupTools
+                    .padding(.horizontal, 2)
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+        }
+    }
+
+    private var closeButton: some View {
+        Button(action: onCancel) {
+            Label("截屏", systemImage: "xmark.circle.fill")
+        }
+        .buttonStyle(.plain)
+        .keyboardShortcut(.cancelAction)
+        .help("取消截屏")
+        .contentShape(Rectangle())
+    }
+
+    private var markupTools: some View {
+        HStack(spacing: 12) {
+            Picker("工具", selection: $mode) {
+                ForEach(ScreenshotEditorMode.allCases, id: \.self) { mode in
+                    Image(systemName: mode.systemImage)
+                        .help(mode.title)
+                        .tag(mode)
+                }
+            }
+            .labelsHidden()
+            .pickerStyle(.segmented)
+            .frame(width: 248)
+
+            Divider().frame(height: 20)
+
+            HStack(spacing: 5) {
+                ForEach(MarkupColor.allCases, id: \.self) { swatch in
+                    ColorSwatch(color: swatch, isSelected: color == swatch) { color = swatch }
+                }
+            }
+            .opacity(mode.usesStyle ? 1 : 0.35)
+            .disabled(!mode.usesStyle)
+
+            Divider().frame(height: 20)
+
+            HStack(spacing: 6) {
+                Image(systemName: "lineweight")
+                    .foregroundStyle(.secondary)
+                Slider(value: $lineWidth, in: 1...24)
+                    .frame(width: 108)
+                    .accessibilityLabel("粗细")
+                Text(lineWidth, format: .number.precision(.fractionLength(1)))
+                    .monospacedDigit()
+                    .foregroundStyle(.secondary)
+                    .frame(width: 30, alignment: .trailing)
+            }
+            .opacity(mode.usesStyle ? 1 : 0.35)
+            .disabled(!mode.usesStyle)
+        }
+    }
+
+    private var actionButtons: some View {
+        HStack(spacing: 12) {
+            Button {
+                canvas.undo()
+            } label: {
+                Image(systemName: "arrow.uturn.backward")
+            }
+            .help("撤销")
+            .disabled(!canvas.canUndo)
+
+            Button(role: .destructive, action: onCancel) {
+                Image(systemName: "trash")
+            }
+            .help("删除截图")
+
+            Button(action: share) {
+                Image(systemName: "square.and.arrow.up")
+            }
+            .help("共享")
+
+            Button("完成") {
+                finishEditing()
+            }
+            .keyboardShortcut(.defaultAction)
+            .buttonStyle(.borderedProminent)
+            .disabled(isFinishing)
+        }
     }
 
     private func share() {
@@ -201,18 +267,15 @@ private struct ScreenshotEditorPanelView: View {
             onSave(image)
             return
         }
-        let request = ScreenshotRenderRequest(image: image, state: canvas)
-        Task { @MainActor in
-            let rendered = await Task.detached(priority: .userInitiated) {
-                ScreenshotRenderedImage(ScreenshotRenderer.render(image: request.image, state: request.state))
-            }.value
-            onSave(rendered.image)
-        }
+        onRenderAndSave(ScreenshotRenderRequest(image: image, state: canvas))
     }
 }
 
 private enum ScreenshotEditorLayout {
-    static let toolbarHeight: CGFloat = 58
+    // The compact toolbar can occupy two rows.  Reserving that maximum in the
+    // initial panel calculation means opening markup controls never covers the
+    // capture or pushes a control outside the window.
+    static let toolbarHeight: CGFloat = 108
     static let canvasPadding: CGFloat = 32
     static let screenMargin: CGFloat = 16
 
@@ -250,9 +313,8 @@ private struct ScreenshotCanvasViewport: View {
     let image: NSImage
     @Binding var mode: ScreenshotEditorMode
     @Binding var color: MarkupColor
-    @Binding var width: MarkupWidth
+    @Binding var lineWidth: Double
     @Binding var state: ScreenshotCanvasState
-    let allowsEditing: Bool
 
     var body: some View {
         GeometryReader { geometry in
@@ -272,10 +334,9 @@ private struct ScreenshotCanvasViewport: View {
             image: image,
             mode: $mode,
             color: $color,
-            width: $width,
+            lineWidth: $lineWidth,
             state: $state
         )
-        .allowsHitTesting(allowsEditing)
     }
 }
 
@@ -331,26 +392,6 @@ enum MarkupColor: CaseIterable {
     }
 
     var color: Color { Color(nsColor: nsColor) }
-}
-
-private enum MarkupWidth: CaseIterable {
-    case thin, medium, thick
-
-    var title: String {
-        switch self {
-        case .thin: "细"
-        case .medium: "中"
-        case .thick: "粗"
-        }
-    }
-
-    var value: CGFloat {
-        switch self {
-        case .thin: 2
-        case .medium: 4
-        case .thick: 7
-        }
-    }
 }
 
 private struct ColorSwatch: View {
@@ -484,7 +525,7 @@ private struct ScreenshotEditorCanvas: NSViewRepresentable {
     let image: NSImage
     @Binding var mode: ScreenshotEditorMode
     @Binding var color: MarkupColor
-    @Binding var width: MarkupWidth
+    @Binding var lineWidth: Double
     @Binding var state: ScreenshotCanvasState
 
     func makeNSView(context: Context) -> ScreenshotCanvasView {
@@ -492,7 +533,7 @@ private struct ScreenshotEditorCanvas: NSViewRepresentable {
         view.image = image
         view.mode = mode
         view.strokeColor = color.nsColor
-        view.lineWidth = width.value
+        view.lineWidth = CGFloat(lineWidth)
         view.state = state
         view.onStateChange = { state = $0 }
         return view
@@ -502,7 +543,7 @@ private struct ScreenshotEditorCanvas: NSViewRepresentable {
         view.image = image
         view.mode = mode
         view.strokeColor = color.nsColor
-        view.lineWidth = width.value
+        view.lineWidth = CGFloat(lineWidth)
         view.state = state
         view.needsDisplay = true
     }
@@ -536,6 +577,7 @@ private final class ScreenshotCanvasView: NSView {
     }
 
     override func mouseDown(with event: NSEvent) {
+        window?.makeFirstResponder(self)
         guard let point = imagePoint(for: convert(event.locationInWindow, from: nil)) else { return }
         activeStart = point
         activeCurrent = point

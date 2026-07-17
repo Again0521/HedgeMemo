@@ -111,6 +111,44 @@ private final class SystemSurfaceView: NSView {
     weak var hostingView: NSView?
 }
 
+/// Shadow-only companion for a floating glass card. The opaque fill is fully
+/// covered by the card above it; only the rounded shadow is visible. This lets
+/// two cards in one transparent host keep the native separation shadow without
+/// producing a rectangular/L-shaped shadow around their combined window.
+final class RoundedCardShadowView: NSView {
+    static let shadowInset: CGFloat = 18
+    private let cornerRadius: CGFloat
+
+    init(cornerRadius: CGFloat) {
+        self.cornerRadius = cornerRadius
+        super.init(frame: .zero)
+        wantsLayer = false
+    }
+
+    required init?(coder: NSCoder) { nil }
+
+    override var isOpaque: Bool { false }
+
+    func frame(for cardFrame: NSRect) -> NSRect {
+        cardFrame.insetBy(dx: -Self.shadowInset, dy: -Self.shadowInset)
+    }
+
+    override func draw(_ dirtyRect: NSRect) {
+        super.draw(dirtyRect)
+        guard let context = NSGraphicsContext.current?.cgContext else { return }
+        context.saveGState()
+        let shadow = NSShadow()
+        shadow.shadowColor = NSColor.black.withAlphaComponent(0.24)
+        shadow.shadowBlurRadius = 16
+        shadow.shadowOffset = NSSize(width: 0, height: -3)
+        shadow.set()
+        NSColor.white.setFill()
+        let cardRect = bounds.insetBy(dx: Self.shadowInset, dy: Self.shadowInset)
+        NSBezierPath(roundedRect: cardRect, xRadius: cornerRadius, yRadius: cornerRadius).fill()
+        context.restoreGState()
+    }
+}
+
 /// NSImageView is used instead of SwiftUI.Image so animated GIF representations
 /// keep playing in previews while static formats use the same aspect-fit layout.
 struct AnimatedImageFileView: NSViewRepresentable {
