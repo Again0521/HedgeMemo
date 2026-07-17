@@ -394,6 +394,9 @@ public struct ClipboardEntry: Codable, Hashable, Identifiable, Sendable {
     public var sourceApp: String?
     public var isPinned: Bool
     public var pinnedOrder: Int?
+    /// Independent from clipboard ordering/quick-slot pinning. Optional keeps
+    /// snapshots written by older versions source-compatible when decoded.
+    public var isDesktopPinned: Bool?
 
     public init(
         id: UUID = UUID(),
@@ -407,7 +410,8 @@ public struct ClipboardEntry: Codable, Hashable, Identifiable, Sendable {
         useCount: Int? = nil,
         sourceApp: String? = nil,
         isPinned: Bool = false,
-        pinnedOrder: Int? = nil
+        pinnedOrder: Int? = nil,
+        isDesktopPinned: Bool? = false
     ) {
         self.id = id
         self.kind = kind
@@ -421,6 +425,7 @@ public struct ClipboardEntry: Codable, Hashable, Identifiable, Sendable {
         self.sourceApp = sourceApp
         self.isPinned = isPinned
         self.pinnedOrder = pinnedOrder
+        self.isDesktopPinned = isDesktopPinned
     }
 
     public var previewText: String {

@@ -14,7 +14,7 @@ let package = Package(
         .executableTarget(
             name: "MemeMemo",
             dependencies: ["MemeMemoCore"],
-            resources: [.process("Resources")]
+            exclude: ["Resources"]
         ),
         .executableTarget(name: "MemeMemoWhitebox", dependencies: ["MemeMemoCore"]),
     ]

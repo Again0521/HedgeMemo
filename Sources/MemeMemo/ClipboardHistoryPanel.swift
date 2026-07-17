@@ -7,19 +7,19 @@ import SwiftUI
 final class ClipboardHistoryPanelController: NSObject {
     private let store: ClipboardHistoryStore
     private let memeStore: MemeStore
+    private let pinnedWindows: PinnedClipboardWindowsController
     private var panel: NSPanel?
     private var mainSurface: NSView?
+    private var detailPanel: NSPanel?
     private var detailSurface: NSView?
-    private var mainContent: AnyView?
-    private var detailContent: AnyView?
-    private var expandedMainFrame: NSRect?
-    private var modernDetailSize: NSSize?
-    private var modernDetailOnLeft = true
+    private var detailEntryID: UUID?
     private var resignKeyObserver: NSObjectProtocol?
+    private var clickOutsideMonitor: Any?
 
     init(store: ClipboardHistoryStore, memeStore: MemeStore) {
         self.store = store
         self.memeStore = memeStore
+        pinnedWindows = PinnedClipboardWindowsController(store: store)
     }
 
     func toggle() {
@@ -33,7 +33,8 @@ final class ClipboardHistoryPanelController: NSObject {
     }
 
     func hide() {
-        hideHoverCard()
+        hideDetail()
+        stopClickOutsideMonitor()
         panel?.orderOut(nil)
     }
 
@@ -47,16 +48,16 @@ final class ClipboardHistoryPanelController: NSObject {
                 self?.resize(contentHeight: contentHeight, animate: true)
             },
             onDetailEntry: { [weak self] entry in
-                DispatchQueue.main.async { self?.updateHoverCard(entry: entry) }
+                DispatchQueue.main.async { self?.updateDetail(entry: entry) }
             },
             onAddToMemes: { [weak self] entry in
                 self?.addToMemes(entry)
+            },
+            onTogglePin: { [weak self] entry in
+                self?.pinnedWindows.toggle(entry)
             }
         )
-        mainContent = AnyView(content)
-        if #unavailable(macOS 26.0), let mainSurface {
-            SystemSurface.replaceContent(content, in: mainSurface)
-        }
+        if let mainSurface { SystemSurface.replaceContent(content, in: mainSurface) }
         let key = store.settings.activeCategoryKey
         resize(
             contentHeight: ClipboardPanelLayout.contentHeight(for: store.orderedEntries(key: key), key: key),
@@ -64,6 +65,7 @@ final class ClipboardHistoryPanelController: NSObject {
         )
         position(panel)
         panel.makeKeyAndOrderFront(nil)
+        startClickOutsideMonitor()
     }
 
     private func addToMemes(_ entry: ClipboardEntry) {
@@ -80,33 +82,27 @@ final class ClipboardHistoryPanelController: NSObject {
         )
         panel.isOpaque = false
         panel.backgroundColor = .clear
-        // NSGlassEffectView supplies its own rounded elevation. A window-level
-        // shadow follows the rectangular transparent host and exposes square
-        // corners (and, when the detail card is visible, the transparent gap).
-        panel.hasShadow = false
+        // The window's opaque region is exactly the rounded glass/vibrancy
+        // surface (everything else is clear), so the system drop shadow follows
+        // the rounded shape and lifts the panel off the content behind it.
+        panel.hasShadow = true
         panel.isMovableByWindowBackground = true
         panel.isReleasedWhenClosed = false
         panel.level = .floating
         panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .transient]
-        if #available(macOS 26.0, *) {
-            panel.contentView = NSView()
-        } else {
-            let root = NSView()
-            root.autoresizingMask = [.width, .height]
-            let mainSurface = SystemSurface.container(material: .popover, cornerRadius: 16)
-            mainSurface.autoresizingMask = []
-            mainSurface.frame = root.bounds
-            root.addSubview(mainSurface)
-            panel.contentView = root
-            self.mainSurface = mainSurface
-        }
 
-        resignKeyObserver = NotificationCenter.default.addObserver(
-            forName: NSWindow.didResignKeyNotification,
-            object: panel,
-            queue: .main
-        ) { [weak self] _ in
-            Task { @MainActor in self?.hide() }
+        let surface = SystemSurface.container(material: .popover, cornerRadius: 16)
+        panel.contentView = surface
+        mainSurface = surface
+
+        if !CommandLine.arguments.contains(where: { $0.hasPrefix("--preview-") }) {
+            resignKeyObserver = NotificationCenter.default.addObserver(
+                forName: NSWindow.didResignKeyNotification,
+                object: panel,
+                queue: .main
+            ) { [weak self] _ in
+                Task { @MainActor in self?.hide() }
+            }
         }
         return panel
     }
@@ -118,27 +114,25 @@ final class ClipboardHistoryPanelController: NSObject {
         return NSScreen.screens.first(where: { $0.frame.contains(mouse) }) ?? NSScreen.main
     }
 
+    /// Only the main panel changes size, anchored by its top edge so the list
+    /// never jumps under the pointer. The detail card lives in its own window.
     private func resize(contentHeight: CGFloat, animate: Bool) {
         guard let panel else { return }
-        if detailSurface != nil { hideHoverCard() }
-        if expandedMainFrame != nil { hideHoverCard() }
+        hideDetail()
         let visibleFrame = activeScreen?.visibleFrame ?? NSRect(x: 0, y: 0, width: 900, height: 700)
         let height = ClipboardPanelLayout.panelHeight(
             contentHeight: contentHeight,
             availableHeight: visibleFrame.height - 24
         )
         var frame = panel.frame
-        let top = frame.maxY
-        frame.size.height = height
-        frame.origin.y = max(top - height, visibleFrame.minY + 12)
         frame.size.width = ClipboardPanelLayout.panelWidth
+        frame.size.height = height
+        // Keep the top edge where it was, but clamp it below the screen top so a
+        // taller category can never push the search field and category bar off
+        // the top of the screen. Growth then happens downward, then upward.
+        let pinnedTop = min(panel.frame.maxY, visibleFrame.maxY - 12)
+        frame.origin.y = max(pinnedTop - height, visibleFrame.minY + 12)
         panel.setFrame(frame, display: true, animate: animate && panel.isVisible)
-        if #available(macOS 26.0, *) {
-            renderModernSurface(mainSize: frame.size)
-            return
-        }
-        guard let mainSurface else { return }
-        mainSurface.frame = panel.contentView?.bounds ?? NSRect(origin: .zero, size: frame.size)
     }
 
     private func position(_ panel: NSPanel) {
@@ -153,148 +147,171 @@ final class ClipboardHistoryPanelController: NSObject {
         panel.setFrameOrigin(origin)
     }
 
-    // MARK: - Detail card
+    // MARK: - Detail window
 
-    private func updateHoverCard(entry: ClipboardEntry?) {
+    /// Shows the detail as a separate side window. It is top-aligned with the
+    /// main panel and only the detail window resizes as the hovered entry
+    /// changes — the main list stays put, so nothing "runs around".
+    private func updateDetail(entry: ClipboardEntry?) {
         guard let entry, let panel, panel.isVisible else {
-            hideHoverCard()
+            hideDetail()
             return
         }
+        if detailEntryID == entry.id { return }
+        detailEntryID = entry.id
+
         let visibleFrame = activeScreen?.visibleFrame ?? panel.frame
         let imageURL = store.imageURL(for: entry)
         let size = ClipboardDetailLayout.cardSize(for: entry, imageURL: imageURL, availableHeight: visibleFrame.height)
         let content = ClipboardDetailCard(entry: entry, imageURL: imageURL, cardHeight: size.height)
-        if #available(macOS 26.0, *) {
-            updateModernDetail(content: AnyView(content), size: size, visibleFrame: visibleFrame)
-            return
-        }
-        guard let mainSurface else { return }
-        let mainFrame = panel.convertToScreen(mainSurface.frame)
+
+        let detail = detailPanel ?? makeDetailPanel()
+        detailPanel = detail
+        if let detailSurface { SystemSurface.replaceContent(content, in: detailSurface) }
+
+        let mainFrame = panel.frame
         let gap: CGFloat = 10
         let placeLeft = mainFrame.minX - size.width - gap >= visibleFrame.minX + 8
-        let combinedHeight = max(mainFrame.height, size.height)
-        let combinedWidth = mainFrame.width + gap + size.width
-        let combinedFrame = NSRect(
-            x: placeLeft ? mainFrame.minX - size.width - gap : mainFrame.minX,
-            y: mainFrame.maxY - combinedHeight,
-            width: combinedWidth,
-            height: combinedHeight
+        let x = placeLeft ? mainFrame.minX - size.width - gap : mainFrame.maxX + gap
+        // Top-align with the main panel; clamp so a tall card stays on-screen.
+        let y = min(
+            max(mainFrame.maxY - size.height, visibleFrame.minY + 8),
+            visibleFrame.maxY - size.height - 8
         )
-        panel.setFrame(combinedFrame, display: true)
-
-        let mainX = placeLeft ? size.width + gap : 0
-        mainSurface.frame = NSRect(
-            x: mainX,
-            y: combinedHeight - mainFrame.height,
-            width: mainFrame.width,
-            height: mainFrame.height
-        )
-
-        let detail = detailSurface ?? SystemSurface.container(material: .popover, cornerRadius: 12)
-        detail.autoresizingMask = []
-        detail.frame = NSRect(
-            x: placeLeft ? 0 : mainFrame.width + gap,
-            y: combinedHeight - size.height,
-            width: size.width,
-            height: size.height
-        )
-        if detail.superview == nil { panel.contentView?.addSubview(detail) }
-        SystemSurface.replaceContent(content, in: detail)
-        detailSurface = detail
+        detail.setFrame(NSRect(x: x, y: y, width: size.width, height: size.height), display: true)
+        // As a child of the main panel the detail shares its active-window
+        // appearance (so the two glass surfaces match) and rides above it.
+        if detail.parent == nil {
+            panel.addChildWindow(detail, ordered: .above)
+        } else {
+            detail.orderFront(nil)
+        }
     }
 
-    private func hideHoverCard() {
-        if #available(macOS 26.0, *), let panel, let mainFrame = expandedMainFrame {
-            detailContent = nil
-            modernDetailSize = nil
-            expandedMainFrame = nil
-            panel.setFrame(mainFrame, display: true)
-            renderModernSurface(mainSize: mainFrame.size)
+    private func makeDetailPanel() -> NSPanel {
+        let detail = NSPanel(
+            contentRect: NSRect(x: 0, y: 0, width: ClipboardDetailLayout.cardWidth, height: 200),
+            styleMask: [.borderless, .nonactivatingPanel],
+            backing: .buffered,
+            defer: false
+        )
+        detail.isOpaque = false
+        detail.backgroundColor = .clear
+        detail.hasShadow = true
+        detail.ignoresMouseEvents = true
+        detail.isReleasedWhenClosed = false
+        detail.level = .floating
+        detail.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .transient]
+        let surface = SystemSurface.container(material: .popover, cornerRadius: 12)
+        detail.contentView = surface
+        detailSurface = surface
+        return detail
+    }
+
+    private func hideDetail() {
+        detailEntryID = nil
+        if let detailPanel, let panel, detailPanel.parent != nil {
+            panel.removeChildWindow(detailPanel)
+        }
+        detailPanel?.orderOut(nil)
+    }
+
+    // MARK: - Click-outside dismissal
+
+    /// A nonactivating panel does not reliably resign key when the user clicks
+    /// another app or the desktop, so watch global clicks and close on any that
+    /// land outside our windows.
+    private func startClickOutsideMonitor() {
+        guard clickOutsideMonitor == nil,
+              !CommandLine.arguments.contains(where: { $0.hasPrefix("--preview-") }) else { return }
+        clickOutsideMonitor = NSEvent.addGlobalMonitorForEvents(matching: [.leftMouseDown, .rightMouseDown]) { [weak self] _ in
+            Task { @MainActor in self?.hide() }
+        }
+    }
+
+    private func stopClickOutsideMonitor() {
+        if let clickOutsideMonitor {
+            NSEvent.removeMonitor(clickOutsideMonitor)
+            self.clickOutsideMonitor = nil
+        }
+    }
+
+    // MARK: - Layout self-check (--preview-verify-layout)
+
+    /// Reproduces the reported failure end-to-end: open the panel at the very
+    /// bottom of the screen, grow it to maximum height (dense category), and
+    /// hover a detail card. Then assert that every window is fully on screen,
+    /// the SwiftUI content is frame-locked to its window (no top clipping),
+    /// and both surfaces share one material and appearance state.
+    func runLayoutSelfCheck(completion: @escaping (Bool, String) -> Void) {
+        show()
+        guard let panel, let screen = panel.screen ?? NSScreen.main else {
+            completion(false, "self-check: panel or screen missing")
             return
         }
-        guard let panel, let mainSurface, let detailSurface else { return }
-        let mainFrame = panel.convertToScreen(mainSurface.frame)
-        detailSurface.removeFromSuperview()
-        self.detailSurface = nil
-        panel.setFrame(mainFrame, display: true)
-        mainSurface.frame = panel.contentView?.bounds ?? NSRect(origin: .zero, size: mainFrame.size)
-    }
+        let visible = screen.visibleFrame
+        // Bottom of the screen, like invoking the hotkey with the mouse there.
+        panel.setFrameOrigin(NSPoint(x: visible.midX - panel.frame.width / 2, y: visible.minY + 12))
+        // Force maximum growth, exactly what switching to a dense category does.
+        resize(contentHeight: 10_000, animate: true)
+        // Hover detail for a synthetic entry.
+        updateDetail(entry: ClipboardEntry(kind: .text, text: "自检条目", contentHash: "self-check"))
 
-    @available(macOS 26.0, *)
-    private func updateModernDetail(content: AnyView, size: NSSize, visibleFrame: NSRect) {
-        guard let panel else { return }
-        let mainFrame = expandedMainFrame ?? panel.frame
-        let gap: CGFloat = 10
-        let placeLeft = mainFrame.minX - size.width - gap >= visibleFrame.minX + 8
-        let combinedSize = NSSize(
-            width: mainFrame.width + gap + size.width,
-            height: max(mainFrame.height, size.height)
-        )
-        let combinedFrame = NSRect(
-            x: placeLeft ? mainFrame.minX - size.width - gap : mainFrame.minX,
-            y: mainFrame.maxY - combinedSize.height,
-            width: combinedSize.width,
-            height: combinedSize.height
-        )
-        expandedMainFrame = mainFrame
-        detailContent = content
-        modernDetailSize = size
-        modernDetailOnLeft = placeLeft
-        panel.setFrame(combinedFrame, display: true)
-        renderModernSurface(mainSize: mainFrame.size)
-    }
-
-    @available(macOS 26.0, *)
-    private func renderModernSurface(mainSize: NSSize) {
-        guard let panel, let mainContent else { return }
-        let root = ClipboardLiquidGlassLayout(
-            main: mainContent,
-            detail: detailContent,
-            mainSize: mainSize,
-            detailSize: modernDetailSize,
-            detailOnLeft: modernDetailOnLeft
-        )
-        let hosting = NSHostingView(rootView: root)
-        hosting.frame = panel.contentView?.bounds ?? NSRect(origin: .zero, size: panel.frame.size)
-        hosting.autoresizingMask = [.width, .height]
-        panel.contentView = hosting
-    }
-}
-
-@available(macOS 26.0, *)
-private struct ClipboardLiquidGlassLayout: View {
-    let main: AnyView
-    let detail: AnyView?
-    let mainSize: NSSize
-    let detailSize: NSSize?
-    let detailOnLeft: Bool
-
-    var body: some View {
-        GlassEffectContainer(spacing: 10) {
-            HStack(alignment: .top, spacing: 10) {
-                if detailOnLeft { detailSurface }
-                main
-                    .frame(width: mainSize.width, height: mainSize.height, alignment: .top)
-                    .clipShape(mainShape)
-                    .glassEffect(.regular, in: mainShape)
-                if !detailOnLeft { detailSurface }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) { [weak self] in
+            guard let self, let panel = self.panel else {
+                completion(false, "self-check: panel disappeared")
+                return
             }
-        }
-        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
-    }
+            var failures = [String]()
+            var report = [String]()
 
-    @ViewBuilder
-    private var detailSurface: some View {
-        if let detail, let detailSize {
-            detail
-                .frame(width: detailSize.width, height: detailSize.height, alignment: .top)
-                .clipShape(detailShape)
-                .glassEffect(.regular, in: detailShape)
+            let frame = panel.frame
+            report.append("visible=\(visible) panel=\(frame)")
+            if frame.minY < visible.minY - 1 || frame.maxY > visible.maxY + 1 {
+                failures.append("panel frame leaves the visible screen vertically")
+            }
+
+            let contentBounds = panel.contentView?.bounds ?? .zero
+            if let hosting = SystemSurface.hostingFrame(of: self.mainSurface) {
+                report.append("contentBounds=\(contentBounds) hosting=\(hosting)")
+                if abs(hosting.height - contentBounds.height) > 1 || abs(hosting.minY - contentBounds.minY) > 1 {
+                    failures.append("hosted content is not frame-locked to the window (top clipping)")
+                }
+            } else {
+                failures.append("main surface has no hosted content")
+            }
+
+            if let detail = self.detailPanel, detail.isVisible {
+                report.append("detail=\(detail.frame)")
+                if detail.frame.minY < visible.minY - 1 || detail.frame.maxY > visible.maxY + 1 {
+                    failures.append("detail frame leaves the visible screen vertically")
+                }
+            } else {
+                failures.append("detail card did not show")
+            }
+
+            let mainConfig = SystemSurface.backdropConfiguration(of: self.mainSurface)
+            let detailConfig = SystemSurface.backdropConfiguration(of: self.detailSurface)
+            if let mainConfig, let detailConfig {
+                report.append("mainMaterial=\(mainConfig.material.rawValue)/\(mainConfig.state.rawValue) detailMaterial=\(detailConfig.material.rawValue)/\(detailConfig.state.rawValue)")
+                if mainConfig.material != detailConfig.material {
+                    failures.append("main and detail materials differ")
+                }
+                if mainConfig.state != .active || detailConfig.state != .active {
+                    failures.append("backdrops are not forced active (mismatched appearance)")
+                }
+            } else {
+                failures.append("backdrop configuration missing (glass path still in use?)")
+            }
+
+            self.hide()
+            let passed = failures.isEmpty
+            let summary = (passed ? "LAYOUT SELF-CHECK PASSED" : "LAYOUT SELF-CHECK FAILED")
+                + (failures.isEmpty ? "" : "\n" + failures.map { "  ✗ \($0)" }.joined(separator: "\n"))
+                + "\n" + report.map { "  · \($0)" }.joined(separator: "\n")
+            completion(passed, summary)
         }
     }
-
-    private var mainShape: RoundedRectangle { RoundedRectangle(cornerRadius: 16, style: .continuous) }
-    private var detailShape: RoundedRectangle { RoundedRectangle(cornerRadius: 12, style: .continuous) }
 }
 
 /// Borderless panels refuse key status by default; the search field needs it.
@@ -337,18 +354,26 @@ private struct ClipboardDetailCard: View {
         if entry.kind == .image, let imageURL {
             AnimatedImageFileView(url: imageURL)
                 .frame(maxWidth: .infinity)
-                .frame(height: ClipboardDetailLayout.previewHeight(for: entry, imageURL: imageURL))
+                .frame(height: ClipboardDetailLayout.previewAreaHeight(cardHeight: cardHeight))
                 .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
         } else if entry.contentCategory == .code {
-            Text(CodeHighlighter.highlight(entry.text ?? ""))
-                .font(.system(size: 11, design: .monospaced))
-                .lineLimit(12)
-                .frame(maxWidth: .infinity, alignment: .leading)
+            ScrollView(.vertical) {
+                Text(CodeHighlighter.highlight(entry.text ?? ""))
+                    .font(.system(size: 11, design: .monospaced))
+                    .textSelection(.enabled)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+            }
+            .scrollIndicators(.automatic)
+            .frame(height: ClipboardDetailLayout.previewAreaHeight(cardHeight: cardHeight))
         } else {
-            Text(entry.text ?? entry.previewText)
-                .font(.system(size: 12))
-                .lineLimit(12)
-                .frame(maxWidth: .infinity, alignment: .leading)
+            ScrollView(.vertical) {
+                Text(entry.text ?? entry.previewText)
+                    .font(.system(size: 12))
+                    .textSelection(.enabled)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+            }
+            .scrollIndicators(.automatic)
+            .frame(height: ClipboardDetailLayout.previewAreaHeight(cardHeight: cardHeight))
         }
     }
 
@@ -365,41 +390,54 @@ private struct ClipboardDetailCard: View {
 }
 
 private enum ClipboardDetailLayout {
-    static let cardWidth: CGFloat = 264
+    static let cardWidth: CGFloat = 304
     private static let horizontalPadding: CGFloat = 12
     private static let verticalChrome: CGFloat = 161
-    private static let maximumPreviewHeight: CGFloat = 210
-    private static let maximumLines = 12
+    // A single text line should not reserve a tall preview; only images get a
+    // comfortable minimum so a thumbnail isn't cramped.
+    private static let minimumPreviewHeight: CGFloat = 18
+    private static let minimumImagePreviewHeight: CGFloat = 96
+    private static let screenMargin: CGFloat = 24
 
     static func cardSize(for entry: ClipboardEntry, imageURL: URL?, availableHeight: CGFloat) -> NSSize {
-        let preview = previewHeight(for: entry, imageURL: imageURL)
+        let floor = minimumPreview(for: entry)
+        let maximumPreview = max(floor, availableHeight - verticalChrome - screenMargin)
+        let preview = previewHeight(for: entry, imageURL: imageURL, maximumHeight: maximumPreview)
         let desired = verticalChrome + preview
-        let maximum = min(460, availableHeight * 0.68)
-        return NSSize(width: cardWidth, height: min(max(desired, 118), maximum))
+        let maximum = max(verticalChrome + floor, availableHeight - screenMargin)
+        return NSSize(width: cardWidth, height: min(max(desired, verticalChrome + floor), maximum))
     }
 
-    static func previewHeight(for entry: ClipboardEntry, imageURL: URL?) -> CGFloat {
+    static func previewAreaHeight(cardHeight: CGFloat) -> CGFloat {
+        max(minimumPreviewHeight, cardHeight - verticalChrome)
+    }
+
+    private static func minimumPreview(for entry: ClipboardEntry) -> CGFloat {
+        entry.kind == .image ? minimumImagePreviewHeight : minimumPreviewHeight
+    }
+
+    static func previewHeight(for entry: ClipboardEntry, imageURL: URL?, maximumHeight: CGFloat) -> CGFloat {
         let contentWidth = cardWidth - horizontalPadding * 2
         if entry.kind == .image, let imageURL, let image = NSImage(contentsOf: imageURL) {
             let size = image.representations.first.map {
                 NSSize(width: $0.pixelsWide, height: $0.pixelsHigh)
             } ?? image.size
             guard size.width > 0, size.height > 0 else { return 140 }
-            return min(maximumPreviewHeight, max(72, contentWidth * size.height / size.width))
+            return min(maximumHeight, max(minimumPreviewHeight, contentWidth * size.height / size.width))
         }
 
         let isCode = entry.contentCategory == .code
         let font = isCode
             ? NSFont.monospacedSystemFont(ofSize: 11, weight: .regular)
             : NSFont.systemFont(ofSize: 12)
-        let text = isCode ? ClipboardPanelLayout.codePreviewLines(entry.text).joined(separator: "\n") : (entry.text ?? entry.previewText)
+        let text = entry.text ?? entry.previewText
         let bounds = (text as NSString).boundingRect(
             with: NSSize(width: contentWidth, height: .greatestFiniteMagnitude),
             options: [.usesLineFragmentOrigin, .usesFontLeading],
             attributes: [.font: font]
         )
         let lineHeight = ceil(font.ascender - font.descender + font.leading)
-        return max(lineHeight, min(ceil(bounds.height), lineHeight * CGFloat(maximumLines)))
+        return max(lineHeight, min(ceil(bounds.height), maximumHeight))
     }
 }
 
@@ -411,6 +449,7 @@ struct ClipboardHistoryPanelView: View {
     let onContentChange: (CGFloat) -> Void
     let onDetailEntry: (ClipboardEntry?) -> Void
     let onAddToMemes: (ClipboardEntry) -> Void
+    let onTogglePin: (ClipboardEntry) -> Void
 
     @State private var query = ""
     @State private var selectedID: UUID?
@@ -453,7 +492,6 @@ struct ClipboardHistoryPanelView: View {
         .onChange(of: query) { _, _ in selectionAndSizeChanged() }
         .onChange(of: store.settings.lastCategory) { _, _ in selectionAndSizeChanged() }
         .onChange(of: store.entries) { _, _ in selectionAndSizeChanged() }
-        .onDisappear { onDetailEntry(nil) }
     }
 
     private var emptyTitle: String {
@@ -521,7 +559,8 @@ struct ClipboardHistoryPanelView: View {
                     ImageEntryCell(
                         entry: entry,
                         imageURL: store.imageURL(for: entry),
-                        isSelected: selectedID == entry.id
+                        isSelected: selectedID == entry.id,
+                        onTogglePin: { onTogglePin(entry) }
                     )
                     .id(entry.id)
                     .onTapGesture { copy(entry) }
@@ -536,12 +575,24 @@ struct ClipboardHistoryPanelView: View {
             }
         default:
             LazyVStack(spacing: ClipboardPanelLayout.listSpacing) {
-                ForEach(entries) { entry in
-                    Group {
+                ForEach(Array(entries.enumerated()), id: \.element.id) { index, entry in
+                    VStack(spacing: 0) {
                         if activeKey == .builtin(.code) {
-                            CodeEntryRow(entry: entry, isSelected: selectedID == entry.id)
+                            CodeEntryRow(
+                                entry: entry,
+                                isSelected: selectedID == entry.id,
+                                onTogglePin: { onTogglePin(entry) }
+                            )
                         } else {
-                            TextEntryRow(entry: entry, isSelected: selectedID == entry.id)
+                            TextEntryRow(
+                                entry: entry,
+                                isSelected: selectedID == entry.id,
+                                onTogglePin: { onTogglePin(entry) }
+                            )
+                        }
+                        if activeKey == .builtin(.code), index < entries.count - 1 {
+                            Divider()
+                                .padding(.horizontal, 10)
                         }
                     }
                     .id(entry.id)
@@ -570,6 +621,7 @@ struct ClipboardHistoryPanelView: View {
             Divider()
         }
         Button(entry.isPinned ? "取消置顶" : "置顶") { store.togglePinned(id: entry.id) }
+        Button(entry.isDesktopPinned == true ? "取消桌面固定" : "固定到桌面") { onTogglePin(entry) }
         Button("删除", role: .destructive) { delete(entry) }
     }
 
@@ -647,6 +699,9 @@ struct ClipboardHistoryPanelView: View {
 private struct TextEntryRow: View {
     let entry: ClipboardEntry
     let isSelected: Bool
+    let onTogglePin: () -> Void
+
+    @State private var isHovered = false
 
     var body: some View {
         HStack(spacing: 6) {
@@ -658,8 +713,12 @@ private struct TextEntryRow: View {
                 Image(systemName: "pin.fill")
                     .font(.system(size: 8))
                     .foregroundStyle(isSelected ? Color.white.opacity(0.8) : Color.secondary)
+                    .help("剪贴板内置顶")
             }
             Spacer(minLength: 0)
+            if isSelected || isHovered || entry.isDesktopPinned == true {
+                ClipboardPinButton(entry: entry, isSelected: isSelected, action: onTogglePin)
+            }
         }
         .padding(.horizontal, 10)
         .frame(height: ClipboardPanelLayout.textRowHeight)
@@ -668,12 +727,16 @@ private struct TextEntryRow: View {
             RoundedRectangle(cornerRadius: 7, style: .continuous)
                 .fill(isSelected ? AnyShapeStyle(Color.accentColor) : AnyShapeStyle(.clear))
         )
+        .onHover { isHovered = $0 }
     }
 }
 
 private struct CodeEntryRow: View {
     let entry: ClipboardEntry
     let isSelected: Bool
+    let onTogglePin: () -> Void
+
+    @State private var isHovered = false
 
     private var lineCount: Int { ClipboardPanelLayout.previewLineCount(entry.text) }
 
@@ -688,8 +751,12 @@ private struct CodeEntryRow: View {
                 Image(systemName: "pin.fill")
                     .font(.system(size: 8))
                     .foregroundStyle(isSelected ? Color.white.opacity(0.8) : Color.secondary)
+                    .help("剪贴板内置顶")
             }
             Spacer(minLength: 0)
+            if isSelected || isHovered || entry.isDesktopPinned == true {
+                ClipboardPinButton(entry: entry, isSelected: isSelected, action: onTogglePin)
+            }
         }
         .padding(.horizontal, 10)
         .frame(height: ClipboardPanelLayout.codeRowHeight(lineCount: lineCount), alignment: .center)
@@ -698,6 +765,7 @@ private struct CodeEntryRow: View {
             RoundedRectangle(cornerRadius: 7, style: .continuous)
                 .fill(isSelected ? AnyShapeStyle(Color.accentColor) : AnyShapeStyle(.clear))
         )
+        .onHover { isHovered = $0 }
     }
 
     private var previewCode: String {
@@ -709,6 +777,9 @@ private struct ImageEntryCell: View {
     let entry: ClipboardEntry
     let imageURL: URL?
     let isSelected: Bool
+    let onTogglePin: () -> Void
+
+    @State private var isHovered = false
 
     private var side: CGFloat { ClipboardPanelLayout.imageCellSide }
 
@@ -728,13 +799,10 @@ private struct ImageEntryCell: View {
         }
         .frame(width: side, height: side)
         .overlay(alignment: .topTrailing) {
-            if entry.isPinned {
-                Image(systemName: "pin.fill")
-                    .font(.system(size: 8))
-                    .foregroundStyle(.white)
-                    .padding(3)
+            if isSelected || isHovered || entry.isDesktopPinned == true {
+                ClipboardPinButton(entry: entry, isSelected: true, action: onTogglePin)
                     .background(Circle().fill(.black.opacity(0.4)))
-                    .padding(3)
+                    .padding(4)
             }
         }
         .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
@@ -742,6 +810,26 @@ private struct ImageEntryCell: View {
             RoundedRectangle(cornerRadius: 8, style: .continuous)
                 .stroke(isSelected ? Color.accentColor : Color.clear, lineWidth: 2)
         }
+        .onHover { isHovered = $0 }
+    }
+}
+
+private struct ClipboardPinButton: View {
+    let entry: ClipboardEntry
+    let isSelected: Bool
+    let action: () -> Void
+
+    var body: some View {
+        Button(action: action) {
+            Image(systemName: entry.isDesktopPinned == true ? "pin.fill" : "pin")
+                .font(.system(size: 10, weight: .medium))
+                .frame(width: 18, height: 18)
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .foregroundStyle(isSelected ? Color.white : Color.secondary)
+        .help(entry.isDesktopPinned == true ? "取消桌面固定" : "固定到桌面")
+        .accessibilityLabel(entry.isDesktopPinned == true ? "取消桌面固定" : "固定到桌面")
     }
 }
 

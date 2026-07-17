@@ -8,7 +8,7 @@ final class ScreenshotEditorPanelController {
 
     func edit(image: NSImage, completion: @escaping (NSImage?) -> Void) {
         onComplete = completion
-        let panel = makePanel()
+        let panel = makePanel(for: image)
         let content = ScreenshotEditorPanelView(
             image: image,
             onCancel: { [weak self] in self?.finish(image: nil) },
@@ -20,13 +20,13 @@ final class ScreenshotEditorPanelController {
         panel.makeKeyAndOrderFront(nil)
     }
 
-    private func makePanel() -> NSPanel {
+    private func makePanel(for image: NSImage) -> NSPanel {
         let mouse = NSEvent.mouseLocation
         let screen = NSScreen.screens.first(where: { $0.frame.contains(mouse) }) ?? NSScreen.main
         let visibleFrame = screen?.visibleFrame ?? NSRect(x: 0, y: 0, width: 1100, height: 780)
-        let panelSize = NSSize(
-            width: min(1480, max(760, visibleFrame.width * 0.84)),
-            height: min(1120, max(600, visibleFrame.height * 0.78))
+        let panelSize = ScreenshotEditorLayout.panelSize(
+            imageSize: image.pixelSize,
+            visibleFrame: visibleFrame
         )
         let panelFrame = NSRect(
             x: visibleFrame.midX - panelSize.width / 2,
@@ -74,6 +74,7 @@ private struct ScreenshotEditorPanelView: View {
     @State private var width: MarkupWidth = .medium
     @State private var canvas = ScreenshotCanvasState()
     @State private var showsMarkupTools = false
+    @State private var isFinishing = false
 
     var body: some View {
         VStack(spacing: 0) {
@@ -171,10 +172,11 @@ private struct ScreenshotEditorPanelView: View {
                 .help("共享")
 
                 Button("完成") {
-                    onSave(ScreenshotRenderer.render(image: image, state: canvas))
+                    finishEditing()
                 }
                 .keyboardShortcut(.defaultAction)
                 .buttonStyle(.borderedProminent)
+                .disabled(isFinishing)
             }
             .frame(width: 220, alignment: .trailing)
         }
@@ -188,11 +190,62 @@ private struct ScreenshotEditorPanelView: View {
         let anchor = NSRect(x: view.bounds.maxX - 90, y: view.bounds.maxY - 58, width: 1, height: 1)
         picker.show(relativeTo: anchor, of: view, preferredEdge: .minY)
     }
+
+    private func finishEditing() {
+        guard !isFinishing else { return }
+        isFinishing = true
+        // The overwhelmingly common path has no annotations. Returning the
+        // original avoids a full-size redraw before the panel closes; PNG
+        // encoding is also performed asynchronously by AppServices.
+        guard canvas.hasEdits else {
+            onSave(image)
+            return
+        }
+        let request = ScreenshotRenderRequest(image: image, state: canvas)
+        Task { @MainActor in
+            let rendered = await Task.detached(priority: .userInitiated) {
+                ScreenshotRenderedImage(ScreenshotRenderer.render(image: request.image, state: request.state))
+            }.value
+            onSave(rendered.image)
+        }
+    }
 }
 
-/// Matches the system screenshot editor's long-image behavior: ordinary
-/// screenshots fit in the canvas, while tall captures fit to the available
-/// width and scroll vertically instead of shrinking into an unreadable strip.
+private enum ScreenshotEditorLayout {
+    static let toolbarHeight: CGFloat = 58
+    static let canvasPadding: CGFloat = 32
+    static let screenMargin: CGFloat = 16
+
+    static func panelSize(imageSize: NSSize, visibleFrame: NSRect) -> NSSize {
+        let maximum = NSSize(
+            width: min(1600, max(640, visibleFrame.width - screenMargin * 2)),
+            height: min(1200, max(480, visibleFrame.height - screenMargin * 2))
+        )
+        guard imageSize.width > 0, imageSize.height > 0 else { return maximum }
+        let maximumCanvas = NSSize(
+            width: max(1, maximum.width - canvasPadding * 2),
+            height: max(1, maximum.height - toolbarHeight - canvasPadding * 2)
+        )
+        let scale = min(maximumCanvas.width / imageSize.width, maximumCanvas.height / imageSize.height)
+        let fitted = NSSize(width: imageSize.width * scale, height: imageSize.height * scale)
+        return NSSize(
+            width: min(maximum.width, max(680, fitted.width + canvasPadding * 2)),
+            height: min(maximum.height, max(460, fitted.height + toolbarHeight + canvasPadding * 2))
+        )
+    }
+
+    static func fittedImageSize(_ imageSize: NSSize, in viewport: CGSize) -> CGSize {
+        guard imageSize.width > 0, imageSize.height > 0 else { return viewport }
+        let width = max(1, viewport.width - canvasPadding * 2)
+        let height = max(1, viewport.height - canvasPadding * 2)
+        let scale = min(width / imageSize.width, height / imageSize.height)
+        return CGSize(width: imageSize.width * scale, height: imageSize.height * scale)
+    }
+}
+
+/// The system editor initially shows the complete capture. The window itself
+/// follows the capture aspect ratio, while this final fit protects against
+/// unusually small or rotated displays without forcing an initial scroll.
 private struct ScreenshotCanvasViewport: View {
     let image: NSImage
     @Binding var mode: ScreenshotEditorMode
@@ -203,24 +256,13 @@ private struct ScreenshotCanvasViewport: View {
 
     var body: some View {
         GeometryReader { geometry in
-            let viewport = geometry.size
-            let imageSize = image.pixelSize
-            let contentWidth = max(viewport.width - 64, 1)
-            let widthFittedHeight = imageSize.width > 0 ? contentWidth * imageSize.height / imageSize.width : viewport.height
-            if widthFittedHeight > viewport.height - 64 {
-                ScrollView(.vertical) {
-                    editor
-                        .frame(width: contentWidth, height: widthFittedHeight)
-                        .shadow(color: .black.opacity(0.18), radius: 10, y: 4)
-                        .frame(maxWidth: .infinity)
-                        .padding(.vertical, 32)
-                }
-                .scrollIndicators(.visible)
-            } else {
-                editor
-                    .padding(32)
-                    .shadow(color: .black.opacity(0.18), radius: 10, y: 4)
-            }
+            let fitted = ScreenshotEditorLayout.fittedImageSize(image.pixelSize, in: geometry.size)
+            editor
+                .frame(width: fitted.width, height: fitted.height)
+                .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+                .shadow(color: .black.opacity(0.18), radius: 10, y: 4)
+                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .center)
+                .padding(ScreenshotEditorLayout.canvasPadding)
         }
         .background(Color.primary.opacity(0.025))
     }
@@ -374,6 +416,10 @@ private struct ScreenshotCanvasState: Equatable {
 
     var canUndo: Bool { !history.isEmpty }
 
+    var hasEdits: Bool {
+        cropRect != nil || !strokes.isEmpty || !arrows.isEmpty || !rectangles.isEmpty || !labels.isEmpty
+    }
+
     mutating func undo() {
         guard let last = history.popLast() else { return }
         switch last {
@@ -384,6 +430,20 @@ private struct ScreenshotCanvasState: Equatable {
         case .label: if !labels.isEmpty { labels.removeLast() }
         }
     }
+}
+
+/// NSImage is immutable for the lifetime of an editor operation. These wrappers
+/// make that ownership explicit when the expensive annotation render is moved
+/// off the main actor.
+private struct ScreenshotRenderRequest: @unchecked Sendable {
+    let image: NSImage
+    let state: ScreenshotCanvasState
+}
+
+private struct ScreenshotRenderedImage: @unchecked Sendable {
+    let image: NSImage
+
+    init(_ image: NSImage) { self.image = image }
 }
 
 private enum ScreenshotStrokeKind: Equatable {

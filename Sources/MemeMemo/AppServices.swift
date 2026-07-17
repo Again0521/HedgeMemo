@@ -1,8 +1,10 @@
 import AppKit
 import Carbon.HIToolbox
 import Combine
+import ImageIO
 import MemeMemoCore
 import SwiftUI
+import UniformTypeIdentifiers
 
 @MainActor
 final class AppServices: ObservableObject {
@@ -92,11 +94,27 @@ final class AppServices: ObservableObject {
 
     func previewScreenshotEditor(imageURL: URL) {
         guard let image = NSImage(contentsOf: imageURL) else { return }
-        screenshotEditor.edit(image: image) { _ in }
+        screenshotEditor.edit(image: image) { [weak self] editedImage in
+            guard let self, let editedImage else { return }
+            self.copyScreenshot(editedImage)
+        }
     }
 
     func previewClipboard(category: ClipboardContentCategory) {
         clipboardPanelController?.preview(category: category)
+    }
+
+    /// Runs the clipboard panel layout/material self-check and terminates the
+    /// process with a nonzero status on failure (used by --preview-verify-layout).
+    func verifyClipboardLayout() {
+        guard let clipboardPanelController else {
+            print("LAYOUT SELF-CHECK FAILED\n  ✗ clipboard panel controller unavailable")
+            exit(1)
+        }
+        clipboardPanelController.runLayoutSelfCheck { passed, summary in
+            print(summary)
+            exit(passed ? 0 : 1)
+        }
     }
 
     private func handleCapturedScreenshot(_ image: NSImage, mode: ScreenshotMode) {
@@ -114,14 +132,24 @@ final class AppServices: ObservableObject {
     /// "完成" means the screenshot is ready to paste. It does not add the
     /// screenshot to the meme library; that remains an explicit user action.
     private func copyScreenshot(_ image: NSImage) {
-        guard let data = image.pngData else {
+        var proposedRect = NSRect(origin: .zero, size: image.size)
+        guard let cgImage = image.cgImage(forProposedRect: &proposedRect, context: nil, hints: nil) else {
             memeStore.report(MemeRepositoryError.cannotEncodeImage)
             return
         }
-        let payload = ImageAssetData(data: data, fileExtension: "png")
-        guard payload.write(to: .general) else {
-            memeStore.report(MemeRepositoryError.cannotEncodeImage)
-            return
+        Task { @MainActor [weak self] in
+            let data = await Task.detached(priority: .userInitiated) {
+                ScreenshotPNGEncoder.data(for: cgImage)
+            }.value
+            guard let self, let data else {
+                self?.memeStore.report(MemeRepositoryError.cannotEncodeImage)
+                return
+            }
+            let payload = ImageAssetData(data: data, fileExtension: "png")
+            guard payload.write(to: .general) else {
+                memeStore.report(MemeRepositoryError.cannotEncodeImage)
+                return
+            }
         }
     }
 
@@ -139,6 +167,21 @@ final class AppServices: ObservableObject {
         }
         hotKeyWarnings.removeAll { $0.hasPrefix(prefix) }
         if let message { hotKeyWarnings.append(message) }
+    }
+}
+
+private enum ScreenshotPNGEncoder {
+    static func data(for image: CGImage) -> Data? {
+        let output = NSMutableData()
+        guard let destination = CGImageDestinationCreateWithData(
+            output,
+            UTType.png.identifier as CFString,
+            1,
+            nil
+        ) else { return nil }
+        CGImageDestinationAddImage(destination, image, nil)
+        guard CGImageDestinationFinalize(destination) else { return nil }
+        return output as Data
     }
 }
 

@@ -201,6 +201,18 @@ await MainActor.run {
     clipboardStore.settings.activeCategoryKey = .builtin(.image)
     expect(clipboardStore.settings.activeCategoryKey == .builtin(.image), "changing the active category must not crash")
 
+    expect(clipboardStore.addText("独立固定状态"), "seed clipboard entry for pin-state checks")
+    let pinStateID = clipboardStore.entries.first!.id
+    clipboardStore.togglePinned(id: pinStateID)
+    expect(clipboardStore.entries.first!.isPinned, "clipboard pinning must set only the clipboard ordering state")
+    expect(clipboardStore.entries.first!.isDesktopPinned != true, "clipboard pinning must not create a desktop note")
+    clipboardStore.toggleDesktopPinned(id: pinStateID)
+    expect(clipboardStore.entries.first!.isPinned, "desktop pinning must not clear clipboard ordering pinning")
+    expect(clipboardStore.entries.first!.isDesktopPinned == true, "desktop pinning must use its own state")
+    let reloadedClipboardStore = ClipboardHistoryStore(repository: ClipboardHistoryRepository(rootURL: tempRoot))
+    expect(reloadedClipboardStore.entries.first?.isPinned == true, "clipboard pin state must persist")
+    expect(reloadedClipboardStore.entries.first?.isDesktopPinned == true, "desktop note state must persist independently")
+
     let suiteName = "memememo-whitebox-screenshot"
     let defaults = UserDefaults(suiteName: suiteName)!
     defaults.removePersistentDomain(forName: suiteName)

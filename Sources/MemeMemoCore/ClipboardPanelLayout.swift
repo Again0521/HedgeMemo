@@ -11,11 +11,12 @@ public enum ClipboardPanelLayout {
     public static let sectionSpacing: CGFloat = 8
 
     public static let textRowHeight: CGFloat = 30
-    public static let listSpacing: CGFloat = 1
+    public static let listSpacing: CGFloat = 0
 
     public static let codeLineHeight: CGFloat = 14
     public static let codeRowPadding: CGFloat = 8
     public static let codePreviewMaxLines = 3
+    public static let codeSeparatorHeight: CGFloat = 1
 
     public static let imageColumns = 3
     public static let imageCellSpacing: CGFloat = 8
@@ -60,7 +61,7 @@ public enum ClipboardPanelLayout {
             return CGFloat(rows) * imageCellSide + CGFloat(rows - 1) * imageCellSpacing
         case .builtin(.code):
             let rows = entries.map { codeRowHeight(lineCount: previewLineCount($0.text)) }
-            return rows.reduce(0, +) + CGFloat(entries.count - 1) * listSpacing
+            return rows.reduce(0, +) + CGFloat(entries.count - 1) * codeSeparatorHeight
         default:
             return CGFloat(entries.count) * textRowHeight + CGFloat(entries.count - 1) * listSpacing
         }

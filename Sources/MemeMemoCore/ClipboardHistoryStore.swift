@@ -138,6 +138,13 @@ public final class ClipboardHistoryStore: ObservableObject {
         persist()
     }
 
+    public func toggleDesktopPinned(id: UUID) {
+        guard let index = entries.firstIndex(where: { $0.id == id }) else { return }
+        entries[index].isDesktopPinned = entries[index].isDesktopPinned != true
+        entries[index].updatedAt = .now
+        persist()
+    }
+
     @discardableResult
     public func copyToPasteboard(_ entry: ClipboardEntry, autoPaste: Bool = false) -> Bool {
         let pasteboard = NSPasteboard.general
@@ -189,7 +196,12 @@ public final class ClipboardHistoryStore: ObservableObject {
         // The copy happened within the last polling interval, so the frontmost
         // app is a good approximation of where the content came from.
         let sourceApp = NSWorkspace.shared.frontmostApplication?.localizedName
-        if let text = pasteboard.string(forType: .string), addText(text, sourceApp: sourceApp) { return }
+        // Require an explicitly declared text payload. Asking AppKit to convert
+        // a Finder file URL to `.string` can resolve the external file and cause
+        // a broad Documents permission prompt during background monitoring.
+        if pasteboard.types?.contains(.string) == true,
+           let text = pasteboard.string(forType: .string),
+           addText(text, sourceApp: sourceApp) { return }
         if settings.savesImages, let image = ImageAssetData.read(from: pasteboard, allowFileURLs: false) {
             _ = addImageData(image, sourceApp: sourceApp)
         }

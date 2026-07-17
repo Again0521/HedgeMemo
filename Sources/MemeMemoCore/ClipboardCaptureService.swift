@@ -30,7 +30,10 @@ public final class ClipboardCaptureService {
         let pasteboard = NSPasteboard.general
         guard pasteboard.changeCount != observedChangeCount else { return }
         observedChangeCount = pasteboard.changeCount
-        guard let image = ImageAssetData.read(from: pasteboard) else { return }
+        // Only consume image bytes already present on the pasteboard. Resolving
+        // Finder file URLs can cross into Documents/Desktop and makes a menu-bar
+        // utility request broad folder permission after each rebuilt signature.
+        guard let image = ImageAssetData.read(from: pasteboard, allowFileURLs: false) else { return }
         onImage(image)
     }
 }

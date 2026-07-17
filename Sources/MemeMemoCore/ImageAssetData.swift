@@ -21,13 +21,17 @@ public struct ImageAssetData: Sendable {
 
     @MainActor
     public static func read(from pasteboard: NSPasteboard, allowFileURLs: Bool = true) -> ImageAssetData? {
-        for candidate in pasteboardCandidates {
+        let declaredTypes = Set(pasteboard.types ?? [])
+        for candidate in pasteboardCandidates where declaredTypes.contains(candidate.type) {
             if let data = pasteboard.data(forType: candidate.type), NSImage(data: data) != nil {
                 return ImageAssetData(data: data, fileExtension: candidate.extension)
             }
         }
 
-        if let image = NSImage(pasteboard: pasteboard), let data = image.pngData {
+        // `NSImage(pasteboard:)` may ask AppKit to synthesize an image from a
+        // Finder file URL. Never invoke that conversion for background capture,
+        // because it silently crosses into Documents/Desktop and triggers TCC.
+        if allowFileURLs, let image = NSImage(pasteboard: pasteboard), let data = image.pngData {
             return ImageAssetData(data: data, fileExtension: "png")
         }
 

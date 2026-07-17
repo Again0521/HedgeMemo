@@ -3,22 +3,27 @@ import SwiftUI
 
 @MainActor
 enum SystemSurface {
+    /// Every floating surface uses NSVisualEffectView, never NSGlassEffectView.
+    /// The glass view lays out its `contentView` itself: when the SwiftUI
+    /// content is taller than the window it bottom-aligns and the top of the
+    /// panel (search field, category bar) gets clipped away. The visual-effect
+    /// pipeline keeps the hosting view frame-locked to the window, which is
+    /// predictable and testable.
     static func container(
         material: NSVisualEffectView.Material,
         cornerRadius: CGFloat? = nil
     ) -> NSView {
-        let container = SystemSurfaceView(cornerRadius: cornerRadius ?? 0)
+        let container = SystemSurfaceView()
         container.autoresizingMask = [.width, .height]
-        if #available(macOS 26.0, *) {
-            return container
-        }
 
         let backdrop = NSVisualEffectView()
         backdrop.material = material
         backdrop.blendingMode = .behindWindow
-        // Match NSPopover: allow AppKit to adjust vibrancy with window focus.
-        // Forcing `.active` makes floating panels visibly denser and greyer.
-        backdrop.state = .followsWindowActiveState
+        // Forced active: the detail card is an ignores-mouse child window that
+        // can never become key, so `.followsWindowActiveState` rendered it in
+        // the inactive appearance — a visibly different material from the key
+        // main panel. `.active` gives every surface the same dense frost.
+        backdrop.state = .active
         backdrop.frame = container.bounds
         backdrop.autoresizingMask = [.width, .height]
         if let cornerRadius {
@@ -41,18 +46,7 @@ enum SystemSurface {
     }
 
     static func replaceContent<Content: View>(_ content: Content, in container: NSView) {
-        let rootView: AnyView
-        if #available(macOS 26.0, *), let surface = container as? SystemSurfaceView {
-            let shape = RoundedRectangle(cornerRadius: surface.cornerRadius, style: .continuous)
-            rootView = AnyView(
-                content
-                    .clipShape(shape)
-                    .glassEffect(.regular, in: shape)
-            )
-        } else {
-            rootView = AnyView(content)
-        }
-        let hosting = NSHostingView(rootView: rootView)
+        let hosting = TransparentHostingView(rootView: content)
         hosting.frame = container.bounds
         hosting.autoresizingMask = [.width, .height]
         if let surface = container as? SystemSurfaceView {
@@ -63,19 +57,31 @@ enum SystemSurface {
         container.addSubview(hosting)
         (container as? SystemSurfaceView)?.hostingView = hosting
     }
+
+    /// Introspection for the layout/material self-check.
+    static func backdropConfiguration(of view: NSView?) -> (material: NSVisualEffectView.Material, state: NSVisualEffectView.State)? {
+        guard let surface = view as? SystemSurfaceView, let backdrop = surface.backdrop else { return nil }
+        return (backdrop.material, backdrop.state)
+    }
+
+    /// Frame of the hosted SwiftUI content, for verifying it stays aligned
+    /// with the window instead of overflowing past the top edge.
+    static func hostingFrame(of view: NSView?) -> NSRect? {
+        (view as? SystemSurfaceView)?.hostingView?.frame
+    }
+}
+
+/// `NSHostingView` may otherwise report itself as opaque and let AppKit draw a
+/// rectangular window background outside a SwiftUI glass shape. Floating
+/// panels need a genuinely transparent bridge so their rounded bottom corners
+/// remain visible over light content as well as wallpaper.
+final class TransparentHostingView<Content: View>: NSHostingView<Content> {
+    override var isOpaque: Bool { false }
 }
 
 private final class SystemSurfaceView: NSView {
-    let cornerRadius: CGFloat
     weak var backdrop: NSVisualEffectView?
     weak var hostingView: NSView?
-
-    init(cornerRadius: CGFloat) {
-        self.cornerRadius = cornerRadius
-        super.init(frame: .zero)
-    }
-
-    required init?(coder: NSCoder) { nil }
 }
 
 /// NSImageView is used instead of SwiftUI.Image so animated GIF representations
