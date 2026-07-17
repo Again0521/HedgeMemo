@@ -8,11 +8,15 @@ enum SystemSurface {
         case vibrancy(NSVisualEffectView.Material, NSVisualEffectView.State)
     }
 
-    /// One native glass recipe shared by every custom surface. On macOS 26+ the
-    /// hosted SwiftUI view is installed as `NSGlassEffectView.contentView` —
-    /// the only AppKit-supported composition path for glass. Earlier systems
-    /// fall back to active popover vibrancy. Content stays frame-locked to the
-    /// window in both cases.
+    /// One native contextual-popover recipe shared by every custom surface.
+    ///
+    /// The clipboard is a utility panel, not a toolbar control.  AppKit's
+    /// `NSVisualEffectView(.popover, .behindWindow)` is the same stable
+    /// backing used by native contextual popovers (and by Maccy's floating
+    /// panel).  `NSGlassEffectView` deliberately changes emphasis as an
+    /// auxiliary window becomes key, which made the whole surface flash white
+    /// whenever the pointer crossed into it.  Keeping this one AppKit material
+    /// for every surface makes hover, focus and preview presentation identical.
     static func container(
         material: NSVisualEffectView.Material,
         cornerRadius: CGFloat? = nil
@@ -27,24 +31,17 @@ enum SystemSurface {
         }
 
         let backdrop: NSView
-        if #available(macOS 26.0, *) {
-            let glass = NSGlassEffectView()
-            glass.style = .regular
-            glass.cornerRadius = cornerRadius ?? 0
-            backdrop = glass
-        } else {
-            let effect = NSVisualEffectView()
-            effect.material = material
-            effect.blendingMode = .behindWindow
-            // Forced active: the detail card is an ignores-mouse child window
-            // that can never become key; the default follows-window state would
-            // render it in a visibly different inactive material.
-            effect.state = .active
-            if let cornerRadius {
-                effect.maskImage = .cornerMask(radius: cornerRadius)
-            }
-            backdrop = effect
+        let effect = NSVisualEffectView()
+        effect.material = material
+        effect.blendingMode = .behindWindow
+        // Never follow the host window's key state.  Detail and main surfaces
+        // must remain visually identical whether the search field is focused,
+        // an entry is hovered, or a preview is visible.
+        effect.state = .active
+        if let cornerRadius {
+            effect.maskImage = .cornerMask(radius: cornerRadius)
         }
+        backdrop = effect
         backdrop.frame = container.bounds
         backdrop.autoresizingMask = [.width, .height]
         container.backdrop = backdrop
@@ -55,7 +52,6 @@ enum SystemSurface {
     /// Introspection for the self-check.
     static func backdropKind(of view: NSView?) -> BackdropKind? {
         guard let surface = view as? SystemSurfaceView, let backdrop = surface.backdrop else { return nil }
-        if #available(macOS 26.0, *), backdrop is NSGlassEffectView { return .glass }
         if let effect = backdrop as? NSVisualEffectView { return .vibrancy(effect.material, effect.state) }
         return nil
     }
@@ -77,13 +73,7 @@ enum SystemSurface {
         hosting.autoresizingMask = [.width, .height]
         if let surface = container as? SystemSurfaceView {
             surface.hostingView?.removeFromSuperview()
-            if #available(macOS 26.0, *), let glass = surface.backdrop as? NSGlassEffectView {
-                // Do not add an arbitrary sibling over the glass. AppKit only
-                // guarantees a consistent glass composition for contentView.
-                glass.contentView = hosting
-            } else {
-                container.addSubview(hosting)
-            }
+            container.addSubview(hosting)
             surface.hostingView = hosting
         } else {
             container.subviews.forEach { $0.removeFromSuperview() }

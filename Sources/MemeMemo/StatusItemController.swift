@@ -25,8 +25,10 @@ final class StatusItemController: NSObject {
 
     private func configureButton() {
         guard let button = statusItem.button else { return }
+        // The hedgehog is a colored picture (dark body, white snout), not a
+        // monochrome glyph — keep HedgehogIcon's isTemplate = false. Forcing a
+        // template here flattened it into an all-dark silhouette with no face.
         let icon = HedgehogIcon.statusImage
-        icon.isTemplate = true
         button.image = icon
         button.imagePosition = .imageOnly
         button.toolTip = "MemeMemo"

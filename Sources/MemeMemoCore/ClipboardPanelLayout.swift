@@ -4,7 +4,10 @@ import Foundation
 /// Pure layout math for the clipboard panel so the AppKit panel controller and
 /// the SwiftUI content agree on sizes, and the sizing rules stay testable.
 public enum ClipboardPanelLayout {
-    public static let panelWidth: CGFloat = 400
+    /// A little wider than the original list so ordinary source lines and
+    /// long filenames do not truncate prematurely.  The extra 60 pt is about
+    /// five CJK characters at the panel's standard body size.
+    public static let panelWidth: CGFloat = 460
     public static let outerPadding: CGFloat = 12
     public static let headerHeight: CGFloat = 28
     public static let segmentedHeight: CGFloat = 22

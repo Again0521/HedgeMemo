@@ -29,7 +29,7 @@ final class SettingsWindowController: NSObject {
         // A plain titled window keeps the system's rounded corners, shadow and
         // a real title bar; translucency comes from the vibrancy background inside.
         let panel = NSPanel(
-            contentRect: NSRect(x: 0, y: 0, width: 500, height: 700),
+            contentRect: NSRect(x: 0, y: 0, width: 560, height: 740),
             styleMask: [.titled, .closable, .fullSizeContentView],
             backing: .buffered,
             defer: false
@@ -63,6 +63,7 @@ struct SettingsPanelView: View {
     let hotKeyWarnings: [String]
     @State private var accessibilityTrusted = AXIsProcessTrusted()
     @State private var customDraft: CustomCategoryDraft?
+    @StateObject private var launchAtLogin = LaunchAtLoginController()
 
     var body: some View {
         ScrollView {
@@ -70,7 +71,9 @@ struct SettingsPanelView: View {
                 clipboardSection
                 categorySection
                 screenshotSection
-            if hasHotKeyConflict || !hotKeyWarnings.isEmpty {
+                startupSection
+                authorSection
+                if hasHotKeyConflict || !hotKeyWarnings.isEmpty {
                     SettingsSection(title: "提醒") {
                     if hasHotKeyConflict {
                         Label("剪贴板和截图快捷键不能相同", systemImage: "exclamationmark.triangle")
@@ -83,16 +86,19 @@ struct SettingsPanelView: View {
                             .foregroundStyle(.orange)
                     }
                 }
+                }
             }
-            }
-            .padding(.horizontal, 20)
-            .padding(.bottom, 20)
+            .padding(.horizontal, 24)
+            .padding(.bottom, 24)
         }
         .scrollIndicators(.hidden)
         .controlSize(.small)
-        .padding(.top, 28)
-        .frame(width: 500, height: 700)
-        .onAppear { refreshAccessibilityTrust() }
+        .padding(.top, 32)
+        .frame(width: 560, height: 740)
+        .onAppear {
+            refreshAccessibilityTrust()
+            launchAtLogin.refresh()
+        }
         .sheet(item: $customDraft) { draft in
             CustomCategoryEditorSheet(draft: draft) { saveCustomCategory($0) }
         }
@@ -100,23 +106,21 @@ struct SettingsPanelView: View {
 
     private var clipboardSection: some View {
         SettingsSection(title: "剪贴板历史") {
-            SettingsRow {
-                LabeledContent("最多保存") {
-                    VStack(alignment: .trailing, spacing: 5) {
-                        Text("\(clipboardStore.settings.maxEntries) 条")
-                            .monospacedDigit()
-                        Slider(value: maxEntriesStepBinding, in: 0...Double(ClipboardHistorySettings.maxEntryChoices.count - 1), step: 1)
-                            .frame(width: 220)
-                            .accessibilityLabel("剪贴板最多保存条数")
-                    }
+            SettingsFormRow("最多保存") {
+                VStack(alignment: .trailing, spacing: 5) {
+                    Text("\(clipboardStore.settings.maxEntries) 条")
+                        .monospacedDigit()
+                    Slider(value: maxEntriesStepBinding, in: 0...Double(ClipboardHistorySettings.maxEntryChoices.count - 1), step: 1)
+                        .frame(width: 260)
+                        .accessibilityLabel("剪贴板最多保存条数")
                 }
             }
             SettingsDivider()
-            SettingsRow { Toggle("保存图片", isOn: savesImagesBinding) }
+            SettingsFormRow("保存图片") { Toggle("保存图片", isOn: savesImagesBinding).labelsHidden() }
             SettingsDivider()
-            SettingsRow { Toggle("复制后自动粘贴", isOn: autoPasteBinding) }
+            SettingsFormRow("复制后自动粘贴") { Toggle("复制后自动粘贴", isOn: autoPasteBinding).labelsHidden() }
             SettingsDivider()
-            SettingsRow { HotKeyRecorderRow(title: "剪贴板快捷键", hotKey: clipboardHotKeyBinding) }
+            SettingsFormRow("剪贴板快捷键") { HotKeyRecorderButton(hotKey: clipboardHotKeyBinding, isRecording: .constant(false)).frame(width: 180, height: 28) }
             if clipboardStore.settings.autoPaste {
                 SettingsDivider()
                 SettingsRow { PermissionStatusRow(
@@ -152,7 +156,7 @@ struct SettingsPanelView: View {
 
     @ViewBuilder
     private func categoryRow(key: ClipboardCategoryKey, index: Int, total: Int) -> some View {
-        HStack(spacing: 6) {
+        HStack(spacing: 8) {
             switch key {
             case .builtin(let category):
                 Label(category.displayName, systemImage: category.systemImage)
@@ -166,13 +170,14 @@ struct SettingsPanelView: View {
                         .lineLimit(1)
                 }
             }
-            Spacer()
+            Spacer(minLength: 12)
             Toggle("启用", isOn: Binding(
                 get: { clipboardStore.settings.isCategoryEnabled(key) },
                 set: { clipboardStore.setCategory(key, enabled: $0) }
             ))
             .toggleStyle(.switch)
             .controlSize(.small)
+            .labelsHidden()
             .help("关闭会清除该分类现有记录，并停止展示及记录此分类")
             if case .custom(let id) = key {
                 HoverIconButton(systemImage: "pencil", help: "编辑") {
@@ -225,17 +230,46 @@ struct SettingsPanelView: View {
 
     private var screenshotSection: some View {
         SettingsSection(title: "截图") {
-            SettingsRow { Picker("默认模式", selection: screenshotModeBinding) {
+            SettingsFormRow("默认模式") { Picker("默认模式", selection: screenshotModeBinding) {
                 ForEach(ScreenshotMode.allCases, id: \.self) { mode in
                     Text(mode.displayName).tag(mode)
                 }
-            } }
+            }.labelsHidden() }
             SettingsDivider()
-            SettingsRow { HotKeyRecorderRow(title: "截图快捷键", hotKey: screenshotHotKeyBinding) }
+            SettingsFormRow("截图快捷键") { HotKeyRecorderButton(hotKey: screenshotHotKeyBinding, isRecording: .constant(false)).frame(width: 180, height: 28) }
             SettingsDivider()
-            SettingsRow { Toggle("记住上次模式", isOn: remembersScreenshotModeBinding) }
+            SettingsFormRow("记住上次模式") { Toggle("记住上次模式", isOn: remembersScreenshotModeBinding).labelsHidden() }
             SettingsDivider()
-            SettingsRow { Toggle("截图后打开编辑", isOn: opensEditorAfterCaptureBinding) }
+            SettingsFormRow("截图后打开编辑") { Toggle("截图后打开编辑", isOn: opensEditorAfterCaptureBinding).labelsHidden() }
+        }
+    }
+
+    private var startupSection: some View {
+        SettingsSection(title: "启动") {
+            SettingsFormRow("登录时自动启动") {
+                Toggle("登录时自动启动 MemeMemo", isOn: Binding(
+                    get: { launchAtLogin.isEnabled },
+                    set: { launchAtLogin.setEnabled($0) }
+                )).labelsHidden()
+            }
+            if let statusMessage = launchAtLogin.statusMessage {
+                SettingsDivider()
+                SettingsRow {
+                    Label(statusMessage, systemImage: "info.circle")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+            }
+        }
+    }
+
+    private var authorSection: some View {
+        SettingsSection(title: "关于作者") {
+            SettingsFormRow("作者") { Text("ZonnL") }
+            SettingsDivider()
+            SettingsFormRow("邮箱") { Link("zonn.l@foxmail.com", destination: URL(string: "mailto:zonn.l@foxmail.com")!) }
+            SettingsDivider()
+            SettingsFormRow("GitHub") { Link("Again0521/memememo", destination: URL(string: "https://github.com/Again0521/memememo")!) }
         }
     }
 
@@ -363,6 +397,29 @@ private struct SettingsRow<Content: View>: View {
     var body: some View {
         content
             .frame(maxWidth: .infinity, minHeight: 38, alignment: .leading)
+    }
+}
+
+/// Fixed label column for every form-like setting.  This prevents switches,
+/// shortcuts, pickers and values from drifting horizontally between sections.
+private struct SettingsFormRow<Content: View>: View {
+    let title: String
+    let content: Content
+
+    init(_ title: String, @ViewBuilder content: () -> Content) {
+        self.title = title
+        self.content = content()
+    }
+
+    var body: some View {
+        HStack(alignment: .center, spacing: 16) {
+            Text(title)
+                .frame(width: 154, alignment: .leading)
+            Spacer(minLength: 0)
+            content
+                .frame(alignment: .trailing)
+        }
+        .frame(maxWidth: .infinity, minHeight: 38, alignment: .leading)
     }
 }
 

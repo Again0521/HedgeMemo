@@ -1,37 +1,19 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024" width="1024" height="1024">
-  <!-- Cream rounded-square plate -->
-  <rect x="100" y="100" width="824" height="824" rx="190" fill="#F2EFE9"/>
-  <!-- Ink hedgehog: spikes lean toward the tail, face is a hollow wedge -->
-  <path fill="#26262A" fill-rule="evenodd" d="
-    M 808 730
-    L 310 742
-    C 276 740 252 726 244 704
-    L 178 690
-    L 248 646
-    C 242 594 266 542 314 514
-    L 276 402 L 392 478
-    L 356 316 L 458 448
-    L 444 262 L 530 430
-    L 532 246 L 596 426
-    L 618 268 L 652 436
-    C 660 430 668 426 676 426
-    L 712 330
-    L 754 468
-    C 776 492 790 520 796 556
-    Z
-    M 658 534
-    C 702 512 748 552 770 610
-    C 778 638 786 668 790 692
-    L 654 706
-    C 648 644 650 580 658 534
-    Z
-  "/>
-  <!-- Eye inside the hollow face -->
-  <circle cx="706" cy="600" r="20" fill="#26262A"/>
-  <!-- Nose dot floating beyond the snout tip -->
-  <circle cx="852" cy="712" r="25" fill="#26262A"/>
-  <!-- Coral paperclip standing among the spikes -->
-  <g transform="rotate(-3 586 415)" fill="none" stroke="#E1795F" stroke-width="19" stroke-linecap="round">
-    <path d="M 563 505 L 563 330 A 24 24 0 0 1 611 330 L 611 486 A 16 16 0 0 1 579 486 L 579 348"/>
-  </g>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512">
+<rect width="512" height="512" rx="115" fill="#F5F1EA"/>
+
+<g transform="translate(0,0)">
+<path d="M 347.2 298.8 L 372.4 234.2 L 313.1 270.3 Z" fill="#24262B" stroke="#24262B" stroke-width="10" stroke-linejoin="round"/>
+<path d="M 314.3 271.0 L 319.1 201.8 L 273.3 254.0 Z" fill="#24262B" stroke="#24262B" stroke-width="10" stroke-linejoin="round"/>
+<path d="M 231.9 250.2 L 196.2 190.7 L 188.5 259.7 Z" fill="#24262B" stroke="#24262B" stroke-width="10" stroke-linejoin="round"/>
+<path d="M 189.8 259.2 L 137.9 213.1 L 151.2 281.2 Z" fill="#24262B" stroke="#24262B" stroke-width="10" stroke-linejoin="round"/>
+<path d="M 152.3 280.3 L 89.0 251.9 L 122.1 312.9 Z" fill="#24262B" stroke="#24262B" stroke-width="10" stroke-linejoin="round"/>
+<path d="M 122.9 311.7 L 54.0 303.5 L 103.8 351.8 Z" fill="#24262B" stroke="#24262B" stroke-width="10" stroke-linejoin="round"/>
+<path d="M 104.2 350.5 L 36.0 363.3 L 98.0 394.5 Z" fill="#24262B" stroke="#24262B" stroke-width="10" stroke-linejoin="round"/>
+<path d="M 90.0 392.0 A 150.0 150.0 0 0 1 390.0 392.0 Z" fill="#24262B"/>
+<path d="M 286 276.0 Q 352 282.0 426 356.0 Q 438 367.0 424 377.0 L 292 392.0 Z" fill="#F5F1EA"/>
+<circle cx="425" cy="365.0" r="13" fill="#24262B"/>
+<circle cx="354" cy="332.0" r="10" fill="#24262B"/>
+<g transform="translate(252.4,254.6) rotate(5.1)"><path d="M -9 -8 L -9 -78 A 13 13 0 0 1 17 -78 L 17 -22 A 9 9 0 0 1 -1 -22 L -1 -62" fill="none" stroke="#FF6B57" stroke-width="9" stroke-linecap="round"/></g>
+</g>
+
 </svg>

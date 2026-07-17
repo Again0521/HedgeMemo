@@ -7,7 +7,9 @@ enum HedgehogIcon {
               let image = NSImage(contentsOf: url) else {
             return NSImage(systemSymbolName: "face.smiling", accessibilityDescription: "MemeMemo") ?? NSImage()
         }
-        image.isTemplate = true
+        // Show the hedgehog as its colored picture (dark body, white snout,
+        // coral clip), not a flat monochrome template.
+        image.isTemplate = false
         // Fill the menu bar height like neighboring apps; width follows the
         // hedgehog's wide aspect ratio so it isn't letterboxed into a small glyph.
         let targetHeight: CGFloat = 18

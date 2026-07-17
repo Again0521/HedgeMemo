@@ -16,7 +16,6 @@ final class ClipboardHistoryPanelController: NSObject {
     private var mainSurface: NSView?
     private var detailSurface: NSView?
     private var detailEntryID: UUID?
-    private var resignKeyObserver: NSObjectProtocol?
     private var clickOutsideMonitor: Any?
     /// The main list's rect in screen coordinates — the single source of truth.
     /// The window may grow to also hold the detail card, but the main surface
@@ -72,7 +71,11 @@ final class ClipboardHistoryPanelController: NSObject {
             animate: false
         )
         position(panel)
-        panel.makeKeyAndOrderFront(nil)
+        // Do not make the nonactivating panel key merely by opening it.  On
+        // current macOS releases that changes the glass' emphasis state and
+        // produces the white flash reported when the pointer enters the
+        // clipboard. A text field can still become key when the user clicks it.
+        panel.orderFrontRegardless()
         startClickOutsideMonitor()
     }
 
@@ -93,6 +96,7 @@ final class ClipboardHistoryPanelController: NSObject {
         panel.hasShadow = true
         panel.isMovableByWindowBackground = true
         panel.isReleasedWhenClosed = false
+        panel.becomesKeyOnlyIfNeeded = true
         panel.level = .floating
         panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .transient]
 
@@ -105,7 +109,10 @@ final class ClipboardHistoryPanelController: NSObject {
 
         let surface = SystemSurface.container(material: .popover, cornerRadius: 16)
         surface.frame = canvas.bounds
-        surface.autoresizingMask = []
+        // Main-only presentation is the common path. Keep the surface locked
+        // to every intermediate window frame so a category resize cannot show
+        // a one-pixel/tiny-strip snapshot of stale glass.
+        surface.autoresizingMask = [.width, .height]
         let shadow = RoundedCardShadowView(cornerRadius: 16)
         shadow.frame = shadow.frame(for: canvas.bounds)
         shadow.autoresizingMask = []
@@ -115,15 +122,6 @@ final class ClipboardHistoryPanelController: NSObject {
         mainShadow = shadow
         mainSurface = surface
 
-        if !CommandLine.arguments.contains(where: { $0.hasPrefix("--preview-") }) {
-            resignKeyObserver = NotificationCenter.default.addObserver(
-                forName: NSWindow.didResignKeyNotification,
-                object: panel,
-                queue: .main
-            ) { [weak self] _ in
-                Task { @MainActor in self?.hide() }
-            }
-        }
         return panel
     }
 
@@ -137,9 +135,8 @@ final class ClipboardHistoryPanelController: NSObject {
     /// Only the main card changes size, anchored by its top edge so the list
     /// never jumps under the pointer. The preview is temporarily hidden before
     /// sizing, then can be added back as a sibling card in the same window.
-    private func resize(contentHeight: CGFloat, animate: Bool) {
+    private func resize(contentHeight: CGFloat, animate _: Bool) {
         guard let panel else { return }
-        hideDetail()
         let visibleFrame = activeScreen?.visibleFrame ?? NSRect(x: 0, y: 0, width: 900, height: 700)
         let height = ClipboardPanelLayout.panelHeight(
             contentHeight: contentHeight,
@@ -160,9 +157,25 @@ final class ClipboardHistoryPanelController: NSObject {
             visibleMaxY: visibleFrame.maxY,
             inset: RoundedCardShadowView.shadowInset
         )
-        panel.setFrame(frame, display: true, animate: animate && panel.isVisible)
+        // SwiftUI can report the same measured content size again after the
+        // user starts hovering. Do not tear down a visible detail card for a
+        // no-op measurement; that caused a preview to flicker or disappear.
+        if detailSurface?.isHidden == false,
+           abs(frame.width - currentMainFrame.width) < 0.5,
+           abs(frame.height - currentMainFrame.height) < 0.5,
+           abs(frame.minY - currentMainFrame.minY) < 0.5 {
+            return
+        }
+        hideDetail()
+        // Native NSWindow frame animation and a hosted NSGlassEffectView do
+        // not share one layout transaction.  Rendering the interpolated frame
+        // was the source of the occasional compressed, horizontal-strip panel.
+        // The SwiftUI content change is already animated where appropriate;
+        // commit the host geometry atomically instead.
+        panel.setFrame(frame, display: true, animate: false)
         mainShadow?.isHidden = true
-        mainSurface?.frame = panel.contentView?.bounds ?? .zero
+        canvas?.layoutSubtreeIfNeeded()
+        mainSurface?.frame = canvas?.bounds ?? .zero
         mainScreenFrame = frame
     }
 
@@ -195,13 +208,19 @@ final class ClipboardHistoryPanelController: NSObject {
 
         let visibleFrame = activeScreen?.visibleFrame ?? panel.frame
         let imageURL = store.imageURL(for: entry)
+        let mainFrame = mainScreenFrame.isEmpty ? panel.frame : mainScreenFrame
+        let gap: CGFloat = 10
+        let inset = RoundedCardShadowView.shadowInset
+        let leftAvailable = max(0, mainFrame.minX - visibleFrame.minX - gap - inset)
+        let rightAvailable = max(0, visibleFrame.maxX - mainFrame.maxX - gap - inset)
         let size = ClipboardDetailLayout.cardSize(
             for: entry,
             imageURL: imageURL,
-            availableHeight: visibleFrame.height - RoundedCardShadowView.shadowInset * 2
+            availableHeight: visibleFrame.height - RoundedCardShadowView.shadowInset * 2,
+            availableWidth: max(leftAvailable, rightAvailable)
         )
 
-        let content = ClipboardDetailCard(entry: entry, imageURL: imageURL, cardHeight: size.height)
+        let content = ClipboardDetailCard(entry: entry, imageURL: imageURL, cardSize: size)
         let detail = detailSurface ?? makeDetailSurface()
         detailSurface = detail
         if detail.superview == nil {
@@ -212,11 +231,9 @@ final class ClipboardHistoryPanelController: NSObject {
         }
         SystemSurface.replaceContent(content, in: detail)
 
-        let mainFrame = mainScreenFrame.isEmpty ? panel.frame : mainScreenFrame
-        let gap: CGFloat = 10
-        let inset = RoundedCardShadowView.shadowInset
-        let placeLeft = mainFrame.minX - size.width - gap - inset >= visibleFrame.minX + 8
-        let x = placeLeft ? mainFrame.minX - size.width - gap : mainFrame.maxX + gap
+        let placeLeft = leftAvailable >= size.width || leftAvailable >= rightAvailable
+        let idealX = placeLeft ? mainFrame.minX - size.width - gap : mainFrame.maxX + gap
+        let x = min(max(idealX, visibleFrame.minX + inset), visibleFrame.maxX - size.width - inset)
         // Top-align with the main panel; clamp so a tall card stays on-screen.
         let y = min(
             max(mainFrame.maxY - size.height, visibleFrame.minY + inset),
@@ -226,6 +243,7 @@ final class ClipboardHistoryPanelController: NSObject {
         let cardsUnion = mainFrame.union(detailFrame)
         let hostFrame = cardsUnion.insetBy(dx: -inset, dy: -inset)
         panel.hasShadow = false
+        mainSurface?.autoresizingMask = []
         panel.setFrame(hostFrame, display: true, animate: false)
         guard let canvas else { return }
         let mainCardFrame = mainFrame.offsetBy(dx: -hostFrame.minX, dy: -hostFrame.minY)
@@ -238,6 +256,7 @@ final class ClipboardHistoryPanelController: NSObject {
         detailShadow?.isHidden = false
         detail.isHidden = false
         canvas.needsLayout = true
+        canvas.layoutSubtreeIfNeeded()
         mainScreenFrame = mainFrame
         detailScreenFrame = detailFrame
     }
@@ -257,7 +276,9 @@ final class ClipboardHistoryPanelController: NSObject {
         panel.hasShadow = true
         panel.setFrame(mainScreenFrame, display: panel.isVisible, animate: false)
         mainShadow?.isHidden = true
-        mainSurface?.frame = panel.contentView?.bounds ?? .zero
+        mainSurface?.autoresizingMask = [.width, .height]
+        canvas?.layoutSubtreeIfNeeded()
+        mainSurface?.frame = canvas?.bounds ?? .zero
     }
 
     // MARK: - Click-outside dismissal
@@ -434,6 +455,8 @@ final class ClipboardHistoryPanelController: NSObject {
 
 /// Borderless panels refuse key status by default; the search field needs it.
 private final class KeyableClipboardPanel: NSPanel {
+    // Match a native floating clipboard panel: keyboard navigation and search
+    // remain available, while SystemSurface keeps the visual material fixed.
     override var canBecomeKey: Bool { true }
 }
 
@@ -442,7 +465,7 @@ private final class KeyableClipboardPanel: NSPanel {
 private struct ClipboardDetailCard: View {
     let entry: ClipboardEntry
     let imageURL: URL?
-    let cardHeight: CGFloat
+    let cardSize: NSSize
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
@@ -464,7 +487,7 @@ private struct ClipboardDetailCard: View {
             .foregroundStyle(.secondary)
         }
         .padding(12)
-        .frame(width: ClipboardDetailLayout.cardWidth, height: cardHeight, alignment: .topLeading)
+        .frame(width: cardSize.width, height: cardSize.height, alignment: .topLeading)
     }
 
     @ViewBuilder
@@ -472,17 +495,21 @@ private struct ClipboardDetailCard: View {
         if entry.kind == .image, let imageURL {
             AnimatedImageFileView(url: imageURL)
                 .frame(maxWidth: .infinity)
-                .frame(height: ClipboardDetailLayout.previewAreaHeight(cardHeight: cardHeight))
+                .frame(height: ClipboardDetailLayout.previewAreaHeight(cardHeight: cardSize.height))
                 .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
         } else if entry.contentCategory == .code {
-            ScrollView(.vertical) {
+            ScrollView([.horizontal, .vertical]) {
                 Text(CodeHighlighter.highlight(entry.text ?? ""))
                     .font(.system(size: 11, design: .monospaced))
                     .textSelection(.enabled)
+                    // Never wrap a source line just because the initial card
+                    // is narrow. The controller first grows the card to fit;
+                    // only truly long lines use horizontal scrolling.
+                    .fixedSize(horizontal: true, vertical: false)
                     .frame(maxWidth: .infinity, alignment: .leading)
             }
             .scrollIndicators(.automatic)
-            .frame(height: ClipboardDetailLayout.previewAreaHeight(cardHeight: cardHeight))
+            .frame(height: ClipboardDetailLayout.previewAreaHeight(cardHeight: cardSize.height))
         } else {
             ScrollView(.vertical) {
                 Text(entry.text ?? entry.previewText)
@@ -491,7 +518,7 @@ private struct ClipboardDetailCard: View {
                     .frame(maxWidth: .infinity, alignment: .leading)
             }
             .scrollIndicators(.automatic)
-            .frame(height: ClipboardDetailLayout.previewAreaHeight(cardHeight: cardHeight))
+            .frame(height: ClipboardDetailLayout.previewAreaHeight(cardHeight: cardSize.height))
         }
     }
 
@@ -508,7 +535,8 @@ private struct ClipboardDetailCard: View {
 }
 
 private enum ClipboardDetailLayout {
-    static let cardWidth: CGFloat = 304
+    private static let minimumWidth: CGFloat = 360
+    private static let maximumWidth: CGFloat = 640
     private static let horizontalPadding: CGFloat = 12
     private static let verticalChrome: CGFloat = 161
     // A single text line should not reserve a tall preview; only images get a
@@ -517,13 +545,24 @@ private enum ClipboardDetailLayout {
     private static let minimumImagePreviewHeight: CGFloat = 96
     private static let screenMargin: CGFloat = 24
 
-    static func cardSize(for entry: ClipboardEntry, imageURL: URL?, availableHeight: CGFloat) -> NSSize {
+    static func cardSize(
+        for entry: ClipboardEntry,
+        imageURL: URL?,
+        availableHeight: CGFloat,
+        availableWidth: CGFloat
+    ) -> NSSize {
+        let width = preferredWidth(for: entry, availableWidth: availableWidth)
         let floor = minimumPreview(for: entry)
         let maximumPreview = max(floor, availableHeight - verticalChrome - screenMargin)
-        let preview = previewHeight(for: entry, imageURL: imageURL, maximumHeight: maximumPreview)
+        let preview = previewHeight(
+            for: entry,
+            imageURL: imageURL,
+            cardWidth: width,
+            maximumHeight: maximumPreview
+        )
         let desired = verticalChrome + preview
         let maximum = max(verticalChrome + floor, availableHeight - screenMargin)
-        return NSSize(width: cardWidth, height: min(max(desired, verticalChrome + floor), maximum))
+        return NSSize(width: width, height: min(max(desired, verticalChrome + floor), maximum))
     }
 
     static func previewAreaHeight(cardHeight: CGFloat) -> CGFloat {
@@ -534,7 +573,12 @@ private enum ClipboardDetailLayout {
         entry.kind == .image ? minimumImagePreviewHeight : minimumPreviewHeight
     }
 
-    static func previewHeight(for entry: ClipboardEntry, imageURL: URL?, maximumHeight: CGFloat) -> CGFloat {
+    static func previewHeight(
+        for entry: ClipboardEntry,
+        imageURL: URL?,
+        cardWidth: CGFloat,
+        maximumHeight: CGFloat
+    ) -> CGFloat {
         let contentWidth = cardWidth - horizontalPadding * 2
         if entry.kind == .image, let imageURL, let image = NSImage(contentsOf: imageURL) {
             let size = image.representations.first.map {
@@ -549,6 +593,11 @@ private enum ClipboardDetailLayout {
             ? NSFont.monospacedSystemFont(ofSize: 11, weight: .regular)
             : NSFont.systemFont(ofSize: 12)
         let text = entry.text ?? entry.previewText
+        if isCode {
+            let lines = max(1, text.components(separatedBy: .newlines).count)
+            let lineHeight = ceil(font.ascender - font.descender + font.leading)
+            return min(CGFloat(lines) * lineHeight, maximumHeight)
+        }
         let bounds = (text as NSString).boundingRect(
             with: NSSize(width: contentWidth, height: .greatestFiniteMagnitude),
             options: [.usesLineFragmentOrigin, .usesFontLeading],
@@ -556,6 +605,25 @@ private enum ClipboardDetailLayout {
         )
         let lineHeight = ceil(font.ascender - font.descender + font.leading)
         return max(lineHeight, min(ceil(bounds.height), maximumHeight))
+    }
+
+    /// Code gets just enough extra width to preserve ordinary source lines,
+    /// then deliberately caps at a readable desktop-card size.  Text and image
+    /// previews retain a compact card unless their source needs more room.
+    private static func preferredWidth(for entry: ClipboardEntry, availableWidth: CGFloat) -> CGFloat {
+        let text = entry.text ?? entry.previewText
+        let font: NSFont = entry.contentCategory == .code
+            ? .monospacedSystemFont(ofSize: 11, weight: .regular)
+            : .systemFont(ofSize: 12)
+        let longest = text
+            .components(separatedBy: .newlines)
+            .map { ($0 as NSString).size(withAttributes: [.font: font]).width }
+            .max() ?? 0
+        let preferred = longest + horizontalPadding * 2 + 2
+        let desired = min(maximumWidth, max(minimumWidth, preferred))
+        // When a panel is invoked close to a screen edge, preserve the card
+        // inside the visible frame instead of allowing it to overflow.
+        return min(desired, max(260, availableWidth))
     }
 }
 
@@ -975,18 +1043,12 @@ private struct KeyCaptureView: NSViewRepresentable {
 
     final class CapturingView: NSView {
         var onKey: ((NSEvent) -> Bool)?
-        private var didFocus = false
 
         override var acceptsFirstResponder: Bool { true }
 
         override func viewDidMoveToWindow() {
             super.viewDidMoveToWindow()
-            guard !didFocus else { return }
-            didFocus = true
-            DispatchQueue.main.async { [weak self] in
-                guard let self else { return }
-                self.window?.makeFirstResponder(self)
-            }
+            window?.makeFirstResponder(self)
         }
 
         override func keyDown(with event: NSEvent) {
