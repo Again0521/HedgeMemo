@@ -8,11 +8,11 @@ enum SystemSurface {
         case vibrancy(NSVisualEffectView.Material, NSVisualEffectView.State)
     }
 
-    /// The Maccy recipe: on macOS 26+ the backdrop is an NSGlassEffectView used
-    /// purely as a background layer — the SwiftUI content is a SIBLING view on
-    /// top, never `glass.contentView` (letting the glass view manage content
-    /// bottom-aligns it and clips the top of the panel). Earlier systems fall
-    /// back to popover vibrancy. Content stays frame-locked to the window.
+    /// One native glass recipe shared by every custom surface. On macOS 26+ the
+    /// hosted SwiftUI view is installed as `NSGlassEffectView.contentView` —
+    /// the only AppKit-supported composition path for glass. Earlier systems
+    /// fall back to active popover vibrancy. Content stays frame-locked to the
+    /// window in both cases.
     static func container(
         material: NSVisualEffectView.Material,
         cornerRadius: CGFloat? = nil
@@ -77,11 +77,18 @@ enum SystemSurface {
         hosting.autoresizingMask = [.width, .height]
         if let surface = container as? SystemSurfaceView {
             surface.hostingView?.removeFromSuperview()
+            if #available(macOS 26.0, *), let glass = surface.backdrop as? NSGlassEffectView {
+                // Do not add an arbitrary sibling over the glass. AppKit only
+                // guarantees a consistent glass composition for contentView.
+                glass.contentView = hosting
+            } else {
+                container.addSubview(hosting)
+            }
+            surface.hostingView = hosting
         } else {
             container.subviews.forEach { $0.removeFromSuperview() }
+            container.addSubview(hosting)
         }
-        container.addSubview(hosting)
-        (container as? SystemSurfaceView)?.hostingView = hosting
     }
 
     /// Frame of the hosted SwiftUI content, for verifying it stays aligned
@@ -89,26 +96,6 @@ enum SystemSurface {
     static func hostingFrame(of view: NSView?) -> NSRect? {
         (view as? SystemSurfaceView)?.hostingView?.frame
     }
-}
-
-/// SwiftUI wrapper over the same backdrop as SystemSurface, for content hosted
-/// inside system chrome we don't control (the meme NSPopover). Glass on
-/// macOS 26+, popover vibrancy earlier — identical to every other surface.
-struct MenuBackdrop: NSViewRepresentable {
-    func makeNSView(context: Context) -> NSView {
-        if #available(macOS 26.0, *) {
-            let glass = NSGlassEffectView()
-            glass.style = .regular
-            return glass
-        }
-        let view = NSVisualEffectView()
-        view.material = .popover
-        view.blendingMode = .behindWindow
-        view.state = .active
-        return view
-    }
-
-    func updateNSView(_ nsView: NSView, context: Context) {}
 }
 
 /// `NSHostingView` may otherwise report itself as opaque and let AppKit draw a

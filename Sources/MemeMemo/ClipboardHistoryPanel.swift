@@ -127,11 +127,16 @@ final class ClipboardHistoryPanelController: NSObject {
         var frame = panel.frame
         frame.size.width = ClipboardPanelLayout.panelWidth
         frame.size.height = height
-        // Keep the top edge where it was, but clamp it below the screen top so a
-        // taller category can never push the search field and category bar off
-        // the top of the screen. Growth then happens downward, then upward.
-        let pinnedTop = min(panel.frame.maxY, visibleFrame.maxY - 12)
-        frame.origin.y = max(pinnedTop - height, visibleFrame.minY + 12)
+        // Keep the top edge where it was when possible. Clamp both screen edges
+        // after every category/query resize: dense image results can be much
+        // taller than a short text category, and a one-sided clamp can hide the
+        // search field above the menu bar after that switch.
+        frame.origin.y = ClipboardPanelLayout.constrainedOriginY(
+            preferredTop: panel.frame.maxY,
+            height: height,
+            visibleMinY: visibleFrame.minY,
+            visibleMaxY: visibleFrame.maxY
+        )
         panel.setFrame(frame, display: true, animate: animate && panel.isVisible)
         mainScreenFrame = frame
     }
@@ -181,11 +186,12 @@ final class ClipboardHistoryPanelController: NSObject {
             visibleFrame.maxY - size.height - 8
         )
         detail.setFrame(NSRect(x: x, y: y, width: size.width, height: size.height), display: true)
-        // Never addChildWindow here: reordering a child window fires
-        // window-ordering notifications into the search field's remote
-        // completion view (NSRemoteView) and trips an AppKit assertion —
-        // an instant crash the moment the detail card appears in real use.
-        detail.order(.above, relativeTo: panel.windowNumber)
+        // Keep the preview independent from the searchable main panel. On
+        // macOS 26, relative ordering sends a window-order notification into
+        // the text field's remote completion view and can trip an AppKit
+        // assertion. A normal front order keeps the preview above the list
+        // without participating in that fragile relative-order path.
+        detail.orderFrontRegardless()
     }
 
     private func makeDetailPanel() -> NSPanel {

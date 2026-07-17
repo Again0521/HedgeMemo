@@ -188,6 +188,24 @@ expect(
         == ClipboardPanelLayout.chromeHeight + ClipboardPanelLayout.emptyStateHeight,
     "panel height must keep a sensible minimum"
 )
+expect(
+    ClipboardPanelLayout.constrainedOriginY(
+        preferredTop: 760,
+        height: 600,
+        visibleMinY: 100,
+        visibleMaxY: 760
+    ) == 148,
+    "tall categories must remain fully inside the visible screen"
+)
+expect(
+    ClipboardPanelLayout.constrainedOriginY(
+        preferredTop: 400,
+        height: 200,
+        visibleMinY: 100,
+        visibleMaxY: 760
+    ) == 200,
+    "short categories must preserve their prior top edge"
+)
 
 // Regression: mutating settings used to recurse through didSet until the stack
 // overflowed (max-entries stepper crash, post-screenshot crash).

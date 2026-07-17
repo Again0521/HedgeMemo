@@ -75,4 +75,21 @@ public enum ClipboardPanelLayout {
         let maximum = max(minimum, availableHeight)
         return min(max(desired, minimum), maximum)
     }
+
+    /// Keeps a resizable panel entirely inside the visible part of a screen.
+    /// The old top edge is retained whenever possible. If a category is taller
+    /// than the space below it, the panel moves upward instead of letting the
+    /// search field disappear above the menu bar.
+    public static func constrainedOriginY(
+        preferredTop: CGFloat,
+        height: CGFloat,
+        visibleMinY: CGFloat,
+        visibleMaxY: CGFloat,
+        inset: CGFloat = 12
+    ) -> CGFloat {
+        let minimum = visibleMinY + inset
+        let maximum = max(minimum, visibleMaxY - inset - height)
+        let preferred = min(preferredTop, visibleMaxY - inset) - height
+        return min(max(preferred, minimum), maximum)
+    }
 }
