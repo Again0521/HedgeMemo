@@ -73,13 +73,14 @@ PLIST
 # assembled bundles. Remove that packaging detritus before signing, then fail
 # the build if the installed application cannot be verified.
 xattr -cr "$APP_BUNDLE"
-# Prefer a stable self-signed identity (see script/setup_signing.sh) so TCC
-# grants such as Screen Recording persist across updates; fall back to ad-hoc.
+# A stable identity is required: an ad-hoc fallback changes the cdhash every
+# build and makes macOS regard the update as a new screen-recording client.
 SIGN_IDENTITY="MemeMemo Local Signing"
 if security find-certificate -c "$SIGN_IDENTITY" >/dev/null 2>&1; then
   codesign --force --deep --sign "$SIGN_IDENTITY" --identifier "$BUNDLE_ID" "$APP_BUNDLE"
 else
-  codesign --force --deep --sign - --identifier "$BUNDLE_ID" "$APP_BUNDLE"
+  echo "Missing stable signing identity '$SIGN_IDENTITY'. Run ./script/setup_signing.sh once before packaging." >&2
+  exit 1
 fi
 # The File Provider may reattach root metadata as soon as signing mutates the
 # bundle. Those attributes are not app content and must be removed once more

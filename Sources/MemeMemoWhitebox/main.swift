@@ -2,7 +2,10 @@ import AppKit
 import Foundation
 import MemeMemoCore
 
+nonisolated(unsafe) private var assertionCount = 0
+
 private func expect(_ condition: @autoclosure () -> Bool, _ message: String) {
+    assertionCount += 1
     guard condition() else {
         FileHandle.standardError.write(Data("FAILED: \(message)\n".utf8))
         exit(1)
@@ -129,8 +132,8 @@ migratedSettings.normalize()
 expect(migratedSettings.hotKey == .defaultClipboard, "legacy Option + Space hotkey must migrate to the new default")
 expect(migratedSettings.activeCategoryKey == .builtin(.text), "missing last category must default to text")
 expect(
-    migratedSettings.categoryOrder == ["text", "code", "link", "image"],
-    "default category order must be text, code, link, image"
+    migratedSettings.categoryOrder == ["text", "code", "link", "image", "screenshot"],
+    "default category order must include the dedicated screenshot category"
 )
 var rememberedSettings = ClipboardHistorySettings()
 rememberedSettings.activeCategoryKey = .builtin(.code)
@@ -288,6 +291,45 @@ await MainActor.run {
         "a completed screenshot must be readable from the pasteboard as PNG"
     )
 
+    expect(
+        clipboardStore.addImageData(screenshotPayload, sourceApp: "MemeMemo", origin: .memeMemoScreenshot),
+        "completed screenshots must be stored in their dedicated clipboard category"
+    )
+    expect(
+        clipboardStore.orderedEntries(key: .builtin(.screenshot)).count == 1,
+        "the screenshot category must not mix with ordinary copied images"
+    )
+
+    let archiveURL = FileManager.default.temporaryDirectory
+        .appendingPathComponent("memememo-whitebox-\(UUID().uuidString).zip")
+    defer { try? FileManager.default.removeItem(at: archiveURL) }
+    do {
+        try MemeArchiveService.export(
+            memeSnapshot: memeStore.snapshot(),
+            memeRepository: memeStore.repository,
+            clipboardSnapshot: clipboardStore.snapshot(),
+            clipboardRepository: clipboardStore.repository,
+            destination: archiveURL
+        )
+        let extracted = try MemeArchiveService.extract(from: archiveURL)
+        defer { MemeArchiveService.removeExtraction(extracted.directory) }
+        expect(extracted.manifest.formatVersion == MemeArchiveManifest.formatVersion, "ZIP exports must carry the current MemeMemo manifest")
+        expect(extracted.manifest.memeSnapshot?.memes.isEmpty == false, "ZIP exports must retain selected meme data")
+        expect(extracted.manifest.clipboardSnapshot?.entries.contains(where: { $0.origin == .memeMemoScreenshot }) == true, "ZIP exports must retain the screenshot category")
+    } catch {
+        expect(false, "MemeMemo ZIP export/import must round-trip: \(error.localizedDescription)")
+    }
+
+    clipboardStore.setCategory(.builtin(.screenshot), enabled: false)
+    expect(
+        clipboardStore.orderedEntries(key: .builtin(.screenshot)).isEmpty,
+        "disabling a category must clear its existing records and hide it"
+    )
+    expect(
+        !clipboardStore.addImageData(screenshotPayload, sourceApp: "MemeMemo", origin: .memeMemoScreenshot),
+        "a disabled screenshot category must not record future screenshots"
+    )
+
     // Meme capture pauses clipboard history recording.
     let clipRoot = FileManager.default.temporaryDirectory
         .appendingPathComponent("memememo-whitebox-clip-\(UUID().uuidString)", isDirectory: true)
@@ -297,4 +339,4 @@ await MainActor.run {
     expect(pausedStore.isRecordingPaused, "recording pause flag must be settable for meme capture")
 }
 
-print("MemeMemo whitebox checks passed (71 assertions).")
+print("MemeMemo whitebox checks passed (\(assertionCount) assertions).")

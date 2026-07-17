@@ -57,7 +57,8 @@ public final class ClipboardHistoryStore: ObservableObject {
     }
 
     public func orderedEntries(query: String = "", key: ClipboardCategoryKey? = nil) -> [ClipboardEntry] {
-        ClipboardHistoryPolicy.ordered(
+        if let key, !settings.isCategoryEnabled(key) { return [] }
+        return ClipboardHistoryPolicy.ordered(
             entries,
             query: query,
             key: key,
@@ -71,22 +72,42 @@ public final class ClipboardHistoryStore: ObservableObject {
         guard !cleaned.isEmpty else { return false }
         let hash = Data(cleaned.utf8).clipboardContentHash
         guard !ClipboardHistoryPolicy.shouldMergeWithLatest(latest: orderedEntries().first, contentHash: hash) else { return false }
-        entries.append(ClipboardEntry(kind: .text, text: text, contentHash: hash, sourceApp: sourceApp))
+        let entry = ClipboardEntry(kind: .text, text: text, contentHash: hash, sourceApp: sourceApp)
+        guard shouldRecord(entry) else { return false }
+        entries.append(entry)
         trimToLimit()
         persist()
         return true
     }
 
     @discardableResult
-    public func addImage(_ image: NSImage, note: String? = nil, sourceApp: String? = nil) -> Bool {
+    public func addImage(
+        _ image: NSImage,
+        note: String? = nil,
+        sourceApp: String? = nil,
+        origin: ClipboardEntryOrigin? = nil
+    ) -> Bool {
         guard let data = image.pngData else { return false }
-        return addImageData(ImageAssetData(data: data, fileExtension: "png"), note: note, sourceApp: sourceApp)
+        return addImageData(ImageAssetData(data: data, fileExtension: "png"), note: note, sourceApp: sourceApp, origin: origin)
     }
 
     @discardableResult
-    public func addImageData(_ payload: ImageAssetData, note: String? = nil, sourceApp: String? = nil) -> Bool {
+    public func addImageData(
+        _ payload: ImageAssetData,
+        note: String? = nil,
+        sourceApp: String? = nil,
+        origin: ClipboardEntryOrigin? = nil
+    ) -> Bool {
         guard settings.savesImages else { return false }
         do {
+            let candidate = ClipboardEntry(
+                kind: .image,
+                text: note,
+                contentHash: payload.data.clipboardContentHash,
+                sourceApp: sourceApp,
+                origin: origin
+            )
+            guard shouldRecord(candidate) else { return false }
             let stored = try repository.saveImageData(payload.data, fileExtension: payload.fileExtension)
             guard !ClipboardHistoryPolicy.shouldMergeWithLatest(latest: orderedEntries().first, contentHash: stored.contentHash) else {
                 try repository.removeImage(named: stored.fileName)
@@ -97,7 +118,8 @@ public final class ClipboardHistoryStore: ObservableObject {
                 text: note,
                 imageFileName: stored.fileName,
                 contentHash: stored.contentHash,
-                sourceApp: sourceApp
+                sourceApp: sourceApp,
+                origin: origin
             ))
             trimToLimit()
             persist()
@@ -106,6 +128,17 @@ public final class ClipboardHistoryStore: ObservableObject {
             lastError = error.localizedDescription
             return false
         }
+    }
+
+    /// Records images created by MemeMemo's screenshot flow separately from
+    /// images copied by other apps, then consumes the pasteboard change so the
+    /// monitor cannot add a duplicate to the generic 图片 category.
+    @discardableResult
+    public func recordScreenshot(_ payload: ImageAssetData) -> Bool {
+        let changeCount = NSPasteboard.general.changeCount
+        observedChangeCount = changeCount
+        suppressedChangeCount = changeCount
+        return addImageData(payload, sourceApp: "MemeMemo", origin: .memeMemoScreenshot)
     }
 
     public func delete(id: UUID) {
@@ -121,6 +154,36 @@ public final class ClipboardHistoryStore: ObservableObject {
         entries.removeAll()
         for entry in removed { removeImageIfNeeded(entry) }
         persist()
+    }
+
+    public func snapshot() -> ClipboardHistorySnapshot {
+        ClipboardHistorySnapshot(entries: entries, settings: settings)
+    }
+
+    /// Archive import deliberately reuses the ordinary storage path so imported
+    /// image assets are re-hashed and never overwrite an existing clipboard file.
+    public func importArchive(_ snapshot: ClipboardHistorySnapshot, imagesURL: URL) {
+        for entry in snapshot.entries {
+            switch entry.kind {
+            case .text:
+                _ = addText(entry.text ?? "", sourceApp: entry.sourceApp)
+            case .image:
+                guard let fileName = entry.imageFileName,
+                      let payload = ImageAssetData(fileURL: imagesURL.appendingPathComponent(fileName)) else { continue }
+                _ = addImageData(payload, note: entry.text, sourceApp: entry.sourceApp, origin: entry.origin)
+            }
+        }
+    }
+
+    /// Disabling a category is destructive by design: its current entries are
+    /// removed from disk and it will no longer collect matching clipboard data.
+    public func setCategory(_ key: ClipboardCategoryKey, enabled: Bool) {
+        guard settings.isCategoryEnabled(key) != enabled else { return }
+        if !enabled { clearEntries(matching: key) }
+        settings.setCategory(key, enabled: enabled)
+        if !settings.isCategoryEnabled(settings.activeCategoryKey) {
+            settings.activeCategoryKey = settings.enabledCategoryKeys.first ?? .builtin(.text)
+        }
     }
 
     public func togglePinned(id: UUID) {
@@ -217,6 +280,25 @@ public final class ClipboardHistoryStore: ObservableObject {
         if settings.savesImages, let image = ImageAssetData.read(from: pasteboard, allowFileURLs: false) {
             _ = addImageData(image, sourceApp: sourceApp)
         }
+    }
+
+    private func shouldRecord(_ entry: ClipboardEntry) -> Bool {
+        guard settings.isCategoryEnabled(.builtin(entry.contentCategory)) else { return false }
+        for custom in settings.customCategories ?? [] {
+            let key = ClipboardCategoryKey.custom(custom.id)
+            if !settings.isCategoryEnabled(key), entry.matches(key: key, customCategories: [custom]) {
+                return false
+            }
+        }
+        return true
+    }
+
+    private func clearEntries(matching key: ClipboardCategoryKey) {
+        let customs = settings.customCategories ?? []
+        let removed = entries.filter { $0.matches(key: key, customCategories: customs) }
+        entries.removeAll { $0.matches(key: key, customCategories: customs) }
+        for entry in removed { removeImageIfNeeded(entry) }
+        normalizePinnedOrders()
     }
 
     private func trimToLimit() {

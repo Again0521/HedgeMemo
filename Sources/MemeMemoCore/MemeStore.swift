@@ -179,15 +179,16 @@ public final class MemeStore: ObservableObject {
     public func snapshot() -> MemeSnapshot { MemeSnapshot(categories: categories, memes: memes) }
 
     public func importArchive(_ manifest: MemeArchiveManifest, imagesURL: URL) {
+        guard let memeSnapshot = manifest.memeSnapshot else { return }
         var categoryMap = [UUID: UUID]()
-        for category in manifest.snapshot.categories {
+        for category in memeSnapshot.categories {
             if let existing = categories.first(where: { $0.name == category.name }) {
                 categoryMap[category.id] = existing.id
             } else if let id = addCategory(name: category.name) {
                 categoryMap[category.id] = id
             }
         }
-        for meme in manifest.snapshot.memes {
+        for meme in memeSnapshot.memes {
             let url = imagesURL.appendingPathComponent(meme.fileName)
             guard let payload = ImageAssetData(fileURL: url) else { continue }
             _ = addImageData(

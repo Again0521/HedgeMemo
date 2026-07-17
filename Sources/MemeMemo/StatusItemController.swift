@@ -75,9 +75,8 @@ final class StatusItemController: NSObject {
     private func buildMenu() -> NSMenu {
         let menu = NSMenu()
 
-        menu.addItem(actionItem("导入图片…", #selector(importImages)))
-        menu.addItem(actionItem("导入压缩包…", #selector(importArchive)))
-        menu.addItem(actionItem("导出全部…", #selector(exportArchive)))
+        menu.addItem(actionItem("导入 ZIP…", #selector(importArchive)))
+        menu.addItem(actionItem("导出 ZIP…", #selector(exportArchive)))
         menu.addItem(.separator())
 
         let screenshot = NSMenuItem(title: "截图", action: nil, keyEquivalent: "")
@@ -102,9 +101,8 @@ final class StatusItemController: NSObject {
         return item
     }
 
-    @objc private func importImages() { LibraryActions.importImages(into: services.memeStore) }
-    @objc private func importArchive() { LibraryActions.importArchive(into: services.memeStore) }
-    @objc private func exportArchive() { LibraryActions.exportArchive(from: services.memeStore) }
+    @objc private func importArchive() { LibraryActions.importArchive(into: services.memeStore, clipboardStore: services.clipboardStore) }
+    @objc private func exportArchive() { LibraryActions.exportArchive(from: services.memeStore, clipboardStore: services.clipboardStore) }
     @objc private func screenshotDefault() { services.captureScreenshot(requestedMode: nil) }
     @objc private func screenshotManual() { services.captureScreenshot(requestedMode: .manualSelection) }
     @objc private func screenshotSmart() { services.captureScreenshot(requestedMode: .smartWindow) }

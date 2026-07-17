@@ -86,6 +86,7 @@ public enum ClipboardContentCategory: String, Codable, CaseIterable, Sendable {
     case code
     case link
     case image
+    case screenshot
 
     public var displayName: String {
         switch self {
@@ -93,6 +94,7 @@ public enum ClipboardContentCategory: String, Codable, CaseIterable, Sendable {
         case .code: "代码"
         case .link: "链接"
         case .image: "图片"
+        case .screenshot: "截图"
         }
     }
 
@@ -102,8 +104,15 @@ public enum ClipboardContentCategory: String, Codable, CaseIterable, Sendable {
         case .code: "chevron.left.forwardslash.chevron.right"
         case .link: "link"
         case .image: "photo"
+        case .screenshot: "camera.viewfinder"
         }
     }
+}
+
+/// The source is optional so snapshots written before screenshot separation
+/// continue to decode as ordinary image entries.
+public enum ClipboardEntryOrigin: String, Codable, Sendable {
+    case memeMemoScreenshot
 }
 
 /// User-defined category that filters text entries with a regular expression.
@@ -302,6 +311,8 @@ public enum HotKeyPolicy {
 }
 
 public struct ClipboardHistorySettings: Codable, Equatable, Sendable {
+    public static let maxEntryChoices = [100, 200, 300, 500, 700, 1_000, 2_000, 3_000, 5_000, 7_000, 10_000]
+
     public var maxEntries: Int
     public var savesImages: Bool
     public var itemSize: ClipboardItemSize
@@ -312,6 +323,9 @@ public struct ClipboardHistorySettings: Codable, Equatable, Sendable {
     public var lastCategory: String?
     public var categoryOrder: [String]?
     public var customCategories: [CustomClipboardCategory]?
+    /// Storage values of categories disabled by the user. Optional preserves
+    /// source compatibility with snapshots from before category switches.
+    public var disabledCategoryKeys: [String]?
 
     public init(
         maxEntries: Int = 100,
@@ -321,9 +335,10 @@ public struct ClipboardHistorySettings: Codable, Equatable, Sendable {
         hotKey: HotKeyDefinition? = .defaultClipboard,
         lastCategory: String? = ClipboardCategoryKey.builtin(.text).storageValue,
         categoryOrder: [String]? = nil,
-        customCategories: [CustomClipboardCategory]? = nil
+        customCategories: [CustomClipboardCategory]? = nil,
+        disabledCategoryKeys: [String]? = nil
     ) {
-        self.maxEntries = max(10, min(maxEntries, 1_000))
+        self.maxEntries = Self.normalizedMaxEntries(maxEntries)
         self.savesImages = savesImages
         self.itemSize = itemSize
         self.autoPaste = autoPaste
@@ -331,6 +346,7 @@ public struct ClipboardHistorySettings: Codable, Equatable, Sendable {
         self.lastCategory = lastCategory
         self.categoryOrder = categoryOrder
         self.customCategories = customCategories
+        self.disabledCategoryKeys = disabledCategoryKeys
         normalize()
     }
 
@@ -343,12 +359,30 @@ public struct ClipboardHistorySettings: Codable, Equatable, Sendable {
         (categoryOrder ?? []).compactMap(ClipboardCategoryKey.init(storageValue:))
     }
 
+    public var enabledCategoryKeys: [ClipboardCategoryKey] {
+        orderedCategoryKeys.filter { isCategoryEnabled($0) }
+    }
+
+    public func isCategoryEnabled(_ key: ClipboardCategoryKey) -> Bool {
+        !(disabledCategoryKeys ?? []).contains(key.storageValue)
+    }
+
+    public mutating func setCategory(_ key: ClipboardCategoryKey, enabled: Bool) {
+        var disabled = Set(disabledCategoryKeys ?? [])
+        if enabled {
+            disabled.remove(key.storageValue)
+        } else {
+            disabled.insert(key.storageValue)
+        }
+        disabledCategoryKeys = disabled.sorted()
+    }
+
     public func customCategory(id: UUID) -> CustomClipboardCategory? {
         customCategories?.first(where: { $0.id == id })
     }
 
     public mutating func normalize() {
-        maxEntries = max(10, min(maxEntries, 1_000))
+        maxEntries = Self.normalizedMaxEntries(maxEntries)
         if hotKey == nil || hotKey == .legacyClipboard { hotKey = .defaultClipboard }
         let customs = customCategories ?? []
         customCategories = customs
@@ -374,10 +408,16 @@ public struct ClipboardHistorySettings: Codable, Equatable, Sendable {
             if seen.insert(key.storageValue).inserted { order.append(key) }
         }
         categoryOrder = order.map(\.storageValue)
+        let validStorageValues = Set(order.map(\.storageValue))
+        disabledCategoryKeys = Array(Set(disabledCategoryKeys ?? []).intersection(validStorageValues)).sorted()
 
         if !isValid(activeCategoryKey) || lastCategory == nil {
-            activeCategoryKey = .builtin(.text)
+            activeCategoryKey = enabledCategoryKeys.first ?? .builtin(.text)
         }
+    }
+
+    private static func normalizedMaxEntries(_ value: Int) -> Int {
+        maxEntryChoices.min { abs($0 - value) < abs($1 - value) } ?? 100
     }
 }
 
@@ -397,6 +437,7 @@ public struct ClipboardEntry: Codable, Hashable, Identifiable, Sendable {
     /// Independent from clipboard ordering/quick-slot pinning. Optional keeps
     /// snapshots written by older versions source-compatible when decoded.
     public var isDesktopPinned: Bool?
+    public var origin: ClipboardEntryOrigin?
 
     public init(
         id: UUID = UUID(),
@@ -411,7 +452,8 @@ public struct ClipboardEntry: Codable, Hashable, Identifiable, Sendable {
         sourceApp: String? = nil,
         isPinned: Bool = false,
         pinnedOrder: Int? = nil,
-        isDesktopPinned: Bool? = false
+        isDesktopPinned: Bool? = false,
+        origin: ClipboardEntryOrigin? = nil
     ) {
         self.id = id
         self.kind = kind
@@ -426,6 +468,7 @@ public struct ClipboardEntry: Codable, Hashable, Identifiable, Sendable {
         self.isPinned = isPinned
         self.pinnedOrder = pinnedOrder
         self.isDesktopPinned = isDesktopPinned
+        self.origin = origin
     }
 
     public var previewText: String {
@@ -439,6 +482,7 @@ public struct ClipboardEntry: Codable, Hashable, Identifiable, Sendable {
     }
 
     public var contentCategory: ClipboardContentCategory {
+        if origin == .memeMemoScreenshot { return .screenshot }
         switch kind {
         case .image:
             return .image

@@ -154,6 +154,10 @@ final class AppServices: ObservableObject {
                 memeStore.report(MemeRepositoryError.cannotEncodeImage)
                 return
             }
+            // App-created screenshots have their own category and consume this
+            // pasteboard mutation, so they never reappear as generic copied
+            // images when the clipboard monitor polls.
+            _ = clipboardStore.recordScreenshot(payload)
         }
     }
 

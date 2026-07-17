@@ -619,6 +619,7 @@ struct ClipboardHistoryPanelView: View {
         case .builtin(let category):
             switch category {
             case .image: "没有图片记录"
+            case .screenshot: "没有截图记录"
             case .text: "没有文本记录"
             case .code: "没有代码记录"
             case .link: "没有链接记录"
@@ -654,7 +655,7 @@ struct ClipboardHistoryPanelView: View {
     private var categoryBar: some View {
         ScrollView(.horizontal, showsIndicators: false) {
             HStack(spacing: 6) {
-                ForEach(store.settings.orderedCategoryKeys, id: \.storageValue) { key in
+                ForEach(store.settings.enabledCategoryKeys, id: \.storageValue) { key in
                     CategoryChip(title: title(for: key), isSelected: activeKey == key) {
                         store.settings.activeCategoryKey = key
                     }
@@ -666,7 +667,7 @@ struct ClipboardHistoryPanelView: View {
     @ViewBuilder
     private var content: some View {
         switch activeKey {
-        case .builtin(.image):
+        case .builtin(.image), .builtin(.screenshot):
             LazyVGrid(
                 columns: Array(
                     repeating: GridItem(.fixed(ClipboardPanelLayout.imageCellSide), spacing: ClipboardPanelLayout.imageCellSpacing),
@@ -773,7 +774,9 @@ struct ClipboardHistoryPanelView: View {
             store.togglePinned(id: selectedID)
             return true
         }
-        let columns = activeKey == .builtin(.image) ? ClipboardPanelLayout.imageColumns : 1
+        let columns = (activeKey == .builtin(.image) || activeKey == .builtin(.screenshot))
+            ? ClipboardPanelLayout.imageColumns
+            : 1
         switch event.keyCode {
         case 36, 76:
             guard let entry = entries.first(where: { $0.id == activeSelectionID }) else { return true }

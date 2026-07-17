@@ -100,6 +100,7 @@ private struct ScreenshotEditorPanelView: View {
     @State private var mode: ScreenshotEditorMode = .pen
     @State private var color: MarkupColor = .red
     @State private var lineWidth = 4.0
+    @State private var zoomScale = 1.0
     @State private var canvas = ScreenshotCanvasState()
     @State private var isFinishing = false
 
@@ -112,6 +113,7 @@ private struct ScreenshotEditorPanelView: View {
                 mode: $mode,
                 color: $color,
                 lineWidth: $lineWidth,
+                zoomScale: $zoomScale,
                 state: $canvas
             )
         }
@@ -129,6 +131,10 @@ private struct ScreenshotEditorPanelView: View {
         }
         .padding(.horizontal, 18)
         .padding(.vertical, 9)
+        // This sits behind the actual controls, so the blank parts of the
+        // header can move a borderless editor without stealing button clicks,
+        // sliders, or drawing gestures.
+        .background(WindowDragGestureRegion())
     }
 
     /// Wide editors use one native-toolbar-like row.  The fixed minimum width
@@ -218,6 +224,32 @@ private struct ScreenshotEditorPanelView: View {
             }
             .opacity(mode.usesStyle ? 1 : 0.35)
             .disabled(!mode.usesStyle)
+
+            Divider().frame(height: 20)
+
+            HStack(spacing: 3) {
+                Button {
+                    zoomScale = max(0.25, zoomScale - 0.1)
+                } label: {
+                    Image(systemName: "minus.magnifyingglass")
+                }
+                .help("缩小")
+                Button {
+                    zoomScale = 1
+                } label: {
+                    Text(zoomScale, format: .percent.precision(.fractionLength(0)))
+                        .monospacedDigit()
+                        .frame(minWidth: 38)
+                }
+                .help("还原为适合窗口")
+                Button {
+                    zoomScale = min(4, zoomScale + 0.1)
+                } label: {
+                    Image(systemName: "plus.magnifyingglass")
+                }
+                .help("放大")
+            }
+            .buttonStyle(.borderless)
         }
     }
 
@@ -230,6 +262,16 @@ private struct ScreenshotEditorPanelView: View {
             }
             .help("撤销")
             .disabled(!canvas.canUndo)
+            .keyboardShortcut("z", modifiers: .command)
+
+            Button {
+                canvas.redo()
+            } label: {
+                Image(systemName: "arrow.uturn.forward")
+            }
+            .help("重做")
+            .disabled(!canvas.canRedo)
+            .keyboardShortcut("y", modifiers: .command)
 
             Button(role: .destructive, action: onCancel) {
                 Image(systemName: "trash")
@@ -314,17 +356,25 @@ private struct ScreenshotCanvasViewport: View {
     @Binding var mode: ScreenshotEditorMode
     @Binding var color: MarkupColor
     @Binding var lineWidth: Double
+    @Binding var zoomScale: Double
     @Binding var state: ScreenshotCanvasState
 
     var body: some View {
         GeometryReader { geometry in
             let fitted = ScreenshotEditorLayout.fittedImageSize(image.pixelSize, in: geometry.size)
-            editor
-                .frame(width: fitted.width, height: fitted.height)
-                .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
-                .shadow(color: .black.opacity(0.18), radius: 10, y: 4)
-                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .center)
-                .padding(ScreenshotEditorLayout.canvasPadding)
+            ScrollView([.horizontal, .vertical]) {
+                editor
+                    .frame(width: fitted.width * zoomScale, height: fitted.height * zoomScale)
+                    .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+                    .shadow(color: .black.opacity(0.18), radius: 10, y: 4)
+                    .frame(
+                        minWidth: max(0, geometry.size.width - ScreenshotEditorLayout.canvasPadding * 2),
+                        minHeight: max(0, geometry.size.height - ScreenshotEditorLayout.canvasPadding * 2),
+                        alignment: .center
+                    )
+                    .padding(ScreenshotEditorLayout.canvasPadding)
+            }
+            .scrollIndicators(zoomScale > 1 ? .automatic : .hidden)
         }
         .background(Color.primary.opacity(0.025))
     }
@@ -335,6 +385,7 @@ private struct ScreenshotCanvasViewport: View {
             mode: $mode,
             color: $color,
             lineWidth: $lineWidth,
+            zoomScale: $zoomScale,
             state: $state
         )
     }
@@ -418,6 +469,28 @@ private struct ColorSwatch: View {
     }
 }
 
+/// A deliberately empty drag region.  It is the toolbar background rather
+/// than an overlay, which keeps all real toolbar controls above it in the hit
+/// test order.
+private struct WindowDragGestureRegion: View {
+    var body: some View {
+        HeaderDragRegion()
+    }
+}
+
+private struct HeaderDragRegion: NSViewRepresentable {
+    func makeNSView(context: Context) -> HeaderDragNSView { HeaderDragNSView() }
+    func updateNSView(_ view: HeaderDragNSView, context: Context) {}
+}
+
+private final class HeaderDragNSView: NSView {
+    override var isOpaque: Bool { false }
+
+    override func mouseDown(with event: NSEvent) {
+        window?.performDrag(with: event)
+    }
+}
+
 // MARK: - Canvas state
 
 private struct RGBAColor: Equatable {
@@ -445,31 +518,55 @@ private struct ScreenshotCanvasState: Equatable {
     var arrows: [ScreenshotArrow] = []
     var rectangles: [ScreenshotRect] = []
     var labels: [ScreenshotLabel] = []
-    var history: [HistoryEntry] = []
+    private var undoStack: [Snapshot] = []
+    private var redoStack: [Snapshot] = []
 
-    enum HistoryEntry: Equatable {
-        case crop
-        case stroke
-        case arrow
-        case rectangle
-        case label
+    private struct Snapshot: Equatable {
+        var cropRect: CGRect?
+        var strokes: [ScreenshotStroke]
+        var arrows: [ScreenshotArrow]
+        var rectangles: [ScreenshotRect]
+        var labels: [ScreenshotLabel]
+
+        init(_ state: ScreenshotCanvasState) {
+            cropRect = state.cropRect
+            strokes = state.strokes
+            arrows = state.arrows
+            rectangles = state.rectangles
+            labels = state.labels
+        }
     }
 
-    var canUndo: Bool { !history.isEmpty }
+    var canUndo: Bool { !undoStack.isEmpty }
+    var canRedo: Bool { !redoStack.isEmpty }
 
     var hasEdits: Bool {
         cropRect != nil || !strokes.isEmpty || !arrows.isEmpty || !rectangles.isEmpty || !labels.isEmpty
     }
 
+    mutating func saveUndoPoint() {
+        undoStack.append(Snapshot(self))
+        redoStack.removeAll()
+    }
+
     mutating func undo() {
-        guard let last = history.popLast() else { return }
-        switch last {
-        case .crop: cropRect = nil
-        case .stroke: if !strokes.isEmpty { strokes.removeLast() }
-        case .arrow: if !arrows.isEmpty { arrows.removeLast() }
-        case .rectangle: if !rectangles.isEmpty { rectangles.removeLast() }
-        case .label: if !labels.isEmpty { labels.removeLast() }
-        }
+        guard let previous = undoStack.popLast() else { return }
+        redoStack.append(Snapshot(self))
+        restore(previous)
+    }
+
+    mutating func redo() {
+        guard let next = redoStack.popLast() else { return }
+        undoStack.append(Snapshot(self))
+        restore(next)
+    }
+
+    private mutating func restore(_ snapshot: Snapshot) {
+        cropRect = snapshot.cropRect
+        strokes = snapshot.strokes
+        arrows = snapshot.arrows
+        rectangles = snapshot.rectangles
+        labels = snapshot.labels
     }
 }
 
@@ -513,6 +610,7 @@ private struct ScreenshotRect: Equatable {
 }
 
 private struct ScreenshotLabel: Equatable {
+    var id: UUID = UUID()
     var text: String
     var origin: CGPoint
     var color: RGBAColor
@@ -526,6 +624,7 @@ private struct ScreenshotEditorCanvas: NSViewRepresentable {
     @Binding var mode: ScreenshotEditorMode
     @Binding var color: MarkupColor
     @Binding var lineWidth: Double
+    @Binding var zoomScale: Double
     @Binding var state: ScreenshotCanvasState
 
     func makeNSView(context: Context) -> ScreenshotCanvasView {
@@ -534,8 +633,10 @@ private struct ScreenshotEditorCanvas: NSViewRepresentable {
         view.mode = mode
         view.strokeColor = color.nsColor
         view.lineWidth = CGFloat(lineWidth)
+        view.zoomScale = CGFloat(zoomScale)
         view.state = state
         view.onStateChange = { state = $0 }
+        view.onZoomChange = { zoomScale = Double($0) }
         return view
     }
 
@@ -544,7 +645,9 @@ private struct ScreenshotEditorCanvas: NSViewRepresentable {
         view.mode = mode
         view.strokeColor = color.nsColor
         view.lineWidth = CGFloat(lineWidth)
+        view.zoomScale = CGFloat(zoomScale)
         view.state = state
+        view.onZoomChange = { zoomScale = Double($0) }
         view.needsDisplay = true
     }
 }
@@ -554,12 +657,18 @@ private final class ScreenshotCanvasView: NSView {
     var mode: ScreenshotEditorMode = .pen
     var strokeColor: NSColor = .systemRed
     var lineWidth: CGFloat = 4
+    var zoomScale: CGFloat = 1
     var state = ScreenshotCanvasState()
     var onStateChange: ((ScreenshotCanvasState) -> Void)?
+    var onZoomChange: ((CGFloat) -> Void)?
 
     private var activePoints = [CGPoint]()
     private var activeStart: CGPoint?
     private var activeCurrent: CGPoint?
+    private var movingLabelID: UUID?
+    private var movingLabelOffset: CGPoint = .zero
+    private var selectedLabelID: UUID?
+    private var lastImagePoint: CGPoint?
 
     override var acceptsFirstResponder: Bool { true }
 
@@ -579,6 +688,15 @@ private final class ScreenshotCanvasView: NSView {
     override func mouseDown(with event: NSEvent) {
         window?.makeFirstResponder(self)
         guard let point = imagePoint(for: convert(event.locationInWindow, from: nil)) else { return }
+        lastImagePoint = point
+        if let label = label(at: point) {
+            state.saveUndoPoint()
+            selectedLabelID = label.id
+            movingLabelID = label.id
+            movingLabelOffset = CGPoint(x: point.x - label.origin.x, y: point.y - label.origin.y)
+            needsDisplay = true
+            return
+        }
         activeStart = point
         activeCurrent = point
         activePoints = [point]
@@ -586,12 +704,28 @@ private final class ScreenshotCanvasView: NSView {
 
     override func mouseDragged(with event: NSEvent) {
         guard let point = imagePoint(for: convert(event.locationInWindow, from: nil)) else { return }
+        lastImagePoint = point
+        if let id = movingLabelID, let index = state.labels.firstIndex(where: { $0.id == id }) {
+            state.labels[index].origin = clampedLabelOrigin(
+                CGPoint(x: point.x - movingLabelOffset.x, y: point.y - movingLabelOffset.y),
+                for: state.labels[index]
+            )
+            onStateChange?(state)
+            needsDisplay = true
+            return
+        }
         activeCurrent = point
         if mode == .pen || mode == .highlight { activePoints.append(point) }
         needsDisplay = true
     }
 
     override func mouseUp(with event: NSEvent) {
+        if movingLabelID != nil {
+            movingLabelID = nil
+            onStateChange?(state)
+            needsDisplay = true
+            return
+        }
         guard let start = activeStart,
               let end = imagePoint(for: convert(event.locationInWindow, from: nil)) ?? activeCurrent else {
             resetActive()
@@ -602,29 +736,29 @@ private final class ScreenshotCanvasView: NSView {
         case .crop:
             let rect = normalizedRect(from: start, to: end)
             if rect.width >= 4, rect.height >= 4 {
+                state.saveUndoPoint()
                 state.cropRect = rect
-                state.history.append(.crop)
             }
         case .pen:
             if activePoints.count > 1 {
+                state.saveUndoPoint()
                 state.strokes.append(ScreenshotStroke(kind: .pen, points: activePoints, color: color, width: lineWidth))
-                state.history.append(.stroke)
             }
         case .highlight:
             if activePoints.count > 1 {
+                state.saveUndoPoint()
                 state.strokes.append(ScreenshotStroke(kind: .highlight, points: activePoints, color: color, width: lineWidth * 3))
-                state.history.append(.stroke)
             }
         case .arrow:
             if distance(from: start, to: end) >= 4 {
+                state.saveUndoPoint()
                 state.arrows.append(ScreenshotArrow(start: start, end: end, color: color, width: lineWidth))
-                state.history.append(.arrow)
             }
         case .rectangle:
             let rect = normalizedRect(from: start, to: end)
             if rect.width >= 4, rect.height >= 4 {
+                state.saveUndoPoint()
                 state.rectangles.append(ScreenshotRect(rect: rect, color: color, width: lineWidth))
-                state.history.append(.rectangle)
             }
         case .text:
             promptForText(at: end, color: color)
@@ -639,6 +773,15 @@ private final class ScreenshotCanvasView: NSView {
         for rect in state.rectangles { draw(rect: rect, in: imageRect) }
         for arrow in state.arrows { draw(arrow: arrow, in: imageRect) }
         for label in state.labels { draw(label: label, in: imageRect) }
+        if let selectedLabelID,
+           let label = state.labels.first(where: { $0.id == selectedLabelID }) {
+            let bounds = labelRect(for: label, in: imageRect).insetBy(dx: -4, dy: -3)
+            NSColor.controlAccentColor.setStroke()
+            let selection = NSBezierPath(roundedRect: bounds, xRadius: 4, yRadius: 4)
+            selection.lineWidth = 1.5
+            selection.setLineDash([4, 3], count: 2, phase: 0)
+            selection.stroke()
+        }
     }
 
     private func drawActive(in imageRect: CGRect) {
@@ -741,6 +884,39 @@ private final class ScreenshotCanvasView: NSView {
         label.text.draw(at: point, withAttributes: attributes)
     }
 
+    private func label(at imagePoint: CGPoint) -> ScreenshotLabel? {
+        state.labels.reversed().first { label in
+            labelRectInImage(for: label).insetBy(dx: -8, dy: -8).contains(imagePoint)
+        }
+    }
+
+    private func labelRect(for label: ScreenshotLabel, in imageRect: CGRect) -> CGRect {
+        let origin = viewPoint(for: label.origin, in: imageRect)
+        let font = NSFont.systemFont(ofSize: label.fontSize * imageScale(in: imageRect), weight: .semibold)
+        let size = (label.text as NSString).size(withAttributes: [.font: font])
+        return CGRect(origin: origin, size: size)
+    }
+
+    private func labelRectInImage(for label: ScreenshotLabel) -> CGRect {
+        let font = NSFont.systemFont(ofSize: label.fontSize, weight: .semibold)
+        let size = (label.text as NSString).size(withAttributes: [.font: font])
+        return CGRect(origin: label.origin, size: size)
+    }
+
+    private func clampedLabelOrigin(_ origin: CGPoint, for label: ScreenshotLabel) -> CGPoint {
+        clampedLabelOrigin(origin, text: label.text, fontSize: label.fontSize)
+    }
+
+    private func clampedLabelOrigin(_ origin: CGPoint, text: String, fontSize: CGFloat) -> CGPoint {
+        let imageSize = image.pixelSize
+        let font = NSFont.systemFont(ofSize: fontSize, weight: .semibold)
+        let size = (text as NSString).size(withAttributes: [.font: font])
+        return CGPoint(
+            x: min(max(origin.x, 0), max(0, imageSize.width - size.width)),
+            y: min(max(origin.y, 0), max(0, imageSize.height - size.height))
+        )
+    }
+
     private func promptForText(at point: CGPoint, color: RGBAColor) {
         let alert = NSAlert()
         alert.messageText = "添加文字"
@@ -753,10 +929,71 @@ private final class ScreenshotCanvasView: NSView {
         guard alert.runModal() == .alertFirstButtonReturn else { return }
         let text = field.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !text.isEmpty else { return }
-        state.labels.append(ScreenshotLabel(text: text, origin: point, color: color, fontSize: 22))
-        state.history.append(.label)
+        addLabel(text, at: point, color: color)
         onStateChange?(state)
         needsDisplay = true
+    }
+
+    override func keyDown(with event: NSEvent) {
+        let modifiers = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
+        guard modifiers.contains(.command), let key = event.charactersIgnoringModifiers?.lowercased() else {
+            super.keyDown(with: event)
+            return
+        }
+        switch key {
+        case "z":
+            if modifiers.contains(.shift) { state.redo() } else { state.undo() }
+            onStateChange?(state)
+            needsDisplay = true
+        case "y":
+            state.redo()
+            onStateChange?(state)
+            needsDisplay = true
+        case "v":
+            pasteTextAnnotation()
+        default:
+            super.keyDown(with: event)
+        }
+    }
+
+    private func pasteTextAnnotation() {
+        guard let text = NSPasteboard.general.string(forType: .string)?
+            .trimmingCharacters(in: .whitespacesAndNewlines), !text.isEmpty else { return }
+        let point = lastImagePoint ?? CGPoint(x: image.pixelSize.width / 2, y: image.pixelSize.height / 2)
+        addLabel(text, at: point, color: RGBAColor(strokeColor))
+        onStateChange?(state)
+        needsDisplay = true
+    }
+
+    override func scrollWheel(with event: NSEvent) {
+        // A plain wheel/trackpad scroll adjusts the canvas scale as requested;
+        // once enlarged, the surrounding SwiftUI scroll view provides panning.
+        let delta = event.scrollingDeltaY
+        guard delta != 0 else { return }
+        updateZoom(by: exp(-delta * 0.012))
+    }
+
+    override func magnify(with event: NSEvent) {
+        updateZoom(by: 1 + event.magnification)
+    }
+
+    private func updateZoom(by factor: CGFloat) {
+        let next = min(4, max(0.25, zoomScale * factor))
+        guard abs(next - zoomScale) > 0.001 else { return }
+        zoomScale = next
+        onZoomChange?(next)
+    }
+
+    private func addLabel(_ text: String, at point: CGPoint, color: RGBAColor) {
+        state.saveUndoPoint()
+        let label = ScreenshotLabel(
+            text: text,
+            origin: clampedLabelOrigin(point, text: text, fontSize: 22),
+            color: color,
+            fontSize: 22
+        )
+        state.labels.append(label)
+        selectedLabelID = label.id
     }
 
     private var fittedImageRect: CGRect {

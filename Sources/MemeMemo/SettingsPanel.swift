@@ -29,7 +29,7 @@ final class SettingsWindowController: NSObject {
         // A plain titled window keeps the system's rounded corners, shadow and
         // a real title bar; translucency comes from the vibrancy background inside.
         let panel = NSPanel(
-            contentRect: NSRect(x: 0, y: 0, width: 420, height: 660),
+            contentRect: NSRect(x: 0, y: 0, width: 500, height: 700),
             styleMask: [.titled, .closable, .fullSizeContentView],
             backing: .buffered,
             defer: false
@@ -91,7 +91,7 @@ struct SettingsPanelView: View {
         .scrollIndicators(.hidden)
         .controlSize(.small)
         .padding(.top, 28)
-        .frame(width: 420, height: 660)
+        .frame(width: 500, height: 700)
         .onAppear { refreshAccessibilityTrust() }
         .sheet(item: $customDraft) { draft in
             CustomCategoryEditorSheet(draft: draft) { saveCustomCategory($0) }
@@ -102,8 +102,14 @@ struct SettingsPanelView: View {
         SettingsSection(title: "剪贴板历史") {
             SettingsRow {
                 LabeledContent("最多保存") {
-                Stepper("\(clipboardStore.settings.maxEntries) 条", value: maxEntriesBinding, in: 10...1_000, step: 10)
-            }
+                    VStack(alignment: .trailing, spacing: 5) {
+                        Text("\(clipboardStore.settings.maxEntries) 条")
+                            .monospacedDigit()
+                        Slider(value: maxEntriesStepBinding, in: 0...Double(ClipboardHistorySettings.maxEntryChoices.count - 1), step: 1)
+                            .frame(width: 220)
+                            .accessibilityLabel("剪贴板最多保存条数")
+                    }
+                }
             }
             SettingsDivider()
             SettingsRow { Toggle("保存图片", isOn: savesImagesBinding) }
@@ -161,6 +167,13 @@ struct SettingsPanelView: View {
                 }
             }
             Spacer()
+            Toggle("启用", isOn: Binding(
+                get: { clipboardStore.settings.isCategoryEnabled(key) },
+                set: { clipboardStore.setCategory(key, enabled: $0) }
+            ))
+            .toggleStyle(.switch)
+            .controlSize(.small)
+            .help("关闭会清除该分类现有记录，并停止展示及记录此分类")
             if case .custom(let id) = key {
                 HoverIconButton(systemImage: "pencil", help: "编辑") {
                     if let custom = clipboardStore.settings.customCategory(id: id) {
@@ -204,6 +217,7 @@ struct SettingsPanelView: View {
     }
 
     private func deleteCustomCategory(id: UUID) {
+        clipboardStore.setCategory(.custom(id), enabled: false)
         var customs = clipboardStore.settings.customCategories ?? []
         customs.removeAll { $0.id == id }
         clipboardStore.settings.customCategories = customs
@@ -229,6 +243,23 @@ struct SettingsPanelView: View {
         Binding(
             get: { clipboardStore.settings.maxEntries },
             set: { clipboardStore.settings.maxEntries = $0 }
+        )
+    }
+
+    /// Slider positions are deliberately discrete: the product limit is a
+    /// documented total cap rather than an arbitrary number field.
+    private var maxEntriesStepBinding: Binding<Double> {
+        Binding(
+            get: {
+                let choices = ClipboardHistorySettings.maxEntryChoices
+                let nearest = choices.enumerated().min { abs($0.element - clipboardStore.settings.maxEntries) < abs($1.element - clipboardStore.settings.maxEntries) }?.offset ?? 0
+                return Double(nearest)
+            },
+            set: { step in
+                let choices = ClipboardHistorySettings.maxEntryChoices
+                let index = min(max(Int(step.rounded()), 0), choices.count - 1)
+                clipboardStore.settings.maxEntries = choices[index]
+            }
         )
     }
 

@@ -18,10 +18,20 @@ public final class ScreenshotSettingsStore: ObservableObject {
 
     private let defaults: UserDefaults
     private let key = "MemeMemo.ScreenshotSettings"
+    private static let persistentSuite = "com.memememo.app"
 
-    public init(defaults: UserDefaults = .standard) {
-        self.defaults = defaults
-        if let data = defaults.data(forKey: key),
+    /// Use a fixed suite for shipped builds so moving between debug/release
+    /// paths never resets screenshot preferences. An injected defaults store
+    /// remains available to tests.
+    public init(defaults: UserDefaults? = nil) {
+        let resolved = defaults ?? UserDefaults(suiteName: Self.persistentSuite) ?? .standard
+        self.defaults = resolved
+        if defaults == nil,
+           resolved.data(forKey: key) == nil,
+           let legacyData = UserDefaults.standard.data(forKey: key) {
+            resolved.set(legacyData, forKey: key)
+        }
+        if let data = resolved.data(forKey: key),
            var decoded = try? JSONDecoder().decode(ScreenshotSettings.self, from: data) {
             decoded.normalize()
             settings = decoded

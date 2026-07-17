@@ -56,7 +56,7 @@ public enum ClipboardPanelLayout {
     public static func contentHeight(for entries: [ClipboardEntry], key: ClipboardCategoryKey?) -> CGFloat {
         guard !entries.isEmpty else { return emptyStateHeight }
         switch key {
-        case .builtin(.image):
+        case .builtin(.image), .builtin(.screenshot):
             let rows = Int(ceil(Double(entries.count) / Double(imageColumns)))
             return CGFloat(rows) * imageCellSide + CGFloat(rows - 1) * imageCellSpacing
         case .builtin(.code):
