@@ -17,9 +17,13 @@ private final class ClipboardDetailPresentation: ObservableObject {
     @Published var mainHeight: CGFloat = 0
     @Published var detailTopOffset: CGFloat = 0
 
-    enum Placement {
+    enum Placement: Equatable {
         case left
         case right
+        /// On a very narrow display there may be no usable side space. Keep
+        /// the preview available by placing it over the list rather than
+        /// moving the list or opening an off-screen window.
+        case overlay
     }
 
     var isVisible: Bool { entry != nil }
@@ -52,6 +56,64 @@ private final class ClipboardDetailPresentation: ObservableObject {
     }
 }
 
+/// Owns the dwell timer outside SwiftUI's value-type render lifecycle.  A
+/// `DispatchWorkItem` captured by a View can retain a stale `@State` snapshot
+/// after a list refresh, which made a valid one-second hover occasionally do
+/// nothing.  This object keeps the current entry identity authoritative.
+@MainActor
+private final class ClipboardHoverPreviewDelay {
+    private var openWork: DispatchWorkItem?
+    private var exitWork: DispatchWorkItem?
+    /// This is intentionally independent of SwiftUI's transient row views.
+    /// A preview expansion can rebuild a row under a stationary pointer.
+    private var hoveredEntryID: UUID?
+
+    func schedule(entry: ClipboardEntry, fire: @escaping () -> Void) {
+        let entryID = entry.id
+        exitWork?.cancel()
+        exitWork = nil
+        // A replacement tracking area for the same visible row must not
+        // restart the dwell timer or close an already-open preview.
+        if hoveredEntryID == entryID { return }
+        openWork?.cancel()
+        hoveredEntryID = entryID
+        let work = DispatchWorkItem { [weak self] in
+            guard self?.hoveredEntryID == entryID else { return }
+            self?.openWork = nil
+            fire()
+        }
+        openWork = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1, execute: work)
+    }
+
+    /// Give AppKit only the current run-loop turn to hand off from a replaced
+    /// tracking view to its successor. A genuine pointer exit closes on the
+    /// next frame; a replacement tracking view cancels this work before then.
+    func scheduleExit(entry: ClipboardEntry, fire: @escaping () -> Void) {
+        let entryID = entry.id
+        guard hoveredEntryID == entryID else { return }
+        openWork?.cancel()
+        openWork = nil
+        exitWork?.cancel()
+        let work = DispatchWorkItem { [weak self] in
+            guard self?.hoveredEntryID == entryID else { return }
+            self?.hoveredEntryID = nil
+            self?.exitWork = nil
+            fire()
+        }
+        exitWork = work
+        DispatchQueue.main.async(execute: work)
+    }
+
+    func cancel() {
+        openWork?.cancel()
+        exitWork?.cancel()
+        openWork = nil
+        exitWork = nil
+        hoveredEntryID = nil
+    }
+}
+
 @MainActor
 final class ClipboardHistoryPanelController: NSObject, NSWindowDelegate {
     private let store: ClipboardHistoryStore
@@ -67,6 +129,10 @@ final class ClipboardHistoryPanelController: NSObject, NSWindowDelegate {
     private var mainScreenFrame: NSRect = .zero
     private let detailPresentation = ClipboardDetailPresentation()
     private let panelInset: CGFloat = 18
+    /// A programmatic expansion is not a user drag.  NSPanel emits
+    /// `windowDidMove` for both, so remember the expected frame and never use
+    /// that notification to replace the list's anchor.
+    private var pendingProgrammaticFrame: NSRect?
 
     init(store: ClipboardHistoryStore, memeStore: MemeStore) {
         self.store = store
@@ -150,6 +216,10 @@ final class ClipboardHistoryPanelController: NSObject, NSWindowDelegate {
         panel.animationBehavior = .none
         panel.isFloatingPanel = true
         panel.isMovableByWindowBackground = true
+        // The clipboard is a non-activating panel.  Request pointer movement
+        // explicitly so AppKit tracking areas continue to receive events when
+        // another app remains key underneath it.
+        panel.acceptsMouseMovedEvents = true
         panel.isReleasedWhenClosed = false
         panel.becomesKeyOnlyIfNeeded = true
         panel.level = .statusBar
@@ -180,6 +250,15 @@ final class ClipboardHistoryPanelController: NSObject, NSWindowDelegate {
 
     func windowDidMove(_ notification: Notification) {
         guard let movedPanel = notification.object as? NSPanel, movedPanel === panel else { return }
+        // `setFrame` for a preview expansion also produces this delegate
+        // callback.  Only a real window drag is allowed to change the anchor
+        // used to restore the standalone clipboard card.
+        guard NSEvent.pressedMouseButtons != 0 else { return }
+        if let expected = pendingProgrammaticFrame,
+           framesMatch(movedPanel.frame, expected) {
+            pendingProgrammaticFrame = nil
+            return
+        }
         // A user drag changes the true anchor.  Previously `mainScreenFrame`
         // was left at the old opening location, so the first hover rebuilt the
         // preview against stale coordinates and snapped the clipboard back.
@@ -200,6 +279,26 @@ final class ClipboardHistoryPanelController: NSObject, NSWindowDelegate {
         } else {
             mainScreenFrame = movedPanel.frame
         }
+    }
+
+    private func setPanelFrame(_ frame: NSRect, display: Bool = true) {
+        guard let panel else { return }
+        pendingProgrammaticFrame = frame
+        panel.setFrame(frame, display: display, animate: false)
+        panel.contentView?.layoutSubtreeIfNeeded()
+        // AppKit normally delivers `windowDidMove` synchronously.  Clear an
+        // unmatched pending value on the next run-loop turn so a later user
+        // drag is never mistaken for this resize.
+        DispatchQueue.main.async { [weak self] in
+            self?.pendingProgrammaticFrame = nil
+        }
+    }
+
+    private func framesMatch(_ lhs: NSRect, _ rhs: NSRect) -> Bool {
+        abs(lhs.minX - rhs.minX) < 0.5
+            && abs(lhs.minY - rhs.minY) < 0.5
+            && abs(lhs.width - rhs.width) < 0.5
+            && abs(lhs.height - rhs.height) < 0.5
     }
 
     /// The screen the panel lives on, falling back to wherever the mouse is.
@@ -249,8 +348,7 @@ final class ClipboardHistoryPanelController: NSObject, NSWindowDelegate {
         // was the source of the occasional compressed, horizontal-strip panel.
         // The SwiftUI content change is already animated where appropriate;
         // commit the host geometry atomically instead.
-        panel.setFrame(frame, display: true, animate: false)
-        panel.contentView?.layoutSubtreeIfNeeded()
+        setPanelFrame(frame)
         mainScreenFrame = frame
     }
 
@@ -289,16 +387,26 @@ final class ClipboardHistoryPanelController: NSObject, NSWindowDelegate {
         let cardGap: CGFloat = 10
         let leftAvailable = max(0, mainFrame.minX - visibleFrame.minX - inset - cardGap)
         let rightAvailable = max(0, visibleFrame.maxX - mainFrame.maxX - inset - cardGap)
+        // Follow Maccy's placement rule: grow toward the preferred side, then
+        // flip before the host would cross the visible screen.  The selected
+        // side's actual width is passed into the layout calculation so an
+        // edge invocation never creates an over-wide preview and shifts the
+        // main list away from the pointer.
+        let preferredSide: ClipboardDetailPresentation.Placement = leftAvailable >= rightAvailable ? .left : .right
+        let preferredAvailable = preferredSide == .left ? leftAvailable : rightAvailable
+        let canUseSide = preferredAvailable >= ClipboardDetailLayout.minimumSideWidth
+        let placement: ClipboardDetailPresentation.Placement = canUseSide ? preferredSide : .overlay
+        let previewAvailableWidth = placement == .overlay
+            ? max(1, mainFrame.width - panelInset * 2)
+            : preferredAvailable
         let size = ClipboardDetailLayout.cardSize(
             for: entry,
             imageURL: imageURL,
             availableHeight: visibleFrame.height - panelInset * 2,
-            availableWidth: max(leftAvailable, rightAvailable)
+            availableWidth: previewAvailableWidth
         )
-
-        let placeLeft = leftAvailable >= size.width || leftAvailable >= rightAvailable
         // Align the preview with the hovered row rather than the panel's top.
-        // The pointer is on that row after the two-second dwell, so centering
+        // The pointer is on that row after the one-second dwell, so centering
         // the card on it provides a stable, nearby relationship for both short
         // and tall previews.
         let mouseY = NSEvent.mouseLocation.y
@@ -306,33 +414,39 @@ final class ClipboardHistoryPanelController: NSObject, NSWindowDelegate {
             max(mouseY - size.height / 2, visibleFrame.minY + inset),
             visibleFrame.maxY - size.height - inset
         )
-        let hostTop = max(mainFrame.maxY, detailY + size.height)
-        let hostBottom = min(mainFrame.minY, detailY)
+        let hostTop = placement == .overlay ? mainFrame.maxY : max(mainFrame.maxY, detailY + size.height)
+        let hostBottom = placement == .overlay ? mainFrame.minY : min(mainFrame.minY, detailY)
         let hostHeight = hostTop - hostBottom
-        var hostFrame = NSRect(
-            x: placeLeft ? mainFrame.minX - size.width - cardGap : mainFrame.minX,
-            y: hostBottom,
-            width: mainFrame.width + size.width + cardGap,
-            height: hostHeight
-        )
-        // Preserve the list's own screen position.  At a side edge the card is
-        // reduced before this point, so no clamping may shift the list under
-        // the pointer.
-        if hostFrame.minX < visibleFrame.minX + inset {
-            hostFrame.origin.x = visibleFrame.minX + inset
+        let hostFrame: NSRect
+        switch placement {
+        case .left:
+            hostFrame = NSRect(
+                x: mainFrame.minX - size.width - cardGap,
+                y: hostBottom,
+                width: mainFrame.width + size.width + cardGap,
+                height: hostHeight
+            )
+        case .right:
+            hostFrame = NSRect(
+                x: mainFrame.minX,
+                y: hostBottom,
+                width: mainFrame.width + size.width + cardGap,
+                height: hostHeight
+            )
+        case .overlay:
+            hostFrame = mainFrame
         }
-        if hostFrame.maxX > visibleFrame.maxX - inset {
-            hostFrame.origin.x = visibleFrame.maxX - inset - hostFrame.width
-        }
-        panel.setFrame(hostFrame, display: true, animate: false)
+        setPanelFrame(hostFrame)
         detailPresentation.show(
             entry: entry,
             imageURL: imageURL,
             cardSize: size,
-            placement: placeLeft ? .left : .right,
+            placement: placement,
             mainTopOffset: hostTop - mainFrame.maxY,
             mainHeight: mainFrame.height,
-            detailTopOffset: hostTop - detailY - size.height
+            detailTopOffset: placement == .overlay
+                ? max(0, min(mainFrame.height - size.height, detailY - mainFrame.minY))
+                : hostTop - detailY - size.height
         )
         mainScreenFrame = mainFrame
     }
@@ -340,8 +454,8 @@ final class ClipboardHistoryPanelController: NSObject, NSWindowDelegate {
     private func hideDetail() {
         detailEntryID = nil
         detailPresentation.hide()
-        guard let panel, !mainScreenFrame.isEmpty else { return }
-        panel.setFrame(mainScreenFrame, display: true, animate: false)
+        guard panel != nil, !mainScreenFrame.isEmpty else { return }
+        setPanelFrame(mainScreenFrame)
     }
 
     // MARK: - Click-outside dismissal
@@ -422,8 +536,12 @@ final class ClipboardHistoryPanelController: NSObject, NSWindowDelegate {
             return
         }
         let visible = screen.visibleFrame
-        // Bottom of the screen, like invoking the hotkey with the mouse there.
-        panel.setFrameOrigin(NSPoint(x: visible.midX - panel.frame.width / 2, y: visible.minY + 12))
+        // Bottom-right edge: this is the regression case.  The preview must
+        // flip to the left and keep the list exactly under the pointer.
+        panel.setFrameOrigin(NSPoint(
+            x: visible.maxX - panel.frame.width - panelInset,
+            y: visible.minY + 12
+        ))
         mainScreenFrame = panel.frame
         // Force maximum growth, exactly what switching to a dense category does.
         resize(contentHeight: 10_000, animate: true)
@@ -546,14 +664,13 @@ private struct ClipboardDetailCard: View {
                 .frame(height: ClipboardDetailLayout.previewAreaHeight(cardHeight: cardSize.height))
                 .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
         } else if entry.contentCategory == .code {
-            ScrollView([.horizontal, .vertical]) {
+            ScrollView(.vertical) {
                 Text(CodeHighlighter.highlight(entry.text ?? ""))
                     .font(.system(size: 11, design: .monospaced))
                     .textSelection(.enabled)
-                    // Never wrap a source line just because the initial card
-                    // is narrow. The controller first grows the card to fit;
-                    // only truly long lines use horizontal scrolling.
-                    .fixedSize(horizontal: true, vertical: false)
+                    // The layout gives code a wider card first. Only a line
+                    // that genuinely exceeds the available side wraps.
+                    .fixedSize(horizontal: false, vertical: true)
                     .frame(maxWidth: .infinity, alignment: .leading)
             }
             .scrollIndicators(.automatic)
@@ -583,8 +700,14 @@ private struct ClipboardDetailCard: View {
 }
 
 private enum ClipboardDetailLayout {
-    private static let minimumWidth: CGFloat = 360
-    private static let maximumWidth: CGFloat = 640
+    /// Maccy's minimum slideout width is 200 pt. Keep the same lower bound so
+    /// a preview can still be shown beside a panel parked at a display edge.
+    static let minimumSideWidth: CGFloat = 200
+    private static let minimumWidth: CGFloat = minimumSideWidth
+    private static let maximumWidth: CGFloat = 720
+    /// Non-code previews are deliberately readable rather than a single wide
+    /// line: roughly thirty Chinese glyphs per row at the preview font size.
+    private static let readableTextCharactersPerLine = 30
     private static let horizontalPadding: CGFloat = 12
     private static let verticalChrome: CGFloat = 161
     // A single text line should not reserve a tall preview; only images get a
@@ -642,9 +765,14 @@ private enum ClipboardDetailLayout {
             : NSFont.systemFont(ofSize: 12)
         let text = entry.text ?? entry.previewText
         if isCode {
-            let lines = max(1, text.components(separatedBy: .newlines).count)
+            let visualLines = text
+                .components(separatedBy: .newlines)
+                .reduce(0) { partial, line in
+                    let lineWidth = (line as NSString).size(withAttributes: [.font: font]).width
+                    return partial + max(1, Int(ceil(lineWidth / max(contentWidth, 1))))
+                }
             let lineHeight = ceil(font.ascender - font.descender + font.leading)
-            return min(CGFloat(lines) * lineHeight, maximumHeight)
+            return min(CGFloat(visualLines) * lineHeight, maximumHeight)
         }
         let bounds = (text as NSString).boundingRect(
             with: NSSize(width: contentWidth, height: .greatestFiniteMagnitude),
@@ -660,18 +788,26 @@ private enum ClipboardDetailLayout {
     /// previews retain a compact card unless their source needs more room.
     private static func preferredWidth(for entry: ClipboardEntry, availableWidth: CGFloat) -> CGFloat {
         let text = entry.text ?? entry.previewText
-        let font: NSFont = entry.contentCategory == .code
+        let isCode = entry.contentCategory == .code
+        let font: NSFont = isCode
             ? .monospacedSystemFont(ofSize: 11, weight: .regular)
             : .systemFont(ofSize: 12)
+        if !isCode {
+            let target = (String(repeating: "中", count: readableTextCharactersPerLine) as NSString)
+                .size(withAttributes: [.font: font]).width + horizontalPadding * 2
+            let readable = min(maximumWidth, max(minimumWidth, target))
+            return min(readable, max(1, availableWidth))
+        }
         let longest = text
             .components(separatedBy: .newlines)
             .map { ($0 as NSString).size(withAttributes: [.font: font]).width }
             .max() ?? 0
         let preferred = longest + horizontalPadding * 2 + 2
         let desired = min(maximumWidth, max(minimumWidth, preferred))
-        // When a panel is invoked close to a screen edge, preserve the card
-        // inside the visible frame instead of allowing it to overflow.
-        return min(desired, max(260, availableWidth))
+        // Do not force the preview wider than the actually available side.
+        // The former 260-pt floor made the united host cross the screen edge
+        // and moved the list out from under the pointer.
+        return min(desired, max(1, availableWidth))
     }
 }
 
@@ -690,7 +826,7 @@ struct ClipboardHistoryPanelView: View {
     @State private var hoveredID: UUID?
     @State private var keyboardSelectedID: UUID?
     @State private var keyboardSelection = false
-    @State private var pendingPreview: DispatchWorkItem?
+    @State private var hoverPreviewDelay = ClipboardHoverPreviewDelay()
 
     fileprivate init(
         store: ClipboardHistoryStore,
@@ -727,11 +863,12 @@ struct ClipboardHistoryPanelView: View {
                 .frame(width: ClipboardPanelLayout.panelWidth, height: currentMainHeight)
                 .offset(x: mainCardXOffset, y: detailPresentation.mainTopOffset)
 
-                detailCard
-                    .offset(x: detailCardXOffset, y: detailPresentation.detailTopOffset)
+        detailCard
+            .offset(x: detailCardXOffset, y: detailPresentation.detailTopOffset)
             }
             .frame(width: proxy.size.width, height: proxy.size.height, alignment: .topLeading)
         }
+        .animation(.easeOut(duration: 0.16), value: detailPresentation.entry?.id)
     }
 
     private var mainCardXOffset: CGFloat {
@@ -741,7 +878,14 @@ struct ClipboardHistoryPanelView: View {
     }
 
     private var detailCardXOffset: CGFloat {
-        detailPresentation.placement == .left ? 0 : ClipboardPanelLayout.panelWidth + 10
+        switch detailPresentation.placement {
+        case .left:
+            0
+        case .right:
+            ClipboardPanelLayout.panelWidth + 10
+        case .overlay:
+            max(0, (ClipboardPanelLayout.panelWidth - detailPresentation.cardSize.width) / 2)
+        }
     }
 
     private var listContent: some View {
@@ -801,6 +945,7 @@ struct ClipboardHistoryPanelView: View {
                 height: detailPresentation.cardSize.height,
                 alignment: .topLeading
             )
+            .transition(.opacity.combined(with: .scale(scale: 0.985)))
         }
     }
 
@@ -875,7 +1020,9 @@ struct ClipboardHistoryPanelView: View {
                     )
                     .id(entry.id)
                     .onTapGesture { copy(entry) }
-                    .onHover { updateHover($0, entry: entry) }
+                    .overlay {
+                        EntryHoverTrackingOverlay { updateHover($0, entry: entry) }
+                    }
                     .contextMenu { entryMenu(entry) }
                 }
             }
@@ -903,8 +1050,16 @@ struct ClipboardHistoryPanelView: View {
                     }
                     .id(entry.id)
                     .contentShape(Rectangle())
+                    // macOS 26 can drop SwiftUI's hover tracking for a view
+                    // whose background is fully clear.  Maccy keeps an
+                    // imperceptible backing layer for exactly this reason.
+                    // This is a hit-testing surface only: it must never turn
+                    // white or change the panel material on hover.
+                    .background(Color.white.opacity(0.001))
                     .onTapGesture { copy(entry) }
-                    .onHover { updateHover($0, entry: entry) }
+                    .overlay {
+                        EntryHoverTrackingOverlay { updateHover($0, entry: entry) }
+                    }
                     .contextMenu { entryMenu(entry) }
                 }
             }
@@ -940,27 +1095,22 @@ struct ClipboardHistoryPanelView: View {
             schedulePreview(for: entry)
         } else if hoveredID == entry.id {
             hoveredID = nil
-            cancelPendingPreview()
-            onDetailEntry(nil)
+            hoverPreviewDelay.scheduleExit(entry: entry) { [onDetailEntry] in
+                onDetailEntry(nil)
+            }
         }
     }
 
     private func schedulePreview(for entry: ClipboardEntry) {
-        cancelPendingPreview()
-        let entryID = entry.id
-        let work = DispatchWorkItem { [weak store] in
-            // The ID check prevents a delayed callback from a previous row
-            // opening after the pointer has already moved elsewhere.
-            guard store != nil, hoveredID == entryID else { return }
+        hoverPreviewDelay.schedule(entry: entry) { [onDetailEntry] in
+            // The delay object verifies the entry ID before calling back, so a
+            // timer from a previous row cannot open after the pointer moved.
             onDetailEntry(entry)
         }
-        pendingPreview = work
-        DispatchQueue.main.asyncAfter(deadline: .now() + 2, execute: work)
     }
 
     private func cancelPendingPreview() {
-        pendingPreview?.cancel()
-        pendingPreview = nil
+        hoverPreviewDelay.cancel()
     }
 
     private func copy(_ entry: ClipboardEntry) {
@@ -1061,7 +1211,7 @@ private struct TextEntryRow: View {
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(
             RoundedRectangle(cornerRadius: 7, style: .continuous)
-                .fill(isSelected ? AnyShapeStyle(Color.accentColor) : AnyShapeStyle(.clear))
+                .fill(isSelected ? AnyShapeStyle(Color.accentColor) : AnyShapeStyle(Color.white.opacity(0.001)))
         )
         .onHover { isHovered = $0 }
     }
@@ -1099,7 +1249,7 @@ private struct CodeEntryRow: View {
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(
             RoundedRectangle(cornerRadius: 7, style: .continuous)
-                .fill(isSelected ? AnyShapeStyle(Color.accentColor) : AnyShapeStyle(.clear))
+                .fill(isSelected ? AnyShapeStyle(Color.accentColor) : AnyShapeStyle(Color.white.opacity(0.001)))
         )
         .onHover { isHovered = $0 }
     }
@@ -1166,6 +1316,81 @@ private struct ClipboardPinButton: View {
         .foregroundStyle(isSelected ? Color.white : Color.secondary)
         .help(entry.isDesktopPinned == true ? "取消桌面固定" : "固定到桌面")
         .accessibilityLabel(entry.isDesktopPinned == true ? "取消桌面固定" : "固定到桌面")
+    }
+}
+
+/// AppKit-backed row tracking for the non-activating clipboard panel.
+/// SwiftUI's `onHover` can miss an enter transition on macOS 26 when a hosted
+/// view is rebuilt under a stationary pointer.  A tracking area also receives
+/// mouse-moved events and re-evaluates its bounds, so remaining on an entry is
+/// sufficient to start the preview timer even after a list/layout refresh.
+private struct EntryHoverTrackingOverlay: NSViewRepresentable {
+    let onHover: (Bool) -> Void
+
+    func makeNSView(context: Context) -> TrackingView {
+        let view = TrackingView()
+        view.onHover = onHover
+        return view
+    }
+
+    func updateNSView(_ nsView: TrackingView, context: Context) {
+        nsView.onHover = onHover
+        nsView.refreshHoverState()
+    }
+
+    final class TrackingView: NSView {
+        var onHover: ((Bool) -> Void)?
+        private var trackingArea: NSTrackingArea?
+        private var isInside = false
+
+        override func updateTrackingAreas() {
+            super.updateTrackingAreas()
+            if let trackingArea { removeTrackingArea(trackingArea) }
+            let options: NSTrackingArea.Options = [
+                .mouseEnteredAndExited,
+                .mouseMoved,
+                .activeAlways,
+                .inVisibleRect
+            ]
+            let area = NSTrackingArea(rect: .zero, options: options, owner: self, userInfo: nil)
+            addTrackingArea(area)
+            trackingArea = area
+            refreshHoverState()
+        }
+
+        override func mouseEntered(with event: NSEvent) {
+            setHovered(true)
+        }
+
+        override func mouseExited(with event: NSEvent) {
+            setHovered(false)
+        }
+
+        override func mouseMoved(with event: NSEvent) {
+            refreshHoverState()
+        }
+
+        override func hitTest(_ point: NSPoint) -> NSView? {
+            // Tracking must never consume clicks, context menus, scrolling, or
+            // the desktop-pin control placed in the same row.
+            nil
+        }
+
+        func refreshHoverState() {
+            guard let window else {
+                setHovered(false)
+                return
+            }
+            let windowPoint = window.convertPoint(fromScreen: NSEvent.mouseLocation)
+            let localPoint = convert(windowPoint, from: nil)
+            setHovered(bounds.contains(localPoint))
+        }
+
+        private func setHovered(_ hovered: Bool) {
+            guard isInside != hovered else { return }
+            isInside = hovered
+            onHover?(hovered)
+        }
     }
 }
 
