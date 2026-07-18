@@ -2,57 +2,83 @@ import AppKit
 import MemeMemoCore
 import SwiftUI
 
-/// Hover detail is deliberately presentation state of the *same* floating
-/// window as the clipboard list.  A second non-key NSPanel renders the system
-/// material in its inactive appearance, which is visibly gray and can never
-/// match the active list.  Maccy keeps this slideout in one hosting hierarchy;
-/// do the same here.
+/// The slideout is presentation state owned by the one Maccy-style
+/// FloatingPanel.  Keeping it in the same hosting hierarchy is intentional:
+/// one native glass view samples the desktop once for both list and preview.
 @MainActor
 private final class ClipboardDetailPresentation: ObservableObject {
-    @Published var entry: ClipboardEntry?
-    @Published var imageURL: URL?
-    @Published var cardSize: NSSize = .zero
-    @Published var placement: Placement = .right
-    @Published var mainTopOffset: CGFloat = 0
-    @Published var mainHeight: CGFloat = 0
-    @Published var detailTopOffset: CGFloat = 0
-
     enum Placement: Equatable {
         case left
         case right
-        /// On a very narrow display there may be no usable side space. Keep
-        /// the preview available by placing it over the list rather than
-        /// moving the list or opening an off-screen window.
         case overlay
     }
 
-    var isVisible: Bool { entry != nil }
+    /// Every preview geometry value is published as one snapshot.  Publishing
+    /// the entry, offsets and size one property at a time let SwiftUI draw
+    /// transient combinations (for example, a tall card with a short-card
+    /// offset) while a pointer moved between rows.  That was the direct cause
+    /// of the clipboard card flashing or appearing to jump.
+    struct State {
+        let entry: ClipboardEntry?
+        let imageURL: URL?
+        let cardSize: NSSize
+        /// The transparent sideout lane is deliberately wider than a compact
+        /// text card when there is room.  Its frame remains stable while the
+        /// actual preview card changes between short text and long code.
+        let sideSlotWidth: CGFloat
+        let placement: Placement
+        let mainTopOffset: CGFloat
+        let mainHeight: CGFloat
+        let detailTopOffset: CGFloat
+
+        static let hidden = State(
+            entry: nil,
+            imageURL: nil,
+            cardSize: .zero,
+            sideSlotWidth: 0,
+            placement: .right,
+            mainTopOffset: 0,
+            mainHeight: 0,
+            detailTopOffset: 0
+        )
+    }
+
+    @Published private(set) var state = State.hidden
+
+    var entry: ClipboardEntry? { state.entry }
+    var imageURL: URL? { state.imageURL }
+    var cardSize: NSSize { state.cardSize }
+    var sideSlotWidth: CGFloat { state.sideSlotWidth }
+    var placement: Placement { state.placement }
+    var mainTopOffset: CGFloat { state.mainTopOffset }
+    var mainHeight: CGFloat { state.mainHeight }
+    var detailTopOffset: CGFloat { state.detailTopOffset }
+    var isVisible: Bool { state.entry != nil }
 
     func show(
         entry: ClipboardEntry,
         imageURL: URL?,
         cardSize: NSSize,
+        sideSlotWidth: CGFloat,
         placement: Placement,
         mainTopOffset: CGFloat,
         mainHeight: CGFloat,
         detailTopOffset: CGFloat
     ) {
-        self.entry = entry
-        self.imageURL = imageURL
-        self.cardSize = cardSize
-        self.placement = placement
-        self.mainTopOffset = mainTopOffset
-        self.mainHeight = mainHeight
-        self.detailTopOffset = detailTopOffset
+        state = State(
+            entry: entry,
+            imageURL: imageURL,
+            cardSize: cardSize,
+            sideSlotWidth: sideSlotWidth,
+            placement: placement,
+            mainTopOffset: mainTopOffset,
+            mainHeight: mainHeight,
+            detailTopOffset: detailTopOffset
+        )
     }
 
     func hide() {
-        entry = nil
-        imageURL = nil
-        cardSize = .zero
-        mainTopOffset = 0
-        mainHeight = 0
-        detailTopOffset = 0
+        state = .hidden
     }
 }
 
@@ -128,8 +154,7 @@ final class ClipboardHistoryPanelController: NSObject, NSWindowDelegate {
     private var detailEntryID: UUID?
     private var clickOutsideMonitor: Any?
     /// The main list's rect in screen coordinates — the single source of truth.
-    /// The window may grow to also hold the detail card, but the main surface
-    /// must keep exactly this screen position, so hovering never moves the list.
+    /// It remains unchanged for the entire detail-preview lifecycle.
     private var mainScreenFrame: NSRect = .zero
     private let detailPresentation = ClipboardDetailPresentation()
     private let panelInset: CGFloat = 18
@@ -137,9 +162,6 @@ final class ClipboardHistoryPanelController: NSObject, NSWindowDelegate {
     /// `windowDidMove` for both, so remember the expected frame and never use
     /// that notification to replace the list's anchor.
     private var pendingProgrammaticFrame: NSRect?
-    /// Measurements emitted by SwiftUI while a detail is visible are not
-    /// allowed to resize the main clipboard card mid-hover.
-    private var deferredMainContentHeight: CGFloat?
 
     init(store: ClipboardHistoryStore, memeStore: MemeStore) {
         self.store = store
@@ -184,6 +206,11 @@ final class ClipboardHistoryPanelController: NSObject, NSWindowDelegate {
             }
         )
         if let mainSurface {
+            // Maccy's slideout uses one key FloatingPanel but two independently
+            // sized glass shapes inside it.  Do not paint the entire union as
+            // one oversized card: the list and preview must keep their own
+            // heights while their native glass effects share this window's
+            // active appearance.
             PanelMaterialHost.replace(content, in: mainSurface, usesWindowMaterial: false)
         }
         let key = store.settings.activeCategoryKey
@@ -246,9 +273,6 @@ final class ClipboardHistoryPanelController: NSObject, NSWindowDelegate {
             cornerRadius: 12,
             usesWindowMaterial: false
         )
-        // Keep the one native NSPanel shadow.  This is Maccy's shadow path;
-        // custom SwiftUI shadows and hand-drawn outlines caused the irregular
-        // dark edges reported around both the preview and clipboard.
         panel.hasShadow = true
         mainSurface = panel.contentView
 
@@ -266,9 +290,6 @@ final class ClipboardHistoryPanelController: NSObject, NSWindowDelegate {
             pendingProgrammaticFrame = nil
             return
         }
-        // A user drag changes the true anchor.  Previously `mainScreenFrame`
-        // was left at the old opening location, so the first hover rebuilt the
-        // preview against stale coordinates and snapped the clipboard back.
         if detailPresentation.isVisible {
             let gap: CGFloat = 10
             let sideOffset = detailPresentation.placement == .left
@@ -340,9 +361,6 @@ final class ClipboardHistoryPanelController: NSObject, NSWindowDelegate {
             visibleMaxY: visibleFrame.maxY,
             inset: panelInset
         )
-        // SwiftUI can report the same measured content size again after the
-        // user starts hovering. Do not tear down a visible detail card for a
-        // no-op measurement; that caused a preview to flicker or disappear.
         if detailPresentation.isVisible,
            abs(frame.width - currentMainFrame.width) < 0.5,
            abs(frame.height - currentMainFrame.height) < 0.5,
@@ -361,10 +379,7 @@ final class ClipboardHistoryPanelController: NSObject, NSWindowDelegate {
 
     private func requestMainResize(contentHeight: CGFloat) {
         guard panel != nil else { return }
-        if detailPresentation.isVisible {
-            deferredMainContentHeight = contentHeight
-            return
-        }
+        if detailPresentation.isVisible { return }
         resize(contentHeight: contentHeight, animate: true)
     }
 
@@ -384,10 +399,8 @@ final class ClipboardHistoryPanelController: NSObject, NSWindowDelegate {
 
     // MARK: - Detail slideout
 
-    /// Displays the detail beside the list inside the existing hosting view.
-    /// This is intentionally a single key NSPanel: the system glass is then
-    /// composited once, so the preview and clipboard cannot diverge into active
-    /// and inactive (gray) materials.
+    /// Maccy's SlideoutView equivalent: expand the existing FloatingPanel and
+    /// keep the clipboard card at its saved screen rect inside that union.
     private func updateDetail(entry: ClipboardEntry?) {
         guard let entry, let panel, panel.isVisible else {
             hideDetail()
@@ -415,39 +428,47 @@ final class ClipboardHistoryPanelController: NSObject, NSWindowDelegate {
         let previewAvailableWidth = placement == .overlay
             ? max(1, mainFrame.width - panelInset * 2)
             : preferredAvailable
+        // Reserve a fixed sideout lane for the entire hover session. The card
+        // itself stays content-sized inside this transparent lane, but a short
+        // → long switch never needs to resize/reposition the FloatingPanel.
+        // This preserves both Maccy's variable-height slideout and a stable
+        // clipboard body.
+        let sideSlotWidth = placement == .overlay
+            ? mainFrame.width
+            : ClipboardDetailLayout.hostSlotWidth(availableWidth: previewAvailableWidth)
+        let previewHeightBudget = visibleFrame.height - panelInset * 2
         let size = ClipboardDetailLayout.cardSize(
             for: entry,
             imageURL: imageURL,
-            availableHeight: visibleFrame.height - panelInset * 2,
-            availableWidth: previewAvailableWidth
+            availableHeight: previewHeightBudget,
+            availableWidth: sideSlotWidth
         )
-        // Align the preview with the hovered row rather than the panel's top.
-        // The pointer is on that row after the one-second dwell, so centering
-        // the card on it provides a stable, nearby relationship for both short
-        // and tall previews.
         let mouseY = NSEvent.mouseLocation.y
+        let verticalHostMinY = visibleFrame.minY + panelInset
+        let verticalHostMaxY = visibleFrame.maxY - panelInset
+        // The actual card is content-sized and follows the hovered row, while
+        // the host has already reserved the complete visible vertical lane.
+        // Long code/text therefore gets its full allowed preview height
+        // without moving the list when a previous row had a short card.
         let detailY = min(
-            max(mouseY - size.height / 2, visibleFrame.minY + inset),
-            visibleFrame.maxY - size.height - inset
+            max(mouseY - size.height / 2, verticalHostMinY),
+            verticalHostMaxY - size.height
         )
-        let hostTop = placement == .overlay ? mainFrame.maxY : max(mainFrame.maxY, detailY + size.height)
-        let hostBottom = placement == .overlay ? mainFrame.minY : min(mainFrame.minY, detailY)
-        let hostHeight = hostTop - hostBottom
         let hostFrame: NSRect
         switch placement {
         case .left:
             hostFrame = NSRect(
-                x: mainFrame.minX - size.width - cardGap,
-                y: hostBottom,
-                width: mainFrame.width + size.width + cardGap,
-                height: hostHeight
+                x: mainFrame.minX - sideSlotWidth - cardGap,
+                y: verticalHostMinY,
+                width: mainFrame.width + sideSlotWidth + cardGap,
+                height: verticalHostMaxY - verticalHostMinY
             )
         case .right:
             hostFrame = NSRect(
                 x: mainFrame.minX,
-                y: hostBottom,
-                width: mainFrame.width + size.width + cardGap,
-                height: hostHeight
+                y: verticalHostMinY,
+                width: mainFrame.width + sideSlotWidth + cardGap,
+                height: verticalHostMaxY - verticalHostMinY
             )
         case .overlay:
             hostFrame = mainFrame
@@ -456,23 +477,25 @@ final class ClipboardHistoryPanelController: NSObject, NSWindowDelegate {
             entry: entry,
             imageURL: imageURL,
             cardSize: size,
+            sideSlotWidth: sideSlotWidth,
             placement: placement,
-            mainTopOffset: hostTop - mainFrame.maxY,
+            mainTopOffset: hostFrame.maxY - mainFrame.maxY,
             mainHeight: mainFrame.height,
             detailTopOffset: placement == .overlay
                 ? max(0, min(mainFrame.height - size.height, detailY - mainFrame.minY))
-                : hostTop - detailY - size.height
+                : hostFrame.maxY - detailY - size.height
         )
         mainScreenFrame = mainFrame
-        // Commit the fixed-height main card before enlarging the AppKit host.
-        // Long previews enlarge the union frame substantially; changing that
-        // frame first lets GeometryReader stretch the clipboard card for one
-        // render pass, which reads as a height twitch under the pointer.
         DispatchQueue.main.async { [weak self] in
             guard let self,
                   self.detailEntryID == entry.id,
                   self.panel?.isVisible == true else { return }
-            self.setPanelFrame(hostFrame)
+            // For ordinary text hovers the host frame is unchanged.  Avoid
+            // even a no-op AppKit frame commit because it causes a full
+            // NSGlassEffectView redraw and is perceived as a flash.
+            if let panel = self.panel, !self.framesMatch(panel.frame, hostFrame) {
+                self.setPanelFrame(hostFrame)
+            }
         }
     }
 
@@ -481,16 +504,6 @@ final class ClipboardHistoryPanelController: NSObject, NSWindowDelegate {
         detailPresentation.hide()
         guard panel != nil, !mainScreenFrame.isEmpty else { return }
         setPanelFrame(mainScreenFrame)
-        if let deferredMainContentHeight {
-            let contentHeight = deferredMainContentHeight
-            self.deferredMainContentHeight = nil
-            // Apply a measurement made while previewing only after the main
-            // frame has returned. This prevents text wrapping or a large
-            // detail card from driving the clipboard height during hover.
-            DispatchQueue.main.async { [weak self] in
-                self?.resize(contentHeight: contentHeight, animate: false)
-            }
-        }
     }
 
     // MARK: - Click-outside dismissal
@@ -563,7 +576,7 @@ final class ClipboardHistoryPanelController: NSObject, NSWindowDelegate {
     /// bottom of the screen, grow it to maximum height (dense category), and
     /// hover a detail card. Then assert that every window is fully on screen,
     /// the SwiftUI content is frame-locked to its window (no top clipping),
-    /// and both surfaces share one material and appearance state.
+    /// and preview geometry never mutates the clipboard's own window frame.
     func runLayoutSelfCheck(completion: @escaping (Bool, String) -> Void) {
         show()
         guard let panel, let screen = panel.screen ?? NSScreen.main else {
@@ -587,13 +600,19 @@ final class ClipboardHistoryPanelController: NSObject, NSWindowDelegate {
             // Hover two entries with very different card sizes.
             self.updateDetail(entry: ClipboardEntry(kind: .text, text: "自检条目", contentHash: "self-check-small"))
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
+                let hostAfterShortPreview = self.panel?.frame ?? .zero
                 self.updateDetail(entry: ClipboardEntry(
                     kind: .text,
                     text: Array(repeating: "自检长内容行", count: 30).joined(separator: "\n"),
                     contentHash: "self-check-large"
                 ))
                 DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) {
-                    self.evaluateSelfCheck(visible: visible, mainBeforeHovers: mainBeforeHovers, completion: completion)
+                    self.evaluateSelfCheck(
+                        visible: visible,
+                        mainBeforeHovers: mainBeforeHovers,
+                        hostAfterShortPreview: hostAfterShortPreview,
+                        completion: completion
+                    )
                 }
             }
         }
@@ -602,6 +621,7 @@ final class ClipboardHistoryPanelController: NSObject, NSWindowDelegate {
     private func evaluateSelfCheck(
         visible: NSRect,
         mainBeforeHovers: NSRect,
+        hostAfterShortPreview: NSRect,
         completion: @escaping (Bool, String) -> Void
     ) {
         guard let panel else {
@@ -626,15 +646,16 @@ final class ClipboardHistoryPanelController: NSObject, NSWindowDelegate {
             || abs(mainScreenFrame.height - mainBeforeHovers.height) > 0.5 {
             failures.append("main list moved while hovering (\(mainBeforeHovers) -> \(mainScreenFrame))")
         }
+        // This is the actual short → long regression: after the slideout is
+        // open, a taller card must not issue a second host-window resize. A
+        // changing transparent host frame is still perceptible as a flash
+        // because AppKit redraws the NSGlassEffectView during that resize.
+        if !framesMatch(frame, hostAfterShortPreview) {
+            failures.append("host frame changed between short and long preview (\(hostAfterShortPreview) -> \(frame))")
+        }
 
         let mainBounds = mainSurface?.bounds ?? .zero
         report.append("singleHostBounds=\(mainBounds)")
-        // The one host intentionally contains both cards. Its bounds must be
-        // large enough for the main list, but it is no longer expected to equal
-        // the list's frame while a preview is visible.
-        if mainBounds.height + 1 < mainScreenFrame.height || mainBounds.width + 1 < mainScreenFrame.width {
-            failures.append("single material host is smaller than the main list")
-        }
         if detailPresentation.isVisible {
             report.append("detail=single-host \(detailPresentation.cardSize)")
             if panel.frame.minY < visible.minY - 1 || panel.frame.maxY > visible.maxY + 1 {
@@ -751,6 +772,10 @@ private enum ClipboardDetailLayout {
     private static let minimumPreviewHeight: CGFloat = 18
     private static let minimumImagePreviewHeight: CGFloat = 96
     private static let screenMargin: CGFloat = 24
+    /// TextKit's glyph bounds can exceed a font's ascender/descender by a few
+    /// points (notably CJK comments and code descenders). Reserve this space so
+    /// the final visible line never sits under the following divider.
+    private static let previewSafetyInset: CGFloat = 7
 
     static func cardSize(
         for entry: ClipboardEntry,
@@ -774,6 +799,13 @@ private enum ClipboardDetailLayout {
 
     static func previewAreaHeight(cardHeight: CGFloat) -> CGFloat {
         max(minimumPreviewHeight, cardHeight - verticalChrome)
+    }
+
+    /// The FloatingPanel reserves this entire lane once. Individual cards may
+    /// be narrower, but the host must not resize when the pointer moves from
+    /// a one-line text item to a long code item.
+    static func hostSlotWidth(availableWidth: CGFloat) -> CGFloat {
+        min(maximumWidth, max(1, availableWidth))
     }
 
     private static func minimumPreview(for entry: ClipboardEntry) -> CGFloat {
@@ -801,14 +833,12 @@ private enum ClipboardDetailLayout {
             : NSFont.systemFont(ofSize: 12)
         let text = entry.text ?? entry.previewText
         if isCode {
-            let visualLines = text
-                .components(separatedBy: .newlines)
-                .reduce(0) { partial, line in
-                    let lineWidth = (line as NSString).size(withAttributes: [.font: font]).width
-                    return partial + max(1, Int(ceil(lineWidth / max(contentWidth, 1))))
-                }
-            let lineHeight = ceil(font.ascender - font.descender + font.leading)
-            return min(CGFloat(visualLines) * lineHeight, maximumHeight)
+            let bounds = (text as NSString).boundingRect(
+                with: NSSize(width: contentWidth, height: .greatestFiniteMagnitude),
+                options: [.usesLineFragmentOrigin, .usesFontLeading],
+                attributes: [.font: font]
+            )
+            return min(ceil(bounds.height) + previewSafetyInset, maximumHeight)
         }
         let bounds = (text as NSString).boundingRect(
             with: NSSize(width: contentWidth, height: .greatestFiniteMagnitude),
@@ -816,7 +846,7 @@ private enum ClipboardDetailLayout {
             attributes: [.font: font]
         )
         let lineHeight = ceil(font.ascender - font.descender + font.leading)
-        return max(lineHeight, min(ceil(bounds.height), maximumHeight))
+        return max(lineHeight, min(ceil(bounds.height) + previewSafetyInset, maximumHeight))
     }
 
     /// Code gets just enough extra width to preserve ordinary source lines,
@@ -899,11 +929,9 @@ struct ClipboardHistoryPanelView: View {
                 .frame(width: ClipboardPanelLayout.panelWidth, height: currentMainHeight)
                 .offset(x: mainCardXOffset, y: detailPresentation.mainTopOffset)
 
-        detailCard
-            .offset(x: detailCardXOffset, y: detailPresentation.detailTopOffset)
-            // Only the preview card animates. Animating the parent geometry
-            // makes the clipboard card animate its height and position too.
-            .animation(.easeOut(duration: 0.16), value: detailPresentation.entry?.id)
+                detailCard
+                    .offset(x: detailCardXOffset, y: detailPresentation.detailTopOffset)
+                    .transition(.opacity.combined(with: .scale(scale: 0.985)))
             }
             .frame(width: proxy.size.width, height: proxy.size.height, alignment: .topLeading)
         }
@@ -911,14 +939,16 @@ struct ClipboardHistoryPanelView: View {
 
     private var mainCardXOffset: CGFloat {
         detailPresentation.isVisible && detailPresentation.placement == .left
-            ? detailPresentation.cardSize.width + 10
+            ? detailPresentation.sideSlotWidth + 10
             : 0
     }
 
     private var detailCardXOffset: CGFloat {
         switch detailPresentation.placement {
         case .left:
-            0
+            // Keep the card's right edge next to the list. Empty lane space
+            // sits on its outer edge so compact text does not look stretched.
+            max(0, detailPresentation.sideSlotWidth - detailPresentation.cardSize.width)
         case .right:
             ClipboardPanelLayout.panelWidth + 10
         case .overlay:
@@ -989,7 +1019,6 @@ struct ClipboardHistoryPanelView: View {
                 height: detailPresentation.cardSize.height,
                 alignment: .topLeading
             )
-            .transition(.opacity.combined(with: .scale(scale: 0.985)))
         }
     }
 

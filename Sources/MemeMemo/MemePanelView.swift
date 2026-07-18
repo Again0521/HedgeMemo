@@ -79,6 +79,14 @@ struct MemePanelView: View {
                     }
                 }
                 .padding(2)
+                .onDrop(of: [MemeReorderDragPayload.contentType], delegate: MoveToEndDropDelegate(
+                    draggedID: $draggedID,
+                    onDropAtEnd: { id in
+                        let categoryID = store.memes.first(where: { $0.id == id })?.categoryID
+                        store.reorderToEnd(draggedID: id, categoryID: categoryID)
+                        insertionProposal = nil
+                    }
+                ))
             }
             .frame(height: gridHeight)
             .overlay {
@@ -222,7 +230,7 @@ private struct MoveToEndDropTarget: View {
             RoundedRectangle(cornerRadius: 8, style: .continuous)
                 .strokeBorder(Color.accentColor.opacity(isTargeted ? 0.85 : 0.35), style: StrokeStyle(lineWidth: 2, dash: [5, 4]))
         }
-        .onDrop(of: [UTType.plainText], delegate: MoveToEndDropDelegate(draggedID: $draggedID, onDropAtEnd: onDropAtEnd))
+        .onDrop(of: [MemeReorderDragPayload.contentType], delegate: MoveToEndDropDelegate(draggedID: $draggedID, onDropAtEnd: onDropAtEnd))
         .accessibilityLabel("将表情包移到末尾")
     }
 }
@@ -230,6 +238,10 @@ private struct MoveToEndDropTarget: View {
 private struct MoveToEndDropDelegate: DropDelegate {
     @Binding var draggedID: UUID?
     let onDropAtEnd: (UUID) -> Void
+
+    func validateDrop(info: DropInfo) -> Bool {
+        draggedID != nil
+    }
 
     func dropUpdated(info: DropInfo) -> DropProposal? { DropProposal(operation: .move) }
 

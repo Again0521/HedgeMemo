@@ -3,6 +3,25 @@ import MemeMemoCore
 import SwiftUI
 import UniformTypeIdentifiers
 
+/// A private in-process payload prevents the menu bar's search field or other
+/// plain-text drop targets from consuming a reorder drag before the grid sees
+/// it. The UUID remains the only ordering source of truth in `MemeStore`.
+enum MemeReorderDragPayload {
+    static let contentType = UTType(exportedAs: "com.zonnl.memememo.meme-reorder")
+
+    static func provider(for id: UUID) -> NSItemProvider {
+        let provider = NSItemProvider()
+        provider.registerDataRepresentation(
+            forTypeIdentifier: contentType.identifier,
+            visibility: .ownProcess
+        ) { completion in
+            completion(Data(id.uuidString.utf8), nil)
+            return nil
+        }
+        return provider
+    }
+}
+
 struct MemeTileView: View {
     let meme: MemeItem
     let imageURL: URL
@@ -83,9 +102,9 @@ struct MemeTileView: View {
         .contextMenu { contextMenu }
         .onDrag {
             draggedID = meme.id
-            return NSItemProvider(object: meme.id.uuidString as NSString)
+            return MemeReorderDragPayload.provider(for: meme.id)
         }
-        .onDrop(of: [UTType.plainText], delegate: MemeDropDelegate(
+        .onDrop(of: [MemeReorderDragPayload.contentType], delegate: MemeDropDelegate(
             targetID: meme.id,
             side: side,
             draggedID: $draggedID,
@@ -121,6 +140,10 @@ private struct MemeDropDelegate: DropDelegate {
     @Binding var draggedID: UUID?
     @Binding var insertionProposal: MemeInsertionProposal?
     let onReorder: (UUID, UUID, Bool) -> Void
+
+    func validateDrop(info: DropInfo) -> Bool {
+        draggedID != nil
+    }
 
     func dropEntered(info: DropInfo) {
         updateProposal(info)

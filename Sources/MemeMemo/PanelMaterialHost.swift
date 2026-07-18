@@ -14,6 +14,12 @@ enum PanelMaterialHost {
         host.wantsLayer = true
         host.layer?.cornerRadius = cornerRadius
         host.layer?.cornerCurve = .continuous
+        // The system glass view is hosted inside a transparent NSPanel.  The
+        // host itself must clip to the same continuous corner, otherwise the
+        // panel compositor can leave a rectangular transparent backing store
+        // visible below the rounded SwiftUI card.  This does not touch the
+        // NSPanel's native outside shadow.
+        host.layer?.masksToBounds = true
         return host
     }
 
@@ -55,7 +61,7 @@ enum PanelMaterialHost {
 
 /// A clipped card surface for multiple pieces of content inside one key panel.
 /// Its backing is the exact same native glass view as the window surface, not a
-/// color overlay.  Separation from the desktop is deliberately supplied by
+/// color overlay. Separation from the desktop is deliberately supplied by
 /// the owning NSPanel's native shadow, exactly as Maccy's FloatingPanel does.
 struct SystemGlassCard<Content: View>: View {
     let cornerRadius: CGFloat
@@ -85,7 +91,9 @@ private struct SystemGlassSurface: View {
     }
 }
 
-/// Equivalent to Maccy's macOS 26 `GlassEffectView`.
+/// The macOS 26 branch is deliberately the same native primitive Maccy hosts
+/// behind its whole FloatingPanel.  It belongs at the panel root exactly once:
+/// list and SlideoutView are then two pieces of content over one glass sample.
 @available(macOS 26.0, *)
 private struct MaccyGlassBackground: NSViewRepresentable {
     let glassEffectView = NSGlassEffectView()
@@ -97,7 +105,7 @@ private struct MaccyGlassBackground: NSViewRepresentable {
     }
 }
 
-/// Equivalent to Maccy's pre-Liquid-Glass `VisualEffectView`.
+/// Equivalent to Maccy's pre-Liquid-Glass VisualEffectView fallback.
 private struct MaccyPopoverBackground: NSViewRepresentable {
     let visualEffectView = NSVisualEffectView()
 
@@ -106,5 +114,7 @@ private struct MaccyPopoverBackground: NSViewRepresentable {
     func updateNSView(_ view: NSVisualEffectView, context: Context) {
         view.material = .popover
         view.blendingMode = .behindWindow
+        view.state = .active
+        view.isEmphasized = false
     }
 }
