@@ -310,6 +310,32 @@ public enum HotKeyPolicy {
     }
 }
 
+public enum CodeHighlightTheme: String, Codable, CaseIterable, Sendable {
+    /// The existing macOS-adaptive palette, retained as the default.
+    case system
+    case xcodeLight
+    case solarizedLight
+    case githubLight
+
+    public var displayName: String {
+        switch self {
+        case .system: "系统彩色"
+        case .xcodeLight: "Xcode 浅色"
+        case .solarizedLight: "Solarized 浅色"
+        case .githubLight: "GitHub 浅色"
+        }
+    }
+
+    public var accessibilityDescription: String {
+        switch self {
+        case .system: "使用 macOS 自适应的蓝绿紫语法颜色"
+        case .xcodeLight: "使用接近 Xcode 的高对比浅色配色"
+        case .solarizedLight: "使用低对比、护眼的 Solarized 浅色配色"
+        case .githubLight: "使用 GitHub 风格的清晰浅色配色"
+        }
+    }
+}
+
 public struct ClipboardHistorySettings: Codable, Equatable, Sendable {
     public static let maxEntryChoices = [100, 200, 300, 500, 700, 1_000, 2_000, 3_000, 5_000, 7_000, 10_000]
 
@@ -326,6 +352,9 @@ public struct ClipboardHistorySettings: Codable, Equatable, Sendable {
     /// Storage values of categories disabled by the user. Optional preserves
     /// source compatibility with snapshots from before category switches.
     public var disabledCategoryKeys: [String]?
+    /// Optional preserves decoding of settings saved before syntax themes
+    /// existed. Nil maps to the original system palette.
+    public var codeHighlightTheme: CodeHighlightTheme?
 
     public init(
         maxEntries: Int = 100,
@@ -336,7 +365,8 @@ public struct ClipboardHistorySettings: Codable, Equatable, Sendable {
         lastCategory: String? = ClipboardCategoryKey.builtin(.text).storageValue,
         categoryOrder: [String]? = nil,
         customCategories: [CustomClipboardCategory]? = nil,
-        disabledCategoryKeys: [String]? = nil
+        disabledCategoryKeys: [String]? = nil,
+        codeHighlightTheme: CodeHighlightTheme? = .system
     ) {
         self.maxEntries = Self.normalizedMaxEntries(maxEntries)
         self.savesImages = savesImages
@@ -347,7 +377,12 @@ public struct ClipboardHistorySettings: Codable, Equatable, Sendable {
         self.categoryOrder = categoryOrder
         self.customCategories = customCategories
         self.disabledCategoryKeys = disabledCategoryKeys
+        self.codeHighlightTheme = codeHighlightTheme
         normalize()
+    }
+
+    public var resolvedCodeHighlightTheme: CodeHighlightTheme {
+        codeHighlightTheme ?? .system
     }
 
     public var activeCategoryKey: ClipboardCategoryKey {

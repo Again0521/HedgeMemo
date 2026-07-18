@@ -1,4 +1,5 @@
 import Foundation
+import MemeMemoCore
 import SwiftUI
 
 /// Lightweight, language-agnostic highlighting for clipboard previews. It is
@@ -39,21 +40,85 @@ enum CodeHighlighter {
     private static let functionPattern = try! NSRegularExpression(pattern: "\\b[A-Za-z_][A-Za-z0-9_]*(?=\\s*\\()")
     private static let annotationPattern = try! NSRegularExpression(pattern: "(?:@|#)\\w+")
 
-    static func highlight(_ code: String) -> AttributedString {
+    static func highlight(_ code: String, theme: CodeHighlightTheme = .system) -> AttributedString {
         var attributed = AttributedString(code)
-        attributed.foregroundColor = .primary
+        let palette = Palette(theme: theme)
+        attributed.foregroundColor = palette.plain
         let nsRange = NSRange(code.startIndex..., in: code)
 
-        apply(typePattern, to: &attributed, in: code, range: nsRange, color: Color(nsColor: .systemTeal))
-        apply(functionPattern, to: &attributed, in: code, range: nsRange, color: Color(nsColor: .systemIndigo))
-        apply(annotationPattern, to: &attributed, in: code, range: nsRange, color: Color(nsColor: .systemOrange))
-        apply(keywordPattern, to: &attributed, in: code, range: nsRange, color: Color(nsColor: .systemPurple))
-        apply(numberPattern, to: &attributed, in: code, range: nsRange, color: Color(nsColor: .systemBlue))
+        apply(typePattern, to: &attributed, in: code, range: nsRange, color: palette.type)
+        apply(functionPattern, to: &attributed, in: code, range: nsRange, color: palette.function)
+        apply(annotationPattern, to: &attributed, in: code, range: nsRange, color: palette.annotation)
+        apply(keywordPattern, to: &attributed, in: code, range: nsRange, color: palette.keyword)
+        apply(numberPattern, to: &attributed, in: code, range: nsRange, color: palette.number)
         // Strings and comments are applied last so tokens inside them are not
         // misleadingly colored as source code.
-        apply(stringPattern, to: &attributed, in: code, range: nsRange, color: Color(nsColor: .systemRed))
-        apply(commentPattern, to: &attributed, in: code, range: nsRange, color: .secondary)
+        apply(stringPattern, to: &attributed, in: code, range: nsRange, color: palette.string)
+        apply(commentPattern, to: &attributed, in: code, range: nsRange, color: palette.comment)
         return attributed
+    }
+
+    private struct Palette {
+        let plain: Color
+        let type: Color
+        let function: Color
+        let annotation: Color
+        let keyword: Color
+        let number: Color
+        let string: Color
+        let comment: Color
+
+        init(theme: CodeHighlightTheme) {
+            switch theme {
+            case .system:
+                plain = .primary
+                type = Color(nsColor: .systemTeal)
+                function = Color(nsColor: .systemIndigo)
+                annotation = Color(nsColor: .systemOrange)
+                keyword = Color(nsColor: .systemPurple)
+                number = Color(nsColor: .systemBlue)
+                string = Color(nsColor: .systemRed)
+                comment = .secondary
+            case .xcodeLight:
+                plain = rgb(0x1F, 0x1F, 0x24)
+                type = rgb(0x0B, 0x70, 0x70)
+                function = rgb(0x32, 0x4F, 0xA1)
+                annotation = rgb(0x9B, 0x3B, 0x17)
+                keyword = rgb(0xA8, 0x13, 0x6D)
+                number = rgb(0x20, 0x4F, 0xC8)
+                string = rgb(0xC4, 0x1A, 0x16)
+                comment = rgb(0x6C, 0x72, 0x80)
+            case .solarizedLight:
+                plain = rgb(0x58, 0x6E, 0x75)
+                type = rgb(0x26, 0x8B, 0xD2)
+                function = rgb(0x26, 0x8B, 0xD2)
+                annotation = rgb(0xB5, 0x89, 0x00)
+                keyword = rgb(0x85, 0x99, 0x00)
+                number = rgb(0xD3, 0x36, 0x82)
+                string = rgb(0x2A, 0xA1, 0x98)
+                comment = rgb(0x93, 0xA1, 0xA1)
+            case .githubLight:
+                plain = rgb(0x24, 0x2D, 0x3D)
+                type = rgb(0x05, 0x5D, 0xB0)
+                function = rgb(0x82, 0x54, 0xE8)
+                annotation = rgb(0x95, 0x3B, 0x0E)
+                keyword = rgb(0xCF, 0x22, 0xE0)
+                number = rgb(0x05, 0x5D, 0xB0)
+                string = rgb(0x0A, 0x30, 0x6B)
+                comment = rgb(0x65, 0x6D, 0x76)
+            }
+        }
+
+        private func rgb(_ red: Int, _ green: Int, _ blue: Int) -> Color {
+            Color(
+                nsColor: NSColor(
+                    calibratedRed: CGFloat(red) / 255,
+                    green: CGFloat(green) / 255,
+                    blue: CGFloat(blue) / 255,
+                    alpha: 1
+                )
+            )
+        }
     }
 
     private static func apply(

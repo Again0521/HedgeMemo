@@ -137,6 +137,9 @@ final class ClipboardHistoryPanelController: NSObject, NSWindowDelegate {
     /// `windowDidMove` for both, so remember the expected frame and never use
     /// that notification to replace the list's anchor.
     private var pendingProgrammaticFrame: NSRect?
+    /// Measurements emitted by SwiftUI while a detail is visible are not
+    /// allowed to resize the main clipboard card mid-hover.
+    private var deferredMainContentHeight: CGFloat?
 
     init(store: ClipboardHistoryStore, memeStore: MemeStore) {
         self.store = store
@@ -168,7 +171,7 @@ final class ClipboardHistoryPanelController: NSObject, NSWindowDelegate {
             detailPresentation: detailPresentation,
             onDone: { [weak self] in self?.hide() },
             onContentChange: { [weak self] contentHeight in
-                self?.resize(contentHeight: contentHeight, animate: true)
+                self?.requestMainResize(contentHeight: contentHeight)
             },
             onDetailEntry: { [weak self] entry in
                 DispatchQueue.main.async { self?.updateDetail(entry: entry) }
@@ -356,6 +359,15 @@ final class ClipboardHistoryPanelController: NSObject, NSWindowDelegate {
         mainScreenFrame = frame
     }
 
+    private func requestMainResize(contentHeight: CGFloat) {
+        guard panel != nil else { return }
+        if detailPresentation.isVisible {
+            deferredMainContentHeight = contentHeight
+            return
+        }
+        resize(contentHeight: contentHeight, animate: true)
+    }
+
     private func position(_ panel: NSPanel) {
         let mouse = NSEvent.mouseLocation
         let screen = NSScreen.screens.first(where: { $0.frame.contains(mouse) }) ?? NSScreen.main
@@ -469,6 +481,15 @@ final class ClipboardHistoryPanelController: NSObject, NSWindowDelegate {
         detailPresentation.hide()
         guard panel != nil, !mainScreenFrame.isEmpty else { return }
         setPanelFrame(mainScreenFrame)
+        if let deferredMainContentHeight {
+            self.deferredMainContentHeight = nil
+            // Apply a measurement made while previewing only after the main
+            // frame has returned. This prevents text wrapping or a large
+            // detail card from driving the clipboard height during hover.
+            DispatchQueue.main.async { [weak self] in
+                self?.resize(contentHeight: deferredMainContentHeight, animate: false)
+            }
+        }
     }
 
     // MARK: - Click-outside dismissal
@@ -645,6 +666,7 @@ private struct ClipboardDetailCard: View {
     let entry: ClipboardEntry
     let imageURL: URL?
     let cardSize: NSSize
+    let codeHighlightTheme: CodeHighlightTheme
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
@@ -678,7 +700,7 @@ private struct ClipboardDetailCard: View {
                 .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
         } else if entry.contentCategory == .code {
             ScrollView(.vertical) {
-                Text(CodeHighlighter.highlight(entry.text ?? ""))
+                Text(CodeHighlighter.highlight(entry.text ?? "", theme: codeHighlightTheme))
                     .font(.system(size: 11, design: .monospaced))
                     .textSelection(.enabled)
                     // The layout gives code a wider card first. Only a line
@@ -957,7 +979,8 @@ struct ClipboardHistoryPanelView: View {
                 ClipboardDetailCard(
                     entry: entry,
                     imageURL: detailPresentation.imageURL,
-                    cardSize: detailPresentation.cardSize
+                    cardSize: detailPresentation.cardSize,
+                    codeHighlightTheme: store.settings.resolvedCodeHighlightTheme
                 )
             }
             .frame(
@@ -1054,6 +1077,7 @@ struct ClipboardHistoryPanelView: View {
                             CodeEntryRow(
                                 entry: entry,
                                 isSelected: activeSelectionID == entry.id,
+                                codeHighlightTheme: store.settings.resolvedCodeHighlightTheme,
                                 onTogglePin: { onTogglePin(entry) }
                             )
                         } else {
@@ -1247,6 +1271,7 @@ private struct TextEntryRow: View {
 private struct CodeEntryRow: View {
     let entry: ClipboardEntry
     let isSelected: Bool
+    let codeHighlightTheme: CodeHighlightTheme
     let onTogglePin: () -> Void
 
     @State private var isHovered = false
@@ -1255,7 +1280,7 @@ private struct CodeEntryRow: View {
 
     var body: some View {
         HStack(alignment: .center, spacing: 6) {
-            Text(CodeHighlighter.highlight(previewCode))
+            Text(CodeHighlighter.highlight(previewCode, theme: codeHighlightTheme))
                 .font(.system(size: 11, design: .monospaced))
                 .lineLimit(ClipboardPanelLayout.codePreviewMaxLines)
                 .lineSpacing(1)
