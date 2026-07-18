@@ -1,5 +1,5 @@
 import Foundation
-import MemeMemoCore
+import HedgeMemoCore
 import SwiftUI
 
 /// Lightweight, language-agnostic highlighting for clipboard previews. It is

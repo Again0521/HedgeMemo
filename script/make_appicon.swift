@@ -5,7 +5,7 @@ import AppKit
 let root = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent()
 let svgURL = root.appendingPathComponent("Assets/AppIcon.svg")
 let icnsURL = root.appendingPathComponent("Assets/AppIcon.icns")
-let iconsetURL = FileManager.default.temporaryDirectory.appendingPathComponent("MemeMemo-AppIcon.iconset")
+let iconsetURL = FileManager.default.temporaryDirectory.appendingPathComponent("HedgeMemo-AppIcon.iconset")
 
 guard let source = NSImage(contentsOf: svgURL) else {
     FileHandle.standardError.write(Data("cannot read \(svgURL.path)\n".utf8))

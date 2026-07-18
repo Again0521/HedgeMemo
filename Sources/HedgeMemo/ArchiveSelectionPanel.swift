@@ -1,5 +1,5 @@
 import AppKit
-import MemeMemoCore
+import HedgeMemoCore
 import SwiftUI
 
 struct ArchiveExportSelection {
@@ -83,7 +83,7 @@ private struct ArchiveExportSelectionView: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
-            Text("选择要写入 MemeMemo ZIP 的内容")
+            Text("选择要写入 HedgeMemo ZIP 的内容")
                 .font(.headline)
                 .padding(.horizontal, 20)
                 .padding(.top, 18)

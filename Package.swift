@@ -2,20 +2,20 @@
 import PackageDescription
 
 let package = Package(
-    name: "MemeMemo",
+    name: "HedgeMemo",
     platforms: [.macOS(.v14)],
     products: [
-        .library(name: "MemeMemoCore", targets: ["MemeMemoCore"]),
-        .executable(name: "MemeMemo", targets: ["MemeMemo"]),
-        .executable(name: "MemeMemoWhitebox", targets: ["MemeMemoWhitebox"]),
+        .library(name: "HedgeMemoCore", targets: ["HedgeMemoCore"]),
+        .executable(name: "HedgeMemo", targets: ["HedgeMemo"]),
+        .executable(name: "HedgeMemoWhitebox", targets: ["HedgeMemoWhitebox"]),
     ],
     targets: [
-        .target(name: "MemeMemoCore"),
+        .target(name: "HedgeMemoCore"),
         .executableTarget(
-            name: "MemeMemo",
-            dependencies: ["MemeMemoCore"],
+            name: "HedgeMemo",
+            dependencies: ["HedgeMemoCore"],
             exclude: ["Resources"]
         ),
-        .executableTarget(name: "MemeMemoWhitebox", dependencies: ["MemeMemoCore"]),
+        .executableTarget(name: "HedgeMemoWhitebox", dependencies: ["HedgeMemoCore"]),
     ]
 )

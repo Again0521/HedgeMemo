@@ -2,7 +2,7 @@ import AppKit
 import Carbon.HIToolbox
 import Combine
 import ImageIO
-import MemeMemoCore
+import HedgeMemoCore
 import SwiftUI
 import UniformTypeIdentifiers
 

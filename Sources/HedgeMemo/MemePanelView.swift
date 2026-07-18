@@ -1,5 +1,5 @@
 import AppKit
-import MemeMemoCore
+import HedgeMemoCore
 import SwiftUI
 import UniformTypeIdentifiers
 
@@ -10,7 +10,13 @@ struct MemePanelView: View {
     @State private var isManaging = false
     @State private var selectedIDs = Set<UUID>()
     @State private var draggedID: UUID?
-    @State private var insertionProposal: MemeInsertionProposal?
+    /// Pointer position in `MemeGridSpace` while a reorder drag is active.
+    @State private var dragLocation: CGPoint = .zero
+    /// The grid's top edge in the scroll viewport's space; negative once the
+    /// grid is scrolled. Lets the drag handler know when the pointer reaches
+    /// the viewport edges so it can autoscroll.
+    @State private var gridMinYInViewport: CGFloat = 0
+    @State private var lastAutoscroll = Date.distantPast
     @State private var captureService: ClipboardCaptureService?
     @State private var editingMeme: MemeItem?
     @State private var categoryDraft = ""
@@ -21,8 +27,12 @@ struct MemePanelView: View {
     // Three visible rows of square tiles; the grid scrolls beyond that.
     private let tileSide: CGFloat = 92
     private let tileSpacing: CGFloat = 8
+    // The panel width is fixed, so the column count is too. Reorder targets
+    // are computed from these fixed slots — never from tile frames, which
+    // move during the make-room animation.
+    private let columnCount = 4
     private var columns: [GridItem] {
-        [GridItem(.adaptive(minimum: tileSide, maximum: tileSide + 12), spacing: tileSpacing)]
+        Array(repeating: GridItem(.fixed(tileSide), spacing: tileSpacing), count: columnCount)
     }
     private var visibleMemes: [MemeItem] { store.filteredMemes(query: query) }
     private var gridHeight: CGFloat { tileSide * 3 + tileSpacing * 2 + 4 }
@@ -41,40 +51,54 @@ struct MemePanelView: View {
                 managementBar
             }
             Divider()
-            ScrollView {
-                LazyVGrid(columns: columns, spacing: tileSpacing) {
-                    ForEach(visibleMemes) { meme in
-                        MemeTileView(
-                            meme: meme,
-                            imageURL: store.imageURL(for: meme),
+            ScrollViewReader { proxy in
+                ScrollView {
+                    LazyVGrid(columns: columns, spacing: tileSpacing) {
+                        ForEach(visibleMemes) { meme in
+                            MemeTileView(
+                                meme: meme,
+                                imageURL: store.imageURL(for: meme),
+                                side: tileSide,
+                                isManaging: isManaging,
+                                isSelected: selectedIDs.contains(meme.id),
+                                isDragged: draggedID == meme.id,
+                                categories: store.categories,
+                                onSelection: toggleSelection,
+                                onCopy: {
+                                    store.copyToPasteboard(meme)
+                                    onDismiss()
+                                },
+                                onEditNote: { editingMeme = meme },
+                                onMove: { store.move(ids: [meme.id], to: $0) },
+                                onDelete: { store.delete(ids: [meme.id]) },
+                                onDragChanged: { id, location in
+                                    handleDragChanged(id: id, location: location, proxy: proxy)
+                                },
+                                onDragEnded: endDrag
+                            )
+                            .id(meme.id)
+                        }
+                        MemeImportTile(
                             side: tileSide,
-                            isManaging: isManaging,
-                            isSelected: selectedIDs.contains(meme.id),
-                            categories: store.categories,
-                            onSelection: toggleSelection,
-                            onCopy: {
-                                store.copyToPasteboard(meme)
-                                onDismiss()
-                            },
-                            onEditNote: { editingMeme = meme },
-                            onMove: { store.move(ids: [meme.id], to: $0) },
-                            onDelete: { store.delete(ids: [meme.id]) },
-                            draggedID: $draggedID,
-                            insertionProposal: $insertionProposal,
-                            onReorder: { draggedID, targetID, insertAfter in
-                                store.reorder(draggedID: draggedID, relativeTo: targetID, insertAfter: insertAfter)
-                            }
+                            isReordering: draggedID != nil,
+                            onImport: importImages
                         )
                     }
-                    MemeImportTile(
-                        side: tileSide,
-                        isReordering: draggedID != nil,
-                        draggedID: $draggedID,
-                        onImport: importImages,
-                        onDropAtEnd: moveDraggedMemeToEnd
+                    .overlay(alignment: .topLeading) { floatingDragTile }
+                    .coordinateSpace(name: MemeGridSpace.name)
+                    .background(
+                        // Tracks how far the grid is scrolled so the drag
+                        // handler can autoscroll at the viewport edges.
+                        GeometryReader { geometry in
+                            let minY = geometry.frame(in: .named(Self.viewportSpace)).minY
+                            Color.clear
+                                .onAppear { gridMinYInViewport = minY }
+                                .onChange(of: minY) { _, y in gridMinYInViewport = y }
+                        }
                     )
+                    .padding(2)
                 }
-                .padding(2)
+                .coordinateSpace(name: Self.viewportSpace)
             }
             .frame(height: gridHeight)
             .overlay {
@@ -112,7 +136,10 @@ struct MemePanelView: View {
         .onChange(of: store.lastError) { _, error in
             showsError = error != nil
         }
-        .onDisappear { captureService?.stop() }
+        .onDisappear {
+            captureService?.stop()
+            draggedID = nil
+        }
     }
 
     private var header: some View {
@@ -200,10 +227,86 @@ struct MemePanelView: View {
         showsCategorySheet = false
     }
 
-    private func moveDraggedMemeToEnd(_ id: UUID) {
-        let categoryID = store.memes.first(where: { $0.id == id })?.categoryID
-        store.reorderToEnd(draggedID: id, categoryID: categoryID)
-        insertionProposal = nil
+    // MARK: - Gesture-driven reordering
+
+    private static let viewportSpace = "memeGridViewport"
+    private static let reorderAnimation: Animation = .easeInOut(duration: 0.15)
+
+    /// The floating copy that follows the pointer during a reorder drag. It
+    /// lives in the grid's own coordinate space (`dragLocation` is captured
+    /// there), so it stays aligned with the pointer regardless of scrolling.
+    @ViewBuilder
+    private var floatingDragTile: some View {
+        if let draggedID, let meme = visibleMemes.first(where: { $0.id == draggedID }) {
+            MemeTileContent(meme: meme, imageURL: store.imageURL(for: meme), side: tileSide)
+                .scaleEffect(1.05)
+                .shadow(color: .black.opacity(0.3), radius: 8, y: 3)
+                .position(dragLocation)
+                .allowsHitTesting(false)
+        }
+    }
+
+    /// Maps a pointer position in grid space onto a fixed slot index. Slots
+    /// never move (unlike tiles, which animate aside), so a stationary pointer
+    /// always resolves to the same slot and the grid cannot oscillate.
+    private func slotIndex(at location: CGPoint) -> Int {
+        let cell = tileSide + tileSpacing
+        let column = min(columnCount - 1, max(0, Int(location.x / cell)))
+        let row = max(0, Int(location.y / cell))
+        return row * columnCount + column
+    }
+
+    private func handleDragChanged(id: UUID, location: CGPoint, proxy: ScrollViewProxy) {
+        if draggedID != id { draggedID = id }
+        dragLocation = location
+        let memes = visibleMemes
+        guard let currentIndex = memes.firstIndex(where: { $0.id == id }) else { return }
+        let slot = slotIndex(at: location)
+        if slot >= memes.count {
+            // The import tile's slot and anything past it mean "the end":
+            // inside a category the meme also becomes part of that category.
+            if currentIndex != memes.count - 1 {
+                withAnimation(Self.reorderAnimation) {
+                    store.reorderToEnd(draggedID: id, categoryID: store.selectedCategoryID)
+                }
+            }
+        } else if slot != currentIndex {
+            withAnimation(Self.reorderAnimation) {
+                store.reorder(draggedID: id, over: memes[slot].id)
+            }
+        }
+        autoscrollIfNeeded(location: location, proxy: proxy)
+    }
+
+    private func endDrag() {
+        withAnimation(Self.reorderAnimation) { draggedID = nil }
+    }
+
+    /// `DragGesture` does not scroll the enclosing ScrollView by itself, so
+    /// nudge it row by row while the pointer dwells near a viewport edge.
+    private func autoscrollIfNeeded(location: CGPoint, proxy: ScrollViewProxy) {
+        guard Date.now.timeIntervalSince(lastAutoscroll) > 0.25 else { return }
+        let memes = visibleMemes
+        guard !memes.isEmpty else { return }
+        let edge: CGFloat = 30
+        let cell = tileSide + tileSpacing
+        let viewportY = location.y + gridMinYInViewport
+        let row = max(0, Int(location.y / cell))
+        if viewportY < edge {
+            let index = (row - 1) * columnCount
+            guard memes.indices.contains(index) else { return }
+            lastAutoscroll = .now
+            withAnimation(.easeInOut(duration: 0.2)) {
+                proxy.scrollTo(memes[index].id, anchor: .top)
+            }
+        } else if viewportY > gridHeight - edge {
+            let index = min(memes.count - 1, (row + 1) * columnCount + columnCount - 1)
+            guard index > row * columnCount else { return }
+            lastAutoscroll = .now
+            withAnimation(.easeInOut(duration: 0.2)) {
+                proxy.scrollTo(memes[index].id, anchor: .bottom)
+            }
+        }
     }
 
     /// The trailing grid slot is an import affordance first.  It doubles as
@@ -232,9 +335,7 @@ struct MemePanelView: View {
 private struct MemeImportTile: View {
     let side: CGFloat
     let isReordering: Bool
-    @Binding var draggedID: UUID?
     let onImport: () -> Void
-    let onDropAtEnd: (UUID) -> Void
 
     var body: some View {
         Button(action: onImport) {
@@ -252,26 +353,10 @@ private struct MemeImportTile: View {
                 }
         }
         .buttonStyle(.plain)
-        .onDrop(
-            of: [UTType.plainText],
-            delegate: MemeEndDropDelegate(draggedID: $draggedID, onDropAtEnd: onDropAtEnd)
-        )
-        .help(isReordering ? "拖放到这里移至末尾" : "从文件或文件夹批量导入到当前分类")
+        // During a reorder drag this slot doubles as the "move to end" target;
+        // the panel's slot math handles the actual move, this is the visual.
+        .help(isReordering ? "拖到这里移至末尾" : "从文件或文件夹批量导入到当前分类")
         .accessibilityLabel(isReordering ? "将表情包移到末尾" : "导入表情包")
-    }
-}
-
-private struct MemeEndDropDelegate: DropDelegate {
-    @Binding var draggedID: UUID?
-    let onDropAtEnd: (UUID) -> Void
-
-    func dropUpdated(info: DropInfo) -> DropProposal? { DropProposal(operation: .move) }
-
-    func performDrop(info: DropInfo) -> Bool {
-        guard let draggedID else { return false }
-        onDropAtEnd(draggedID)
-        self.draggedID = nil
-        return true
     }
 }
 

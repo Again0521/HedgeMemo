@@ -19,7 +19,7 @@ public struct MemeArchiveManifest: Codable, Sendable {
     }
 
     /// Version 1 archives contained only `snapshot`; preserve their contents
-    /// while rejecting anything that is not a MemeMemo manifest.
+    /// while rejecting anything that is not a HedgeMemo manifest.
     private enum CodingKeys: String, CodingKey {
         case formatVersion, exportedAt, snapshot, memeSnapshot, clipboardSnapshot
     }
@@ -59,7 +59,7 @@ public enum MemeArchiveService {
     ) throws {
         guard memeSnapshot != nil || clipboardSnapshot != nil else { throw MemeRepositoryError.invalidArchive }
         let fm = FileManager.default
-        let staging = fm.temporaryDirectory.appendingPathComponent("memememo-export-\(UUID().uuidString)", isDirectory: true)
+        let staging = fm.temporaryDirectory.appendingPathComponent("hedgememo-export-\(UUID().uuidString)", isDirectory: true)
         defer { try? fm.removeItem(at: staging) }
         try fm.createDirectory(at: staging, withIntermediateDirectories: true)
         let memeDirectory = staging.appendingPathComponent("meme-images", isDirectory: true)
@@ -88,7 +88,7 @@ public enum MemeArchiveService {
 
     public static func extract(from archiveURL: URL) throws -> (manifest: MemeArchiveManifest, directory: URL) {
         let fm = FileManager.default
-        let extraction = fm.temporaryDirectory.appendingPathComponent("memememo-import-\(UUID().uuidString)", isDirectory: true)
+        let extraction = fm.temporaryDirectory.appendingPathComponent("hedgememo-import-\(UUID().uuidString)", isDirectory: true)
         try fm.createDirectory(at: extraction, withIntermediateDirectories: true)
         do {
             try run("/usr/bin/unzip", ["-qq", archiveURL.path, "-d", extraction.path])

@@ -1,9 +1,9 @@
 import AppKit
-import MemeMemoCore
+import HedgeMemoCore
 import SwiftUI
 
 @MainActor
-final class MemeMemoAppDelegate: NSObject, NSApplicationDelegate {
+final class HedgeMemoAppDelegate: NSObject, NSApplicationDelegate {
     private var services: AppServices?
     private var statusItemController: StatusItemController?
 
@@ -39,8 +39,8 @@ final class MemeMemoAppDelegate: NSObject, NSApplicationDelegate {
 }
 
 @main
-struct MemeMemoApp: App {
-    @NSApplicationDelegateAdaptor(MemeMemoAppDelegate.self) private var appDelegate
+struct HedgeMemoApp: App {
+    @NSApplicationDelegateAdaptor(HedgeMemoAppDelegate.self) private var appDelegate
 
     var body: some Scene {
         Settings { EmptyView() }

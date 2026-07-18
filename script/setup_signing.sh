@@ -2,14 +2,14 @@
 set -euo pipefail
 
 # Creates a stable, self-signed code-signing identity in the login keychain so
-# every rebuild of MemeMemo carries the SAME code signature. macOS TCC (Screen
+# every rebuild of HedgeMemo carries the SAME code signature. macOS TCC (Screen
 # Recording, Accessibility) keys its grants on the signing identity; with the
 # default ad-hoc signature the cdhash changes on every build, so the system
 # treats each update as a brand-new app and forgets the permission. Run this
 # once; afterwards `build_and_run.sh` signs with this identity automatically and
 # the screen-recording grant survives updates.
 
-IDENTITY_NAME="MemeMemo Local Signing"
+IDENTITY_NAME="HedgeMemo Local Signing"
 KEYCHAIN="$HOME/Library/Keychains/login.keychain-db"
 
 # A self-signed cert is not trusted for the codesigning policy, so it never
@@ -29,7 +29,7 @@ distinguished_name = req_dn
 x509_extensions = v3_codesign
 prompt = no
 [req_dn]
-CN = MemeMemo Local Signing
+CN = HedgeMemo Local Signing
 [v3_codesign]
 basicConstraints = critical,CA:false
 keyUsage = critical,digitalSignature

@@ -1,5 +1,5 @@
 import AppKit
-import MemeMemoCore
+import HedgeMemoCore
 import SwiftUI
 
 /// Owns the menu bar status item. Left click opens the meme popover; right click
@@ -36,7 +36,7 @@ final class StatusItemController: NSObject {
         let icon = HedgehogIcon.statusImage
         button.image = icon
         button.imagePosition = .imageOnly
-        button.toolTip = "MemeMemo"
+        button.toolTip = "HedgeMemo"
         button.target = self
         button.action = #selector(handleClick)
         button.sendAction(on: [.leftMouseUp, .rightMouseUp])
@@ -74,7 +74,33 @@ final class StatusItemController: NSObject {
         guard let button = statusItem.button else { return }
         NSApp.activate(ignoringOtherApps: true)
         popover.show(relativeTo: button.bounds, of: button, preferredEdge: .minY)
+        clampPopoverToScreen()
+        // AppKit may still adjust the popover frame right after `show`;
+        // re-clamp once that settles so the final position is on screen too.
+        DispatchQueue.main.async { [weak self] in self?.clampPopoverToScreen() }
         startOutsideClickMonitor()
+    }
+
+    /// A status item near the right screen edge can get its wide popover
+    /// placed partially offscreen, cutting off the meme grid. Shift the whole
+    /// popover window back inside the visible frame — never clip its content.
+    private func clampPopoverToScreen() {
+        guard popover.isShown,
+              let window = popover.contentViewController?.view.window else { return }
+        guard let screen = window.screen
+            ?? statusItem.button?.window?.screen
+            ?? NSScreen.main else { return }
+        let visible = screen.visibleFrame
+        let inset: CGFloat = 8
+        var frame = window.frame
+        frame.origin.x = min(frame.origin.x, visible.maxX - frame.width - inset)
+        frame.origin.x = max(frame.origin.x, visible.minX + inset)
+        // Keep the bottom edge on screen as well; the top edge stays where the
+        // system anchored it under the menu bar.
+        frame.origin.y = max(frame.origin.y, visible.minY + inset)
+        guard abs(frame.origin.x - window.frame.origin.x) > 0.5
+            || abs(frame.origin.y - window.frame.origin.y) > 0.5 else { return }
+        window.setFrame(frame, display: true)
     }
 
     /// Global monitors only see events dispatched to *other* applications, so a
@@ -123,7 +149,7 @@ final class StatusItemController: NSObject {
 
         menu.addItem(actionItem("设置…", #selector(openSettings)))
         menu.addItem(.separator())
-        menu.addItem(actionItem("退出 MemeMemo", #selector(quit)))
+        menu.addItem(actionItem("退出 HedgeMemo", #selector(quit)))
         return menu
     }
 

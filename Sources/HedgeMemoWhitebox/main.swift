@@ -1,6 +1,6 @@
 import AppKit
 import Foundation
-import MemeMemoCore
+import HedgeMemoCore
 
 nonisolated(unsafe) private var assertionCount = 0
 
@@ -108,12 +108,12 @@ expect(ClipboardCodeDetector.isCode(swiftSnippet), "multi-line source with keywo
 expect(ClipboardCodeDetector.isCode("const total = items.reduce((a, b) => a + b, 0);"), "single-line JS with operators and terminator must be code")
 expect(!ClipboardCodeDetector.isCode("今天下午三点开会，请准时参加。"), "ordinary Chinese prose must not be code")
 expect(!ClipboardCodeDetector.isCode("Let's meet at 3pm."), "ordinary English prose must not be code")
-expect(!ClipboardCodeDetector.isCode("https://github.com/Again0521/memememo"), "a bare link must not be code")
+expect(!ClipboardCodeDetector.isCode("https://github.com/Again0521/hedgememo"), "a bare link must not be code")
 
 let codeEntry = ClipboardEntry(kind: .text, text: swiftSnippet, contentHash: "code")
 let proseEntry = ClipboardEntry(kind: .text, text: "周五下班一起吃饭", contentHash: "prose")
 let imageEntry = ClipboardEntry(kind: .image, text: nil, imageFileName: "x.png", contentHash: "img")
-let linkEntry = ClipboardEntry(kind: .text, text: "https://github.com/Again0521/memememo", contentHash: "url")
+let linkEntry = ClipboardEntry(kind: .text, text: "https://github.com/Again0521/hedgememo", contentHash: "url")
 expect(codeEntry.contentCategory == .code, "code entry must classify as code")
 expect(proseEntry.contentCategory == .text, "prose entry must classify as text")
 expect(imageEntry.contentCategory == .image, "image entry must classify as image")
@@ -226,7 +226,7 @@ expect(
 // overflowed (max-entries stepper crash, post-screenshot crash).
 await MainActor.run {
     let tempRoot = FileManager.default.temporaryDirectory
-        .appendingPathComponent("memememo-whitebox-\(UUID().uuidString)", isDirectory: true)
+        .appendingPathComponent("hedgememo-whitebox-\(UUID().uuidString)", isDirectory: true)
     defer { try? FileManager.default.removeItem(at: tempRoot) }
     let clipboardStore = ClipboardHistoryStore(repository: ClipboardHistoryRepository(rootURL: tempRoot))
     clipboardStore.settings.maxEntries = 200
@@ -246,7 +246,7 @@ await MainActor.run {
     expect(reloadedClipboardStore.entries.first?.isPinned == true, "clipboard pin state must persist")
     expect(reloadedClipboardStore.entries.first?.isDesktopPinned == true, "desktop note state must persist independently")
 
-    let suiteName = "memememo-whitebox-screenshot"
+    let suiteName = "hedgememo-whitebox-screenshot"
     let defaults = UserDefaults(suiteName: suiteName)!
     defaults.removePersistentDomain(forName: suiteName)
     let screenshotStore = ScreenshotSettingsStore(defaults: defaults)
@@ -257,7 +257,7 @@ await MainActor.run {
     // Regression: dragging a meme reorders the backing array, but sortOrder was
     // re-derived from stale values so the visible order never changed.
     let memeRoot = FileManager.default.temporaryDirectory
-        .appendingPathComponent("memememo-whitebox-memes-\(UUID().uuidString)", isDirectory: true)
+        .appendingPathComponent("hedgememo-whitebox-memes-\(UUID().uuidString)", isDirectory: true)
     defer { try? FileManager.default.removeItem(at: memeRoot) }
     let memeStore = MemeStore(repository: MemeRepository(rootURL: memeRoot))
     expect(memeStore.addImage(solidImage(0.1, size: 6), note: "一"), "seed meme one")
@@ -267,19 +267,33 @@ await MainActor.run {
     expect(initialOrder == ["一", "二", "三"], "memes must start in insertion order")
     let first = memeStore.filteredMemes(query: "")[0].id
     let third = memeStore.filteredMemes(query: "")[2].id
-    memeStore.reorder(draggedID: first, before: third)
+    memeStore.reorder(draggedID: first, over: third)
     let reordered = memeStore.filteredMemes(query: "").map(\.note)
-    expect(reordered == ["二", "一", "三"], "reorder must move the dragged meme and persist through sortOrder")
+    expect(reordered == ["二", "三", "一"], "a live reorder must drop the dragged meme into the target's slot")
     let second = memeStore.filteredMemes(query: "")[0].id
-    memeStore.reorder(draggedID: second, relativeTo: third, insertAfter: true)
-    expect(
-        memeStore.filteredMemes(query: "").map(\.note) == ["一", "三", "二"],
-        "dropping on the trailing half must insert after the target"
-    )
-    memeStore.reorderToEnd(draggedID: first, categoryID: nil)
+    memeStore.reorder(draggedID: second, over: third)
     expect(
         memeStore.filteredMemes(query: "").map(\.note) == ["三", "二", "一"],
-        "the explicit end drop target must move an item to the category tail"
+        "dragging backwards must also land in the target's slot"
+    )
+    memeStore.reorderToEnd(draggedID: third, categoryID: nil)
+    expect(
+        memeStore.filteredMemes(query: "").map(\.note) == ["二", "一", "三"],
+        "the explicit end drop target must move an item to the list tail"
+    )
+    // Regression: in the “全部” view most drags cross category boundaries; the
+    // old guard silently ignored them, which read as "release does nothing".
+    let reorderCategory = memeStore.addCategory(name: "拖拽分类")
+    expect(reorderCategory != nil, "seed category for cross-category reorder")
+    memeStore.move(ids: [third], to: reorderCategory)
+    memeStore.reorder(draggedID: third, over: second)
+    expect(
+        memeStore.filteredMemes(query: "").map(\.note) == ["三", "二", "一"],
+        "a cross-category live reorder must still land in the target's slot"
+    )
+    expect(
+        memeStore.memes.first(where: { $0.id == third })?.categoryID == nil,
+        "a cross-category live reorder must adopt the target's category"
     )
 
     let gifBytes = Data(base64Encoded: "R0lGODlhAQABAIAAAAAAAP///ywAAAAAAQABAAACAUwAOw==")!
@@ -304,7 +318,7 @@ await MainActor.run {
     )
 
     expect(
-        clipboardStore.addImageData(screenshotPayload, sourceApp: "MemeMemo", origin: .memeMemoScreenshot),
+        clipboardStore.addImageData(screenshotPayload, sourceApp: "HedgeMemo", origin: .hedgeMemoScreenshot),
         "completed screenshots must be stored in their dedicated clipboard category"
     )
     expect(
@@ -313,7 +327,7 @@ await MainActor.run {
     )
 
     let archiveURL = FileManager.default.temporaryDirectory
-        .appendingPathComponent("memememo-whitebox-\(UUID().uuidString).zip")
+        .appendingPathComponent("hedgememo-whitebox-\(UUID().uuidString).zip")
     defer { try? FileManager.default.removeItem(at: archiveURL) }
     do {
         try MemeArchiveService.export(
@@ -325,11 +339,11 @@ await MainActor.run {
         )
         let extracted = try MemeArchiveService.extract(from: archiveURL)
         defer { MemeArchiveService.removeExtraction(extracted.directory) }
-        expect(extracted.manifest.formatVersion == MemeArchiveManifest.formatVersion, "ZIP exports must carry the current MemeMemo manifest")
+        expect(extracted.manifest.formatVersion == MemeArchiveManifest.formatVersion, "ZIP exports must carry the current HedgeMemo manifest")
         expect(extracted.manifest.memeSnapshot?.memes.isEmpty == false, "ZIP exports must retain selected meme data")
-        expect(extracted.manifest.clipboardSnapshot?.entries.contains(where: { $0.origin == .memeMemoScreenshot }) == true, "ZIP exports must retain the screenshot category")
+        expect(extracted.manifest.clipboardSnapshot?.entries.contains(where: { $0.origin == .hedgeMemoScreenshot }) == true, "ZIP exports must retain the screenshot category")
     } catch {
-        expect(false, "MemeMemo ZIP export/import must round-trip: \(error.localizedDescription)")
+        expect(false, "HedgeMemo ZIP export/import must round-trip: \(error.localizedDescription)")
     }
 
     clipboardStore.setCategory(.builtin(.screenshot), enabled: false)
@@ -338,17 +352,17 @@ await MainActor.run {
         "disabling a category must clear its existing records and hide it"
     )
     expect(
-        !clipboardStore.addImageData(screenshotPayload, sourceApp: "MemeMemo", origin: .memeMemoScreenshot),
+        !clipboardStore.addImageData(screenshotPayload, sourceApp: "HedgeMemo", origin: .hedgeMemoScreenshot),
         "a disabled screenshot category must not record future screenshots"
     )
 
     // Meme capture pauses clipboard history recording.
     let clipRoot = FileManager.default.temporaryDirectory
-        .appendingPathComponent("memememo-whitebox-clip-\(UUID().uuidString)", isDirectory: true)
+        .appendingPathComponent("hedgememo-whitebox-clip-\(UUID().uuidString)", isDirectory: true)
     defer { try? FileManager.default.removeItem(at: clipRoot) }
     let pausedStore = ClipboardHistoryStore(repository: ClipboardHistoryRepository(rootURL: clipRoot))
     pausedStore.isRecordingPaused = true
     expect(pausedStore.isRecordingPaused, "recording pause flag must be settable for meme capture")
 }
 
-print("MemeMemo whitebox checks passed (\(assertionCount) assertions).")
+print("HedgeMemo whitebox checks passed (\(assertionCount) assertions).")

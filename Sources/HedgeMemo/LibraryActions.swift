@@ -1,5 +1,5 @@
 import AppKit
-import MemeMemoCore
+import HedgeMemoCore
 import UniformTypeIdentifiers
 
 /// Import/export entry points shared by the status bar menu and any in-panel controls.
@@ -22,7 +22,7 @@ enum LibraryActions {
             memeStore.report(error)
             let alert = NSAlert(error: error)
             alert.messageText = "无法识别导入的 ZIP"
-            alert.informativeText = "请选择由 MemeMemo 导出的压缩包。"
+            alert.informativeText = "请选择由 HedgeMemo 导出的压缩包。"
             alert.runModal()
         }
     }
@@ -31,7 +31,7 @@ enum LibraryActions {
         guard let selection = ArchiveExportSelectionPanel.run(memeStore: memeStore, clipboardStore: clipboardStore) else { return }
         let panel = NSSavePanel()
         panel.allowedContentTypes = [.zip]
-        panel.nameFieldStringValue = "MemeMemo-Export.zip"
+        panel.nameFieldStringValue = "HedgeMemo-Export.zip"
         guard panel.runModal() == .OK, let destination = panel.url else { return }
         do {
             let memeSnapshot = filteredMemeSnapshot(from: memeStore.snapshot(), selection: selection)

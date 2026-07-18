@@ -1,7 +1,7 @@
 import AppKit
 import CoreGraphics
 import Foundation
-import MemeMemoCore
+import HedgeMemoCore
 
 @MainActor
 final class ScreenshotService: NSObject {

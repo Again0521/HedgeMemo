@@ -1,5 +1,5 @@
 import AppKit
-import MemeMemoCore
+import HedgeMemoCore
 import SwiftUI
 
 /// The slideout is presentation state owned by the one Maccy-style
@@ -486,16 +486,16 @@ final class ClipboardHistoryPanelController: NSObject, NSWindowDelegate {
                 : hostFrame.maxY - detailY - size.height
         )
         mainScreenFrame = mainFrame
-        DispatchQueue.main.async { [weak self] in
-            guard let self,
-                  self.detailEntryID == entry.id,
-                  self.panel?.isVisible == true else { return }
-            // For ordinary text hovers the host frame is unchanged.  Avoid
-            // even a no-op AppKit frame commit because it causes a full
-            // NSGlassEffectView redraw and is perceived as a flash.
-            if let panel = self.panel, !self.framesMatch(panel.frame, hostFrame) {
-                self.setPanelFrame(hostFrame)
-            }
+        // Commit the SwiftUI presentation state and the AppKit host frame in
+        // the *same* run-loop turn so they land in one CoreAnimation commit.
+        // The previous next-turn dispatch let a full frame render with the
+        // expanded offsets inside the not-yet-expanded window, which showed as
+        // an occasional flash/jump the moment a preview appeared.  For
+        // ordinary text hovers the host frame is unchanged; framesMatch still
+        // skips the no-op commit that would force a full NSGlassEffectView
+        // redraw (itself perceived as a flash).
+        if !framesMatch(panel.frame, hostFrame) {
+            setPanelFrame(hostFrame)
         }
     }
 

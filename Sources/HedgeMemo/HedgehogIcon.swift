@@ -7,7 +7,7 @@ enum HedgehogIcon {
             ?? Bundle.main.url(forResource: "Hedgehog", withExtension: "svg")
         guard let resourceURL,
               let image = NSImage(contentsOf: resourceURL) else {
-            return NSImage(systemSymbolName: "face.smiling", accessibilityDescription: "MemeMemo") ?? NSImage()
+            return NSImage(systemSymbolName: "face.smiling", accessibilityDescription: "HedgeMemo") ?? NSImage()
         }
         // Preserve the supplied artwork's dark body, white face, curved belly,
         // foot, and soft baseline instead of flattening it into a template glyph.

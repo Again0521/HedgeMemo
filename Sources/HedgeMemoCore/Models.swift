@@ -112,7 +112,10 @@ public enum ClipboardContentCategory: String, Codable, CaseIterable, Sendable {
 /// The source is optional so snapshots written before screenshot separation
 /// continue to decode as ordinary image entries.
 public enum ClipboardEntryOrigin: String, Codable, Sendable {
-    case memeMemoScreenshot
+    // The raw value is persisted in clipboard-history.json and ZIP manifests;
+    // it keeps the pre-rename (MemeMemo era) spelling so existing snapshots
+    // and archives continue to decode after the HedgeMemo rename.
+    case hedgeMemoScreenshot = "memeMemoScreenshot"
 }
 
 /// User-defined category that filters text entries with a regular expression.
@@ -520,7 +523,7 @@ public struct ClipboardEntry: Codable, Hashable, Identifiable, Sendable {
     }
 
     public var contentCategory: ClipboardContentCategory {
-        if origin == .memeMemoScreenshot { return .screenshot }
+        if origin == .hedgeMemoScreenshot { return .screenshot }
         switch kind {
         case .image:
             return .image

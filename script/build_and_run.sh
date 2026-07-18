@@ -2,8 +2,8 @@
 set -euo pipefail
 
 MODE="${1:-run}"
-APP_NAME="MemeMemo"
-BUNDLE_ID="com.memememo.app"
+APP_NAME="HedgeMemo"
+BUNDLE_ID="com.hedgememo.app"
 MIN_SYSTEM_VERSION="14.0"
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -12,7 +12,7 @@ DIST_APP="$DIST_DIR/$APP_NAME.app"
 # Assemble and sign outside the cloud-backed Documents checkout. File Provider
 # can attach Finder metadata to a bundle between xattr cleanup and codesign,
 # making an otherwise valid build fail strict verification nondeterministically.
-PACKAGE_DIR="/private/tmp/memememo-package-$$"
+PACKAGE_DIR="/private/tmp/hedgememo-package-$$"
 APP_BUNDLE="$PACKAGE_DIR/$APP_NAME.app"
 APP_CONTENTS="$APP_BUNDLE/Contents"
 APP_MACOS="$APP_CONTENTS/MacOS"
@@ -47,8 +47,8 @@ cp -X "$BUILD_BINARY" "$APP_BINARY"
 chmod +x "$APP_BINARY"
 strip -x "$APP_BINARY"
 
-cp -X "$ROOT_DIR/Sources/MemeMemo/Resources/Hedgehog.png" "$APP_RESOURCES/Hedgehog.png"
-cp -X "$ROOT_DIR/Sources/MemeMemo/Resources/Hedgehog.svg" "$APP_RESOURCES/Hedgehog.svg"
+cp -X "$ROOT_DIR/Sources/HedgeMemo/Resources/Hedgehog.png" "$APP_RESOURCES/Hedgehog.png"
+cp -X "$ROOT_DIR/Sources/HedgeMemo/Resources/Hedgehog.svg" "$APP_RESOURCES/Hedgehog.svg"
 
 if [[ -f "$ROOT_DIR/Assets/AppIcon.icns" ]]; then
   cp -X "$ROOT_DIR/Assets/AppIcon.icns" "$APP_RESOURCES/AppIcon.icns"
@@ -76,7 +76,7 @@ PLIST
 xattr -cr "$APP_BUNDLE"
 # A stable identity is required: an ad-hoc fallback changes the cdhash every
 # build and makes macOS regard the update as a new screen-recording client.
-SIGN_IDENTITY="MemeMemo Local Signing"
+SIGN_IDENTITY="HedgeMemo Local Signing"
 if security find-certificate -c "$SIGN_IDENTITY" >/dev/null 2>&1; then
   codesign --force --deep --sign "$SIGN_IDENTITY" --identifier "$BUNDLE_ID" "$APP_BUNDLE"
 else

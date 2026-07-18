@@ -1,5 +1,5 @@
 import AppKit
-import MemeMemoCore
+import HedgeMemoCore
 import SwiftUI
 
 private enum SettingsLayout {
@@ -293,7 +293,7 @@ struct SettingsPanelView: View {
     private var startupSection: some View {
         SettingsSection(title: "启动") {
             SettingsFormRow("登录时自动启动") {
-                Toggle("登录时自动启动 MemeMemo", isOn: Binding(
+                Toggle("登录时自动启动 HedgeMemo", isOn: Binding(
                     get: { launchAtLogin.isEnabled },
                     set: { launchAtLogin.setEnabled($0) }
                 )).labelsHidden()
@@ -321,7 +321,7 @@ struct SettingsPanelView: View {
             SettingsDivider()
             SettingsFormRow("邮箱") { Link("zonn.l@foxmail.com", destination: URL(string: "mailto:zonn.l@foxmail.com")!) }
             SettingsDivider()
-            SettingsFormRow("GitHub") { Link("Again0521/memememo", destination: URL(string: "https://github.com/Again0521/memememo")!) }
+            SettingsFormRow("GitHub") { Link("Again0521/hedgememo", destination: URL(string: "https://github.com/Again0521/hedgememo")!) }
         }
     }
 

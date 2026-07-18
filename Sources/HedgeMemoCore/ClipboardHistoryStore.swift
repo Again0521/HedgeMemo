@@ -130,7 +130,7 @@ public final class ClipboardHistoryStore: ObservableObject {
         }
     }
 
-    /// Records images created by MemeMemo's screenshot flow separately from
+    /// Records images created by HedgeMemo's screenshot flow separately from
     /// images copied by other apps, then consumes the pasteboard change so the
     /// monitor cannot add a duplicate to the generic 图片 category.
     @discardableResult
@@ -138,7 +138,7 @@ public final class ClipboardHistoryStore: ObservableObject {
         let changeCount = NSPasteboard.general.changeCount
         observedChangeCount = changeCount
         suppressedChangeCount = changeCount
-        return addImageData(payload, sourceApp: "MemeMemo", origin: .memeMemoScreenshot)
+        return addImageData(payload, sourceApp: "HedgeMemo", origin: .hedgeMemoScreenshot)
     }
 
     public func delete(id: UUID) {

@@ -137,29 +137,44 @@ public final class MemeStore: ObservableObject {
         persist()
     }
 
-    public func reorder(draggedID: UUID, before targetID: UUID) {
-        reorder(draggedID: draggedID, relativeTo: targetID, insertAfter: false)
-    }
-
-    public func reorder(draggedID: UUID, relativeTo targetID: UUID, insertAfter: Bool) {
+    /// Live drag reordering: the dragged meme takes the target's current slot
+    /// and the target shifts toward the dragged meme's old position. When the
+    /// target sits in another category — dragging inside “全部” — the dragged
+    /// meme adopts that category, so a drop always lands exactly where it
+    /// points. (The previous guard silently rejected cross-category targets,
+    /// which is why releasing a drag in “全部” often did nothing.)
+    public func reorder(draggedID: UUID, over targetID: UUID) {
         guard draggedID != targetID,
               let draggedIndex = memes.firstIndex(where: { $0.id == draggedID }),
               let targetIndex = memes.firstIndex(where: { $0.id == targetID }) else { return }
-        let categoryID = memes[targetIndex].categoryID
-        guard memes[draggedIndex].categoryID == categoryID else { return }
-        let item = memes.remove(at: draggedIndex)
-        var destination = memes.firstIndex(where: { $0.id == targetID }) ?? memes.endIndex
-        if insertAfter, destination < memes.endIndex { destination += 1 }
-        memes.insert(item, at: destination)
+        var item = memes[draggedIndex]
+        if item.categoryID != memes[targetIndex].categoryID {
+            item.categoryID = memes[targetIndex].categoryID
+            item.updatedAt = .now
+        }
+        memes.remove(at: draggedIndex)
+        // Inserting at the target's pre-removal index puts the dragged meme in
+        // the target's former slot for drags in either direction.
+        memes.insert(item, at: targetIndex)
         normalizeSortOrders()
         persist()
     }
 
+    /// Moves the dragged meme to the tail of `categoryID`, adopting that
+    /// category. A nil category means the “全部” view: keep the meme's own
+    /// category and move it to the very end of the list.
     public func reorderToEnd(draggedID: UUID, categoryID: UUID?) {
-        guard let draggedIndex = memes.firstIndex(where: { $0.id == draggedID }),
-              memes[draggedIndex].categoryID == categoryID else { return }
-        let item = memes.remove(at: draggedIndex)
-        let destination = memes.lastIndex(where: { $0.categoryID == categoryID }).map { $0 + 1 } ?? memes.endIndex
+        guard let draggedIndex = memes.firstIndex(where: { $0.id == draggedID }) else { return }
+        var item = memes[draggedIndex]
+        let destinationCategory = categoryID ?? item.categoryID
+        if item.categoryID != destinationCategory {
+            item.categoryID = destinationCategory
+            item.updatedAt = .now
+        }
+        memes.remove(at: draggedIndex)
+        let destination = categoryID == nil
+            ? memes.endIndex
+            : memes.lastIndex(where: { $0.categoryID == destinationCategory }).map { $0 + 1 } ?? memes.endIndex
         memes.insert(item, at: destination)
         normalizeSortOrders()
         persist()

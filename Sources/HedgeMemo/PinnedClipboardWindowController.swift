@@ -1,6 +1,6 @@
 import AppKit
 import Combine
-import MemeMemoCore
+import HedgeMemoCore
 import SwiftUI
 
 /// Owns the long-lived desktop notes created from pinned clipboard entries.

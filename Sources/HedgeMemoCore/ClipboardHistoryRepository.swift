@@ -12,9 +12,7 @@ public final class ClipboardHistoryRepository: @unchecked Sendable {
 
     public init(rootURL: URL? = nil, fileManager: FileManager = .default) {
         self.fileManager = fileManager
-        let defaultURL = fileManager.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
-            .appendingPathComponent("MemeMemo", isDirectory: true)
-        self.rootURL = rootURL ?? defaultURL
+        self.rootURL = rootURL ?? AppSupportLocation.defaultRoot(fileManager: fileManager)
         self.imagesURL = self.rootURL.appendingPathComponent("clipboard-images", isDirectory: true)
         self.snapshotURL = self.rootURL.appendingPathComponent("clipboard-history.json")
     }
