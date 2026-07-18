@@ -12,6 +12,7 @@ final class PinnedClipboardWindowsController {
     private let store: ClipboardHistoryStore
     private var windows: [UUID: PinnedClipboardWindow] = [:]
     private var entriesObserver: AnyCancellable?
+    private var settingsObserver: AnyCancellable?
 
     init(store: ClipboardHistoryStore) {
         self.store = store
@@ -19,6 +20,12 @@ final class PinnedClipboardWindowsController {
             .dropFirst()
             .sink { [weak self] entries in
                 self?.synchronize(with: entries)
+            }
+
+        settingsObserver = store.$settings
+            .dropFirst()
+            .sink { [weak self] settings in
+                self?.refreshCodeTheme(settings.resolvedCodeHighlightTheme)
             }
 
         guard !CommandLine.arguments.contains(where: { $0.hasPrefix("--preview-") }) else { return }
@@ -53,6 +60,7 @@ final class PinnedClipboardWindowsController {
             let note = PinnedClipboardWindow(
                 entry: entry,
                 imageURL: store.imageURL(for: entry),
+                codeHighlightTheme: store.settings.resolvedCodeHighlightTheme,
                 cascadeIndex: windows.count,
                 onUnpin: { [weak self] id in self?.unpin(id: id) }
             )
@@ -60,19 +68,34 @@ final class PinnedClipboardWindowsController {
             note.show()
         }
     }
+
+    private func refreshCodeTheme(_ theme: CodeHighlightTheme) {
+        windows.values.forEach { $0.updateCodeHighlightTheme(theme) }
+    }
 }
 
 @MainActor
 private final class PinnedClipboardWindow {
     private let panel: PinnedClipboardPanel
     private let model = PinnedClipboardWindowModel()
+    private let entry: ClipboardEntry
+    private let imageURL: URL?
+    private let contentHeight: CGFloat
+    private let onUnpin: (UUID) -> Void
+    private var codeHighlightTheme: CodeHighlightTheme
 
     init(
         entry: ClipboardEntry,
         imageURL: URL?,
+        codeHighlightTheme: CodeHighlightTheme,
         cascadeIndex: Int,
         onUnpin: @escaping (UUID) -> Void
     ) {
+        self.entry = entry
+        self.imageURL = imageURL
+        self.contentHeight = PinnedClipboardWindowLayout.contentHeight(for: entry, imageURL: imageURL)
+        self.onUnpin = onUnpin
+        self.codeHighlightTheme = codeHighlightTheme
         let size = PinnedClipboardWindowLayout.windowSize(for: entry, imageURL: imageURL)
         let frame = PinnedClipboardWindowLayout.initialFrame(size: size, cascadeIndex: cascadeIndex)
         let panel = PinnedClipboardPanel(
@@ -93,14 +116,7 @@ private final class PinnedClipboardWindow {
         panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
         panel.setFrame(frame, display: false)
 
-        let content = PinnedClipboardNoteView(
-            entry: entry,
-            imageURL: imageURL,
-            contentHeight: PinnedClipboardWindowLayout.contentHeight(for: entry, imageURL: imageURL),
-            model: model,
-            onToggleAlwaysOnTop: { [weak self] in self?.toggleAlwaysOnTop() },
-            onUnpin: { onUnpin(entry.id) }
-        )
+        let content = noteContent()
         PanelMaterialHost.install(content, in: panel, cornerRadius: 14)
     }
 
@@ -110,6 +126,24 @@ private final class PinnedClipboardWindow {
 
     func close() {
         panel.orderOut(nil)
+    }
+
+    func updateCodeHighlightTheme(_ theme: CodeHighlightTheme) {
+        guard codeHighlightTheme != theme, let root = panel.contentView else { return }
+        codeHighlightTheme = theme
+        PanelMaterialHost.replace(noteContent(), in: root)
+    }
+
+    private func noteContent() -> PinnedClipboardNoteView {
+        PinnedClipboardNoteView(
+            entry: entry,
+            imageURL: imageURL,
+            contentHeight: contentHeight,
+            codeHighlightTheme: codeHighlightTheme,
+            model: model,
+            onToggleAlwaysOnTop: { [weak self] in self?.toggleAlwaysOnTop() },
+            onUnpin: { [onUnpin, entry] in onUnpin(entry.id) }
+        )
     }
 
     private func toggleAlwaysOnTop() {
@@ -132,6 +166,7 @@ private struct PinnedClipboardNoteView: View {
     let entry: ClipboardEntry
     let imageURL: URL?
     let contentHeight: CGFloat
+    let codeHighlightTheme: CodeHighlightTheme
     @ObservedObject var model: PinnedClipboardWindowModel
     let onToggleAlwaysOnTop: () -> Void
     let onUnpin: () -> Void
@@ -193,7 +228,7 @@ private struct PinnedClipboardNoteView: View {
             ScrollView(.vertical) {
                 Group {
                     if entry.contentCategory == .code {
-                        Text(CodeHighlighter.highlight(entry.text ?? ""))
+                        Text(CodeHighlighter.highlight(entry.text ?? "", theme: codeHighlightTheme))
                     } else {
                         Text(entry.text ?? entry.previewText)
                     }

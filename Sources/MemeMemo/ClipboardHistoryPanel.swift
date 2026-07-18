@@ -482,12 +482,13 @@ final class ClipboardHistoryPanelController: NSObject, NSWindowDelegate {
         guard panel != nil, !mainScreenFrame.isEmpty else { return }
         setPanelFrame(mainScreenFrame)
         if let deferredMainContentHeight {
+            let contentHeight = deferredMainContentHeight
             self.deferredMainContentHeight = nil
             // Apply a measurement made while previewing only after the main
             // frame has returned. This prevents text wrapping or a large
             // detail card from driving the clipboard height during hover.
             DispatchQueue.main.async { [weak self] in
-                self?.resize(contentHeight: deferredMainContentHeight, animate: false)
+                self?.resize(contentHeight: contentHeight, animate: false)
             }
         }
     }

@@ -69,6 +69,7 @@ struct SettingsPanelView: View {
         ScrollView {
             VStack(alignment: .leading, spacing: 22) {
                 clipboardSection
+                codeAppearanceSection
                 categorySection
                 screenshotSection
                 startupSection
@@ -151,6 +152,29 @@ struct SettingsPanelView: View {
             } label: {
                 Label("添加自定义分类…", systemImage: "plus")
             } }
+        }
+    }
+
+    /// Keep syntax appearance separate from clipboard retention and category
+    /// management. A native Picker gives the choice a visible label, keyboard
+    /// navigation and an immediate, predictable preview effect.
+    private var codeAppearanceSection: some View {
+        SettingsSection(
+            title: "代码显示",
+            footer: "配色会立即应用到剪贴板列表、预览和固定到桌面的代码便签。"
+        ) {
+            SettingsFormRow("语法高亮配色") {
+                Picker("语法高亮配色", selection: codeHighlightThemeBinding) {
+                    ForEach(CodeHighlightTheme.allCases, id: \.self) { theme in
+                        Text(theme.displayName).tag(theme)
+                    }
+                }
+                .labelsHidden()
+                .pickerStyle(.menu)
+                .frame(width: 190)
+                .accessibilityLabel("语法高亮配色")
+                .accessibilityHint(clipboardStore.settings.resolvedCodeHighlightTheme.accessibilityDescription)
+            }
         }
     }
 
@@ -308,6 +332,13 @@ struct SettingsPanelView: View {
         Binding(
             get: { clipboardStore.settings.autoPaste },
             set: { clipboardStore.settings.autoPaste = $0 }
+        )
+    }
+
+    private var codeHighlightThemeBinding: Binding<CodeHighlightTheme> {
+        Binding(
+            get: { clipboardStore.settings.resolvedCodeHighlightTheme },
+            set: { clipboardStore.settings.codeHighlightTheme = $0 }
         )
     }
 

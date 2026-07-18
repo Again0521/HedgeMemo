@@ -80,36 +80,36 @@ enum CodeHighlighter {
                 string = Color(nsColor: .systemRed)
                 comment = .secondary
             case .xcodeLight:
-                plain = rgb(0x1F, 0x1F, 0x24)
-                type = rgb(0x0B, 0x70, 0x70)
-                function = rgb(0x32, 0x4F, 0xA1)
-                annotation = rgb(0x9B, 0x3B, 0x17)
-                keyword = rgb(0xA8, 0x13, 0x6D)
-                number = rgb(0x20, 0x4F, 0xC8)
-                string = rgb(0xC4, 0x1A, 0x16)
-                comment = rgb(0x6C, 0x72, 0x80)
+                plain = Self.rgb(0x1F, 0x1F, 0x24)
+                type = Self.rgb(0x0B, 0x70, 0x70)
+                function = Self.rgb(0x32, 0x4F, 0xA1)
+                annotation = Self.rgb(0x9B, 0x3B, 0x17)
+                keyword = Self.rgb(0xA8, 0x13, 0x6D)
+                number = Self.rgb(0x20, 0x4F, 0xC8)
+                string = Self.rgb(0xC4, 0x1A, 0x16)
+                comment = Self.rgb(0x6C, 0x72, 0x80)
             case .solarizedLight:
-                plain = rgb(0x58, 0x6E, 0x75)
-                type = rgb(0x26, 0x8B, 0xD2)
-                function = rgb(0x26, 0x8B, 0xD2)
-                annotation = rgb(0xB5, 0x89, 0x00)
-                keyword = rgb(0x85, 0x99, 0x00)
-                number = rgb(0xD3, 0x36, 0x82)
-                string = rgb(0x2A, 0xA1, 0x98)
-                comment = rgb(0x93, 0xA1, 0xA1)
+                plain = Self.rgb(0x58, 0x6E, 0x75)
+                type = Self.rgb(0x26, 0x8B, 0xD2)
+                function = Self.rgb(0x26, 0x8B, 0xD2)
+                annotation = Self.rgb(0xB5, 0x89, 0x00)
+                keyword = Self.rgb(0x85, 0x99, 0x00)
+                number = Self.rgb(0xD3, 0x36, 0x82)
+                string = Self.rgb(0x2A, 0xA1, 0x98)
+                comment = Self.rgb(0x93, 0xA1, 0xA1)
             case .githubLight:
-                plain = rgb(0x24, 0x2D, 0x3D)
-                type = rgb(0x05, 0x5D, 0xB0)
-                function = rgb(0x82, 0x54, 0xE8)
-                annotation = rgb(0x95, 0x3B, 0x0E)
-                keyword = rgb(0xCF, 0x22, 0xE0)
-                number = rgb(0x05, 0x5D, 0xB0)
-                string = rgb(0x0A, 0x30, 0x6B)
-                comment = rgb(0x65, 0x6D, 0x76)
+                plain = Self.rgb(0x24, 0x2D, 0x3D)
+                type = Self.rgb(0x05, 0x5D, 0xB0)
+                function = Self.rgb(0x82, 0x54, 0xE8)
+                annotation = Self.rgb(0x95, 0x3B, 0x0E)
+                keyword = Self.rgb(0xCF, 0x22, 0xE0)
+                number = Self.rgb(0x05, 0x5D, 0xB0)
+                string = Self.rgb(0x0A, 0x30, 0x6B)
+                comment = Self.rgb(0x65, 0x6D, 0x76)
             }
         }
 
-        private func rgb(_ red: Int, _ green: Int, _ blue: Int) -> Color {
+        private static func rgb(_ red: Int, _ green: Int, _ blue: Int) -> Color {
             Color(
                 nsColor: NSColor(
                     calibratedRed: CGFloat(red) / 255,
