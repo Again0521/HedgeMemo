@@ -76,7 +76,7 @@ enum ArchiveExportSelectionPanel {
         let clipboardKeys = clipboardStore.settings.orderedCategoryKeys
         let session = ArchiveSelectionSession(
             title: "选择导出内容",
-            size: ArchiveSelectionMetrics.size(memeCategoryCount: categories.count, clipboardCategoryCount: clipboardKeys.count)
+            size: ArchiveSelectionMetrics.size(rowCount: categories.count + clipboardKeys.count + 1)
         )
         var result: ArchiveExportSelection?
         let root = ArchiveSelectionView(
@@ -114,7 +114,9 @@ enum ArchiveImportSelectionPanel {
         let customs = clipboardSnapshot?.settings.customCategories ?? []
         let session = ArchiveSelectionSession(
             title: "选择导入内容",
-            size: ArchiveSelectionMetrics.size(memeCategoryCount: memeCategories.count, clipboardCategoryCount: clipboardKeys.count)
+            size: ArchiveSelectionMetrics.size(
+                rowCount: memeCategories.count + clipboardKeys.count + (uncategorizedMemes ? 1 : 0)
+            )
         )
         var result: ArchiveImportSelection?
         let root = ArchiveSelectionView(
@@ -155,12 +157,13 @@ enum ArchiveImportSelectionPanel {
 }
 
 private enum ArchiveSelectionMetrics {
-    static func size(memeCategoryCount: Int, clipboardCategoryCount: Int) -> NSSize {
-        // The panel grows with its real content instead of keeping a vacant
-        // 520-point canvas for a small archive. The scrolling list takes over
-        // only for genuinely large category collections.
-        let rowCount = max(1, memeCategoryCount + clipboardCategoryCount + 2)
-        let height = min(560, max(332, 210 + CGFloat(rowCount) * 29))
+    static func size(rowCount: Int) -> NSSize {
+        // Size the window from the rows it actually presents.  The header and
+        // footer need about 164 points together; every category adds one native
+        // control row.  This keeps a small import/export sheet compact while
+        // a long list still scrolls rather than growing beyond the screen.
+        let visibleRows = max(1, rowCount)
+        let height = min(540, max(276, 164 + CGFloat(visibleRows) * 30))
         return NSSize(width: 468, height: height)
     }
 }
