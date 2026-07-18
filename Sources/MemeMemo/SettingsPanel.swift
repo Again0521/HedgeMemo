@@ -2,6 +2,17 @@ import AppKit
 import MemeMemoCore
 import SwiftUI
 
+private enum SettingsLayout {
+    static let panelWidth: CGFloat = 504
+    static let horizontalInset: CGFloat = 24
+    static let labelColumnWidth: CGFloat = 142
+    static let controlColumnWidth: CGFloat = 232
+}
+
+private enum AppVersion {
+    static let display = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "1.0.0"
+}
+
 /// Hosts the settings UI in a standalone translucent panel, opened from the status bar menu.
 @MainActor
 final class SettingsWindowController: NSObject {
@@ -29,7 +40,7 @@ final class SettingsWindowController: NSObject {
         // A plain titled window keeps the system's rounded corners, shadow and
         // a real title bar; translucency comes from the vibrancy background inside.
         let panel = NSPanel(
-            contentRect: NSRect(x: 0, y: 0, width: 504, height: 740),
+            contentRect: NSRect(x: 0, y: 0, width: SettingsLayout.panelWidth, height: 740),
             styleMask: [.titled, .closable, .fullSizeContentView],
             backing: .buffered,
             defer: false
@@ -41,7 +52,9 @@ final class SettingsWindowController: NSObject {
         panel.isOpaque = false
         panel.backgroundColor = .clear
         panel.isReleasedWhenClosed = false
-        panel.isMovableByWindowBackground = true
+        // Only the native title bar is draggable. Controls such as sliders,
+        // toggles and menus must never steal their drag into a panel move.
+        panel.isMovableByWindowBackground = false
         panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
 
         let content = SettingsPanelView(
@@ -89,7 +102,7 @@ struct SettingsPanelView: View {
                 }
                 }
             }
-            .padding(.horizontal, 24)
+            .padding(.horizontal, SettingsLayout.horizontalInset)
             .padding(.bottom, 24)
         }
         .scrollIndicators(.hidden)
@@ -97,7 +110,7 @@ struct SettingsPanelView: View {
         // standard controls and their native focus/selection behavior.
         .controlSize(.small)
         .padding(.top, 32)
-        .frame(width: 504, height: 740)
+        .frame(width: SettingsLayout.panelWidth, height: 740)
         .onAppear {
             refreshAccessibilityTrust()
             launchAtLogin.refresh()
@@ -114,7 +127,7 @@ struct SettingsPanelView: View {
                     Text("\(clipboardStore.settings.maxEntries) 条")
                         .monospacedDigit()
                     Slider(value: maxEntriesStepBinding, in: 0...Double(ClipboardHistorySettings.maxEntryChoices.count - 1), step: 1)
-                        .frame(width: 232)
+                        .frame(width: SettingsLayout.controlColumnWidth)
                         .accessibilityLabel("剪贴板最多保存条数")
                 }
             }
@@ -133,11 +146,13 @@ struct SettingsPanelView: View {
                 ) }
             }
             SettingsDivider()
-            SettingsRow { Button(role: .destructive) {
-                clipboardStore.clearHistory()
-            } label: {
-                Label("清空剪贴板历史", systemImage: "trash")
-            } }
+            SettingsActionRow {
+                Button(role: .destructive) {
+                    clipboardStore.clearHistory()
+                } label: {
+                    Label("清空剪贴板历史", systemImage: "trash")
+                }
+            }
         }
     }
 
@@ -149,11 +164,13 @@ struct SettingsPanelView: View {
                 if index != keys.count - 1 { SettingsDivider() }
             }
             SettingsDivider()
-            SettingsRow { Button {
-                customDraft = CustomCategoryDraft()
-            } label: {
-                Label("添加自定义分类…", systemImage: "plus")
-            } }
+            SettingsActionRow {
+                Button {
+                    customDraft = CustomCategoryDraft()
+                } label: {
+                    Label("添加自定义分类…", systemImage: "plus")
+                }
+            }
         }
     }
 
@@ -173,7 +190,7 @@ struct SettingsPanelView: View {
                 }
                 .labelsHidden()
                 .pickerStyle(.menu)
-                .frame(width: 190)
+                .frame(width: 190, alignment: .trailing)
                 .accessibilityLabel("语法高亮配色")
                 .accessibilityHint(clipboardStore.settings.resolvedCodeHighlightTheme.accessibilityDescription)
             }
@@ -260,7 +277,10 @@ struct SettingsPanelView: View {
                 ForEach(ScreenshotMode.allCases, id: \.self) { mode in
                     Text(mode.displayName).tag(mode)
                 }
-            }.labelsHidden() }
+            }
+            .labelsHidden()
+            .pickerStyle(.menu)
+            .frame(width: 190, alignment: .trailing) }
             SettingsDivider()
             SettingsFormRow("截图快捷键") { HotKeyRecorderControl(hotKey: screenshotHotKeyBinding).frame(width: 180, height: 28) }
             SettingsDivider()
@@ -291,6 +311,12 @@ struct SettingsPanelView: View {
 
     private var authorSection: some View {
         SettingsSection(title: "关于作者") {
+            SettingsFormRow("版本") {
+                Text(AppVersion.display)
+                    .monospacedDigit()
+                    .foregroundStyle(.secondary)
+            }
+            SettingsDivider()
             SettingsFormRow("作者") { Text("ZonnL") }
             SettingsDivider()
             SettingsFormRow("邮箱") { Link("zonn.l@foxmail.com", destination: URL(string: "mailto:zonn.l@foxmail.com")!) }
@@ -434,6 +460,25 @@ private struct SettingsRow<Content: View>: View {
     }
 }
 
+/// Buttons perform a discrete action, so they share the same right control
+/// column as menus, switches and shortcut recorders instead of floating left.
+private struct SettingsActionRow<Content: View>: View {
+    let content: Content
+
+    init(@ViewBuilder content: () -> Content) {
+        self.content = content()
+    }
+
+    var body: some View {
+        HStack(spacing: 0) {
+            Spacer(minLength: 0)
+            content
+                .frame(width: SettingsLayout.controlColumnWidth, alignment: .trailing)
+        }
+        .frame(maxWidth: .infinity, minHeight: 38)
+    }
+}
+
 /// Fixed label column for every form-like setting.  This prevents switches,
 /// shortcuts, pickers and values from drifting horizontally between sections.
 private struct SettingsFormRow<Content: View>: View {
@@ -448,10 +493,10 @@ private struct SettingsFormRow<Content: View>: View {
     var body: some View {
         HStack(alignment: .center, spacing: 16) {
             Text(title)
-                .frame(width: 142, alignment: .leading)
+                .frame(width: SettingsLayout.labelColumnWidth, alignment: .leading)
             Spacer(minLength: 0)
             content
-                .frame(alignment: .trailing)
+                .frame(width: SettingsLayout.controlColumnWidth, alignment: .trailing)
         }
         .frame(maxWidth: .infinity, minHeight: 38, alignment: .leading)
     }

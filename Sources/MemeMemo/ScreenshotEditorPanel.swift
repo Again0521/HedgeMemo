@@ -171,11 +171,21 @@ private struct ScreenshotEditorPanelView: View {
                 Spacer(minLength: 8)
                 actionButtons
             }
-            ScrollView(.horizontal, showsIndicators: false) {
-                markupTools
-                    .padding(.horizontal, 2)
+            GeometryReader { proxy in
+                ScrollView(.horizontal, showsIndicators: false) {
+                    HStack(spacing: 0) {
+                        Spacer(minLength: 0)
+                        markupTools
+                            .fixedSize(horizontal: true, vertical: false)
+                        Spacer(minLength: 0)
+                    }
+                    // When the controls fit, both spacers split the available
+                    // room equally. When they do not, the row stays scrollable
+                    // without losing one side's inset.
+                    .frame(minWidth: proxy.size.width)
+                }
             }
-            .frame(maxWidth: .infinity, alignment: .leading)
+            .frame(height: 30)
         }
     }
 
@@ -973,11 +983,10 @@ private final class ScreenshotCanvasView: NSView {
     }
 
     override func scrollWheel(with event: NSEvent) {
-        // A plain wheel/trackpad scroll adjusts the canvas scale as requested;
-        // once enlarged, the surrounding SwiftUI scroll view provides panning.
-        let delta = event.scrollingDeltaY
-        guard delta != 0 else { return }
-        updateZoom(by: exp(-delta * 0.012))
+        // Two-finger scrolling is navigation, not magnification.  Consuming
+        // it as zoom made an ordinary trackpad scroll unexpectedly resize the
+        // editor.  AppKit delivers pinch separately through `magnify(with:)`.
+        nextResponder?.scrollWheel(with: event)
     }
 
     override func magnify(with event: NSEvent) {

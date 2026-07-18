@@ -282,7 +282,10 @@ public struct HotKeyDefinition: Codable, Equatable, Hashable, Sendable {
     public static let defaultClipboard = HotKeyDefinition(keyCode: 9, key: "V", command: true, shift: true)
     /// The pre-⇧⌘V default; persisted settings still carrying it are migrated forward.
     public static let legacyClipboard = HotKeyDefinition(keyCode: 49, key: "Space", option: true)
-    public static let defaultScreenshot = HotKeyDefinition(keyCode: 23, key: "5", control: true, shift: true)
+    /// Screenshot's default shortcut is ⇧⌘P. Keep the prior shortcut as a
+    /// migration sentinel so existing default settings move forward once.
+    public static let defaultScreenshot = HotKeyDefinition(keyCode: 35, key: "P", command: true, shift: true)
+    public static let legacyScreenshot = HotKeyDefinition(keyCode: 23, key: "5", control: true, shift: true)
 
     public var isUsable: Bool {
         keyCode > 0 && !key.isEmpty && (command || option || control || shift)
@@ -614,11 +617,13 @@ public enum ScreenshotMode: String, Codable, CaseIterable, Sendable {
 }
 
 public enum ScreenshotHotKeyChoice: String, Codable, CaseIterable, Sendable {
+    case commandShiftP
     case commandShiftFive
     case controlShiftFive
 
     public var displayName: String {
         switch self {
+        case .commandShiftP: "Command + Shift + P"
         case .commandShiftFive: "Command + Shift + 5"
         case .controlShiftFive: "Control + Shift + 5"
         }
@@ -633,9 +638,9 @@ public struct ScreenshotSettings: Codable, Equatable, Sendable {
     public var hotKey: HotKeyDefinition?
 
     public init(
-        mode: ScreenshotMode = .manualSelection,
+        mode: ScreenshotMode = .smartWindow,
         remembersLastMode: Bool = true,
-        hotKeyChoice: ScreenshotHotKeyChoice = .controlShiftFive,
+        hotKeyChoice: ScreenshotHotKeyChoice = .commandShiftP,
         opensEditorAfterCapture: Bool = true,
         hotKey: HotKeyDefinition? = .defaultScreenshot
     ) {
@@ -648,10 +653,14 @@ public struct ScreenshotSettings: Codable, Equatable, Sendable {
     }
 
     public mutating func normalize() {
-        if hotKey == nil {
+        if hotKey == .legacyScreenshot, hotKeyChoice == .controlShiftFive {
+            hotKey = .defaultScreenshot
+            hotKeyChoice = .commandShiftP
+        } else if hotKey == nil {
             hotKey = switch hotKeyChoice {
+            case .commandShiftP: .defaultScreenshot
             case .commandShiftFive: HotKeyDefinition(keyCode: 23, key: "5", command: true, shift: true)
-            case .controlShiftFive: .defaultScreenshot
+            case .controlShiftFive: .legacyScreenshot
             }
         }
     }

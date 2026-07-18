@@ -72,6 +72,18 @@ expect(ClipboardEntry(kind: .text, text: "发票报销", contentHash: "q").match
 
 let screenshotSettings = ScreenshotSettings(mode: .smartWindow, remembersLastMode: true)
 expect(ScreenshotPolicy.resolvedMode(settings: screenshotSettings, requestedMode: nil) == .smartWindow, "screenshot must use configured mode when no override is requested")
+expect(ScreenshotSettings().mode == .smartWindow, "new screenshot settings must default to smart window")
+expect(ScreenshotSettings().hotKey == .defaultScreenshot, "new screenshot settings must default to Command + Shift + P")
+expect(ScreenshotSettings().hotKeyChoice == .commandShiftP, "new screenshot settings must expose the Command + Shift + P choice")
+var legacyScreenshotSettings = ScreenshotSettings(
+    mode: .manualSelection,
+    remembersLastMode: true,
+    hotKeyChoice: .controlShiftFive,
+    hotKey: .legacyScreenshot
+)
+legacyScreenshotSettings.normalize()
+expect(legacyScreenshotSettings.hotKey == .defaultScreenshot, "legacy screenshot shortcut must migrate to Command + Shift + P")
+expect(legacyScreenshotSettings.hotKeyChoice == .commandShiftP, "legacy screenshot shortcut choice must migrate to Command + Shift + P")
 expect(ScreenshotPolicy.resolvedMode(settings: screenshotSettings, requestedMode: .manualSelection) == .manualSelection, "screenshot explicit mode must override settings")
 expect(ScreenshotPolicy.settingsAfterCapture(screenshotSettings, usedMode: .manualSelection).mode == .manualSelection, "screenshot settings must remember last mode when enabled")
 let fixedModeSettings = ScreenshotSettings(mode: .smartWindow, remembersLastMode: false)

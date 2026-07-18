@@ -66,32 +66,23 @@ struct MemePanelView: View {
                             }
                         )
                     }
-                    if draggedID != nil {
-                        MoveToEndDropTarget(
-                            side: tileSide,
-                            isTargeted: insertionProposal == nil,
-                            draggedID: $draggedID
-                        ) { id in
-                            let categoryID = store.memes.first(where: { $0.id == id })?.categoryID
-                            store.reorderToEnd(draggedID: id, categoryID: categoryID)
-                            insertionProposal = nil
-                        }
-                    }
+                    MemeImportTile(
+                        side: tileSide,
+                        isReordering: draggedID != nil,
+                        draggedID: $draggedID,
+                        onImport: importImages,
+                        onDropAtEnd: moveDraggedMemeToEnd
+                    )
                 }
                 .padding(2)
-                .onDrop(of: [MemeReorderDragPayload.contentType], delegate: MoveToEndDropDelegate(
-                    draggedID: $draggedID,
-                    onDropAtEnd: { id in
-                        let categoryID = store.memes.first(where: { $0.id == id })?.categoryID
-                        store.reorderToEnd(draggedID: id, categoryID: categoryID)
-                        insertionProposal = nil
-                    }
-                ))
             }
             .frame(height: gridHeight)
             .overlay {
                 if visibleMemes.isEmpty {
                     ContentUnavailableView("还没有表情包", systemImage: "photo.on.rectangle.angled")
+                        // The import tile remains actionable even in a new,
+                        // empty category; this placeholder is informational.
+                        .allowsHitTesting(false)
                 }
             }
         }
@@ -208,40 +199,71 @@ struct MemePanelView: View {
         else { store.addCategory(name: categoryDraft) }
         showsCategorySheet = false
     }
+
+    private func moveDraggedMemeToEnd(_ id: UUID) {
+        let categoryID = store.memes.first(where: { $0.id == id })?.categoryID
+        store.reorderToEnd(draggedID: id, categoryID: categoryID)
+        insertionProposal = nil
+    }
+
+    /// The trailing grid slot is an import affordance first.  It doubles as
+    /// the end insertion target only while a reorder drag is active, which
+    /// preserves a stable grid and makes dropping at the row tail predictable.
+    private func importImages() {
+        let panel = NSOpenPanel()
+        panel.title = "导入表情包"
+        panel.prompt = "导入"
+        panel.message = "可选择图片文件或文件夹；文件夹中的图片会批量导入当前分类。"
+        panel.canChooseFiles = true
+        panel.canChooseDirectories = true
+        panel.allowsMultipleSelection = true
+        panel.allowedContentTypes = [.image]
+        guard panel.runModal() == .OK else { return }
+
+        let targetCategoryID = store.selectedCategoryID
+        let payloads = MemeImageImport.collectPayloads(from: panel.urls)
+        guard !payloads.isEmpty else { return }
+        for payload in payloads {
+            _ = store.addImageData(payload, categoryID: targetCategoryID)
+        }
+    }
 }
 
-private struct MoveToEndDropTarget: View {
+private struct MemeImportTile: View {
     let side: CGFloat
-    let isTargeted: Bool
+    let isReordering: Bool
     @Binding var draggedID: UUID?
+    let onImport: () -> Void
     let onDropAtEnd: (UUID) -> Void
 
     var body: some View {
-        VStack(spacing: 6) {
-            Image(systemName: "arrow.right.to.line")
-                .font(.system(size: 18, weight: .medium))
-            Text("移到末尾")
-                .font(.caption)
+        Button(action: onImport) {
+            Image(systemName: "plus")
+                .font(.system(size: 24, weight: .regular))
+                .foregroundStyle(isReordering ? Color.accentColor : Color.secondary)
+                .frame(width: side, height: side)
+                .background(.quinary, in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+                .overlay {
+                    RoundedRectangle(cornerRadius: 8, style: .continuous)
+                        .strokeBorder(
+                            isReordering ? Color.accentColor : Color.primary.opacity(0.12),
+                            style: StrokeStyle(lineWidth: isReordering ? 2 : 1, dash: isReordering ? [5, 4] : [])
+                        )
+                }
         }
-        .foregroundStyle(Color.accentColor)
-        .frame(width: side, height: side)
-        .background(.quinary, in: RoundedRectangle(cornerRadius: 8, style: .continuous))
-        .overlay {
-            RoundedRectangle(cornerRadius: 8, style: .continuous)
-                .strokeBorder(Color.accentColor.opacity(isTargeted ? 0.85 : 0.35), style: StrokeStyle(lineWidth: 2, dash: [5, 4]))
-        }
-        .onDrop(of: [MemeReorderDragPayload.contentType], delegate: MoveToEndDropDelegate(draggedID: $draggedID, onDropAtEnd: onDropAtEnd))
-        .accessibilityLabel("将表情包移到末尾")
+        .buttonStyle(.plain)
+        .onDrop(
+            of: [UTType.plainText],
+            delegate: MemeEndDropDelegate(draggedID: $draggedID, onDropAtEnd: onDropAtEnd)
+        )
+        .help(isReordering ? "拖放到这里移至末尾" : "从文件或文件夹批量导入到当前分类")
+        .accessibilityLabel(isReordering ? "将表情包移到末尾" : "导入表情包")
     }
 }
 
-private struct MoveToEndDropDelegate: DropDelegate {
+private struct MemeEndDropDelegate: DropDelegate {
     @Binding var draggedID: UUID?
     let onDropAtEnd: (UUID) -> Void
-
-    func validateDrop(info: DropInfo) -> Bool {
-        draggedID != nil
-    }
 
     func dropUpdated(info: DropInfo) -> DropProposal? { DropProposal(operation: .move) }
 
@@ -250,6 +272,34 @@ private struct MoveToEndDropDelegate: DropDelegate {
         onDropAtEnd(draggedID)
         self.draggedID = nil
         return true
+    }
+}
+
+private enum MemeImageImport {
+    static func collectPayloads(from selectedURLs: [URL]) -> [ImageAssetData] {
+        let urls = selectedURLs.flatMap(imageFiles(in:))
+        var seen = Set<URL>()
+        return urls.compactMap { url in
+            guard seen.insert(url.standardizedFileURL).inserted else { return nil }
+            return ImageAssetData(fileURL: url)
+        }
+    }
+
+    private static func imageFiles(in url: URL) -> [URL] {
+        var isDirectory: ObjCBool = false
+        guard FileManager.default.fileExists(atPath: url.path, isDirectory: &isDirectory) else { return [] }
+        if !isDirectory.boolValue { return isImageFile(url) ? [url] : [] }
+
+        let keys: Set<URLResourceKey> = [.isRegularFileKey, .contentTypeKey]
+        let options: FileManager.DirectoryEnumerationOptions = [.skipsHiddenFiles, .skipsPackageDescendants]
+        let enumerator = FileManager.default.enumerator(at: url, includingPropertiesForKeys: Array(keys), options: options)
+        return (enumerator?.allObjects as? [URL] ?? []).filter(isImageFile)
+    }
+
+    private static func isImageFile(_ url: URL) -> Bool {
+        let values = try? url.resourceValues(forKeys: [.isRegularFileKey, .contentTypeKey])
+        guard values?.isRegularFile == true else { return false }
+        return values?.contentType?.conforms(to: .image) == true
     }
 }
 

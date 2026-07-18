@@ -3,25 +3,6 @@ import MemeMemoCore
 import SwiftUI
 import UniformTypeIdentifiers
 
-/// A private in-process payload prevents the menu bar's search field or other
-/// plain-text drop targets from consuming a reorder drag before the grid sees
-/// it. The UUID remains the only ordering source of truth in `MemeStore`.
-enum MemeReorderDragPayload {
-    static let contentType = UTType(exportedAs: "com.zonnl.memememo.meme-reorder")
-
-    static func provider(for id: UUID) -> NSItemProvider {
-        let provider = NSItemProvider()
-        provider.registerDataRepresentation(
-            forTypeIdentifier: contentType.identifier,
-            visibility: .ownProcess
-        ) { completion in
-            completion(Data(id.uuidString.utf8), nil)
-            return nil
-        }
-        return provider
-    }
-}
-
 struct MemeTileView: View {
     let meme: MemeItem
     let imageURL: URL
@@ -102,16 +83,16 @@ struct MemeTileView: View {
         .contextMenu { contextMenu }
         .onDrag {
             draggedID = meme.id
-            return MemeReorderDragPayload.provider(for: meme.id)
+            return NSItemProvider(object: meme.id.uuidString as NSString)
         }
-        .onDrop(of: [MemeReorderDragPayload.contentType], delegate: MemeDropDelegate(
+        .onDrop(of: [UTType.plainText], delegate: MemeDropDelegate(
             targetID: meme.id,
             side: side,
             draggedID: $draggedID,
             insertionProposal: $insertionProposal,
             onReorder: onReorder
         ))
-        .help(hasNote ? meme.note : "按住并拖动可排序")
+        .help(isManaging ? "点击选择；拖动缩略图排序" : (hasNote ? "\(meme.note) · 拖动排序" : "点击复制；拖动排序"))
     }
 
     @ViewBuilder
@@ -140,10 +121,6 @@ private struct MemeDropDelegate: DropDelegate {
     @Binding var draggedID: UUID?
     @Binding var insertionProposal: MemeInsertionProposal?
     let onReorder: (UUID, UUID, Bool) -> Void
-
-    func validateDrop(info: DropInfo) -> Bool {
-        draggedID != nil
-    }
 
     func dropEntered(info: DropInfo) {
         updateProposal(info)

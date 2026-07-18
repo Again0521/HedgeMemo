@@ -80,7 +80,6 @@ private final class PinnedClipboardWindow {
     private let model = PinnedClipboardWindowModel()
     private let entry: ClipboardEntry
     private let imageURL: URL?
-    private let contentHeight: CGFloat
     private let onUnpin: (UUID) -> Void
     private var codeHighlightTheme: CodeHighlightTheme
 
@@ -93,14 +92,13 @@ private final class PinnedClipboardWindow {
     ) {
         self.entry = entry
         self.imageURL = imageURL
-        self.contentHeight = PinnedClipboardWindowLayout.contentHeight(for: entry, imageURL: imageURL)
         self.onUnpin = onUnpin
         self.codeHighlightTheme = codeHighlightTheme
         let size = PinnedClipboardWindowLayout.windowSize(for: entry, imageURL: imageURL)
         let frame = PinnedClipboardWindowLayout.initialFrame(size: size, cascadeIndex: cascadeIndex)
         let panel = PinnedClipboardPanel(
             contentRect: frame,
-            styleMask: [.borderless],
+            styleMask: [.borderless, .resizable],
             backing: .buffered,
             defer: false
         )
@@ -113,6 +111,7 @@ private final class PinnedClipboardWindow {
         // material inside the panel.
         panel.hasShadow = true
         panel.isMovableByWindowBackground = true
+        panel.minSize = NSSize(width: 240, height: 150)
         panel.isReleasedWhenClosed = false
         panel.hidesOnDeactivate = false
         panel.level = .normal
@@ -141,7 +140,6 @@ private final class PinnedClipboardWindow {
         PinnedClipboardNoteView(
             entry: entry,
             imageURL: imageURL,
-            contentHeight: contentHeight,
             codeHighlightTheme: codeHighlightTheme,
             model: model,
             onToggleAlwaysOnTop: { [weak self] in self?.toggleAlwaysOnTop() },
@@ -168,7 +166,6 @@ private final class PinnedClipboardWindowModel: ObservableObject {
 private struct PinnedClipboardNoteView: View {
     let entry: ClipboardEntry
     let imageURL: URL?
-    let contentHeight: CGFloat
     let codeHighlightTheme: CodeHighlightTheme
     @ObservedObject var model: PinnedClipboardWindowModel
     let onToggleAlwaysOnTop: () -> Void
@@ -180,7 +177,9 @@ private struct PinnedClipboardNoteView: View {
             Divider()
             content
                 .padding(12)
+                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
         .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
         .overlay {
             RoundedRectangle(cornerRadius: 14, style: .continuous)
@@ -225,7 +224,6 @@ private struct PinnedClipboardNoteView: View {
         if entry.kind == .image, let imageURL {
             AnimatedImageFileView(url: imageURL)
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
-                .frame(height: contentHeight)
                 .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
         } else {
             ScrollView(.vertical) {
@@ -244,7 +242,7 @@ private struct PinnedClipboardNoteView: View {
                 .fixedSize(horizontal: false, vertical: true)
             }
             .scrollIndicators(.automatic)
-            .frame(height: contentHeight)
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
     }
 }
@@ -263,10 +261,6 @@ private enum PinnedClipboardWindowLayout {
             width: contentSize.width + contentPadding,
             height: headerHeight + contentSize.height + contentPadding
         )
-    }
-
-    static func contentHeight(for entry: ClipboardEntry, imageURL: URL?) -> CGFloat {
-        measuredContentSize(for: entry, imageURL: imageURL).height
     }
 
     static func initialFrame(size: NSSize, cascadeIndex: Int) -> NSRect {
