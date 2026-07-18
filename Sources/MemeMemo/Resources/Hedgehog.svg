@@ -1,13 +1,27 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="30 185 412 219">
-<path d="M 347.2 298.8 L 372.4 234.2 L 313.1 270.3 Z" fill="#24262B" stroke="#24262B" stroke-width="10" stroke-linejoin="round"/>
-<path d="M 314.3 271.0 L 319.1 201.8 L 273.3 254.0 Z" fill="#24262B" stroke="#24262B" stroke-width="10" stroke-linejoin="round"/>
-<path d="M 231.9 250.2 L 196.2 190.7 L 188.5 259.7 Z" fill="#24262B" stroke="#24262B" stroke-width="10" stroke-linejoin="round"/>
-<path d="M 189.8 259.2 L 137.9 213.1 L 151.2 281.2 Z" fill="#24262B" stroke="#24262B" stroke-width="10" stroke-linejoin="round"/>
-<path d="M 152.3 280.3 L 89.0 251.9 L 122.1 312.9 Z" fill="#24262B" stroke="#24262B" stroke-width="10" stroke-linejoin="round"/>
-<path d="M 122.9 311.7 L 54.0 303.5 L 103.8 351.8 Z" fill="#24262B" stroke="#24262B" stroke-width="10" stroke-linejoin="round"/>
-<path d="M 104.2 350.5 L 36.0 363.3 L 98.0 394.5 Z" fill="#24262B" stroke="#24262B" stroke-width="10" stroke-linejoin="round"/>
-<path d="M 90.0 392.0 A 150.0 150.0 0 0 1 390.0 392.0 Z" fill="#24262B"/>
-<path d="M 286 276.0 Q 352 282.0 426 356.0 Q 438 367.0 424 377.0 L 292 392.0 Z" fill="#FFFFFF"/>
-<circle cx="425" cy="365.0" r="13" fill="#24262B"/>
-<circle cx="354" cy="332.0" r="10" fill="#24262B"/>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 260 168">
+<defs>
+<mask id="face">
+<rect width="260" height="168" fill="#ffffff"/>
+<path d="M 150 92 C 178 96 202 116 214 128 C 220 134 216 140 208 141 L 150 146 Z" fill="#000000"/>
+</mask>
+</defs>
+<g mask="url(#face)">
+<path fill="#2b2d31" d="
+M 46 144
+C 24 138 14 122 24 106
+L 8 98 L 32 92
+L 20 70 L 44 80
+L 40 50 L 62 70
+L 62 36 L 82 66
+L 88 30 L 104 64
+L 116 30 L 128 64
+L 144 38 L 154 72
+C 172 70 190 82 194 104
+C 198 126 180 146 152 146
+L 60 146
+C 55 146 50 145 46 144
+Z"/>
+</g>
+<circle cx="176" cy="118" r="8" fill="#2b2d31"/>
+<circle cx="216" cy="132" r="9" fill="#2b2d31"/>
 </svg>

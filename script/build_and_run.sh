@@ -47,6 +47,7 @@ cp -X "$BUILD_BINARY" "$APP_BINARY"
 chmod +x "$APP_BINARY"
 strip -x "$APP_BINARY"
 
+cp -X "$ROOT_DIR/Sources/MemeMemo/Resources/Hedgehog.png" "$APP_RESOURCES/Hedgehog.png"
 cp -X "$ROOT_DIR/Sources/MemeMemo/Resources/Hedgehog.svg" "$APP_RESOURCES/Hedgehog.svg"
 
 if [[ -f "$ROOT_DIR/Assets/AppIcon.icns" ]]; then

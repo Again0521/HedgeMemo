@@ -29,7 +29,7 @@ final class SettingsWindowController: NSObject {
         // A plain titled window keeps the system's rounded corners, shadow and
         // a real title bar; translucency comes from the vibrancy background inside.
         let panel = NSPanel(
-            contentRect: NSRect(x: 0, y: 0, width: 560, height: 740),
+            contentRect: NSRect(x: 0, y: 0, width: 530, height: 740),
             styleMask: [.titled, .closable, .fullSizeContentView],
             backing: .buffered,
             defer: false
@@ -49,7 +49,7 @@ final class SettingsWindowController: NSObject {
             screenshotSettingsStore: screenshotSettingsStore,
             hotKeyWarnings: hotKeyWarnings()
         )
-        SystemSurface.install(content, in: panel, material: .popover)
+        PanelMaterialHost.install(content, in: panel, cornerRadius: 16)
         self.panel = panel
         NSApp.activate(ignoringOtherApps: true)
         panel.center()
@@ -94,7 +94,7 @@ struct SettingsPanelView: View {
         .scrollIndicators(.hidden)
         .controlSize(.small)
         .padding(.top, 32)
-        .frame(width: 560, height: 740)
+        .frame(width: 530, height: 740)
         .onAppear {
             refreshAccessibilityTrust()
             launchAtLogin.refresh()
@@ -120,7 +120,7 @@ struct SettingsPanelView: View {
             SettingsDivider()
             SettingsFormRow("复制后自动粘贴") { Toggle("复制后自动粘贴", isOn: autoPasteBinding).labelsHidden() }
             SettingsDivider()
-            SettingsFormRow("剪贴板快捷键") { HotKeyRecorderButton(hotKey: clipboardHotKeyBinding, isRecording: .constant(false)).frame(width: 180, height: 28) }
+            SettingsFormRow("剪贴板快捷键") { HotKeyRecorderControl(hotKey: clipboardHotKeyBinding).frame(width: 180, height: 28) }
             if clipboardStore.settings.autoPaste {
                 SettingsDivider()
                 SettingsRow { PermissionStatusRow(
@@ -236,7 +236,7 @@ struct SettingsPanelView: View {
                 }
             }.labelsHidden() }
             SettingsDivider()
-            SettingsFormRow("截图快捷键") { HotKeyRecorderButton(hotKey: screenshotHotKeyBinding, isRecording: .constant(false)).frame(width: 180, height: 28) }
+            SettingsFormRow("截图快捷键") { HotKeyRecorderControl(hotKey: screenshotHotKeyBinding).frame(width: 180, height: 28) }
             SettingsDivider()
             SettingsFormRow("记住上次模式") { Toggle("记住上次模式", isOn: remembersScreenshotModeBinding).labelsHidden() }
             SettingsDivider()
@@ -524,6 +524,15 @@ private struct HotKeyRecorderRow: View {
             HotKeyRecorderButton(hotKey: $hotKey, isRecording: $isRecording)
                 .frame(width: 160, height: 28)
         }
+    }
+}
+
+private struct HotKeyRecorderControl: View {
+    @Binding var hotKey: HotKeyDefinition
+    @State private var isRecording = false
+
+    var body: some View {
+        HotKeyRecorderButton(hotKey: $hotKey, isRecording: $isRecording)
     }
 }
 

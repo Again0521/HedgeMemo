@@ -2,26 +2,71 @@ import AppKit
 import MemeMemoCore
 import SwiftUI
 
+/// Hover detail is deliberately presentation state of the *same* floating
+/// window as the clipboard list.  A second non-key NSPanel renders the system
+/// material in its inactive appearance, which is visibly gray and can never
+/// match the active list.  Maccy keeps this slideout in one hosting hierarchy;
+/// do the same here.
 @MainActor
-final class ClipboardHistoryPanelController: NSObject {
+private final class ClipboardDetailPresentation: ObservableObject {
+    @Published var entry: ClipboardEntry?
+    @Published var imageURL: URL?
+    @Published var cardSize: NSSize = .zero
+    @Published var placement: Placement = .right
+    @Published var mainTopOffset: CGFloat = 0
+    @Published var mainHeight: CGFloat = 0
+    @Published var detailTopOffset: CGFloat = 0
+
+    enum Placement {
+        case left
+        case right
+    }
+
+    var isVisible: Bool { entry != nil }
+
+    func show(
+        entry: ClipboardEntry,
+        imageURL: URL?,
+        cardSize: NSSize,
+        placement: Placement,
+        mainTopOffset: CGFloat,
+        mainHeight: CGFloat,
+        detailTopOffset: CGFloat
+    ) {
+        self.entry = entry
+        self.imageURL = imageURL
+        self.cardSize = cardSize
+        self.placement = placement
+        self.mainTopOffset = mainTopOffset
+        self.mainHeight = mainHeight
+        self.detailTopOffset = detailTopOffset
+    }
+
+    func hide() {
+        entry = nil
+        imageURL = nil
+        cardSize = .zero
+        mainTopOffset = 0
+        mainHeight = 0
+        detailTopOffset = 0
+    }
+}
+
+@MainActor
+final class ClipboardHistoryPanelController: NSObject, NSWindowDelegate {
     private let store: ClipboardHistoryStore
     private let memeStore: MemeStore
     private let pinnedWindows: PinnedClipboardWindowsController
     private var panel: NSPanel?
-    /// Transparent host for the two independent rounded glass cards. Keeping
-    /// both cards in one NSPanel gives them the same active/inactive material.
-    private var canvas: NSView?
-    private var mainShadow: RoundedCardShadowView?
-    private var detailShadow: RoundedCardShadowView?
     private var mainSurface: NSView?
-    private var detailSurface: NSView?
     private var detailEntryID: UUID?
     private var clickOutsideMonitor: Any?
     /// The main list's rect in screen coordinates — the single source of truth.
     /// The window may grow to also hold the detail card, but the main surface
     /// must keep exactly this screen position, so hovering never moves the list.
     private var mainScreenFrame: NSRect = .zero
-    private var detailScreenFrame: NSRect?
+    private let detailPresentation = ClipboardDetailPresentation()
+    private let panelInset: CGFloat = 18
 
     init(store: ClipboardHistoryStore, memeStore: MemeStore) {
         self.store = store
@@ -50,6 +95,7 @@ final class ClipboardHistoryPanelController: NSObject {
         self.panel = panel
         let content = ClipboardHistoryPanelView(
             store: store,
+            detailPresentation: detailPresentation,
             onDone: { [weak self] in self?.hide() },
             onContentChange: { [weak self] contentHeight in
                 self?.resize(contentHeight: contentHeight, animate: true)
@@ -64,17 +110,19 @@ final class ClipboardHistoryPanelController: NSObject {
                 self?.pinnedWindows.toggle(entry)
             }
         )
-        if let mainSurface { SystemSurface.replaceContent(content, in: mainSurface) }
+        if let mainSurface {
+            PanelMaterialHost.replace(content, in: mainSurface, usesWindowMaterial: false)
+        }
         let key = store.settings.activeCategoryKey
         resize(
             contentHeight: ClipboardPanelLayout.contentHeight(for: store.orderedEntries(key: key), key: key),
             animate: false
         )
         position(panel)
-        // Do not make the nonactivating panel key merely by opening it.  On
-        // current macOS releases that changes the glass' emphasis state and
-        // produces the white flash reported when the pointer enters the
-        // clipboard. A text field can still become key when the user clicks it.
+        // Match the reference popup's activation contract. The material is
+        // fixed by PanelMaterialHost; becoming key must not replace it with a
+        // second focus/hover surface.
+        panel.makeKeyAndOrderFront(nil)
         panel.orderFrontRegardless()
         startClickOutsideMonitor()
     }
@@ -87,42 +135,71 @@ final class ClipboardHistoryPanelController: NSObject {
     private func makePanel() -> NSPanel {
         let panel = KeyableClipboardPanel(
             contentRect: NSRect(x: 0, y: 0, width: ClipboardPanelLayout.panelWidth, height: 420),
-            styleMask: [.borderless, .nonactivatingPanel],
+            // Match Maccy's floating window contract.  A borderless panel
+            // drives NSGlassEffectView through a different auxiliary-window
+            // compositor path on macOS 26 and is what produced the opaque
+            // gray hover state.  The title bar remains completely hidden.
+            styleMask: [.nonactivatingPanel, .resizable, .closable, .fullSizeContentView],
             backing: .buffered,
             defer: false
         )
         panel.isOpaque = false
         panel.backgroundColor = .clear
-        panel.hasShadow = true
+        // Same as Maccy's FloatingPanel: transient geometry changes must not
+        // interpolate a native window shadow through an intermediate rectangle.
+        panel.animationBehavior = .none
+        panel.isFloatingPanel = true
         panel.isMovableByWindowBackground = true
         panel.isReleasedWhenClosed = false
         panel.becomesKeyOnlyIfNeeded = true
-        panel.level = .floating
-        panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .transient]
+        panel.level = .statusBar
+        panel.collectionBehavior = [.auxiliary, .stationary, .moveToActiveSpace, .fullScreenAuxiliary]
+        panel.titleVisibility = .hidden
+        panel.titlebarAppearsTransparent = true
+        panel.titlebarSeparatorStyle = .none
+        panel.hidesOnDeactivate = false
+        panel.standardWindowButton(.closeButton)?.isHidden = true
+        panel.standardWindowButton(.miniaturizeButton)?.isHidden = true
+        panel.standardWindowButton(.zoomButton)?.isHidden = true
+        panel.delegate = self
 
-        let canvas = NSView(frame: panel.contentView?.bounds ?? .zero)
-        canvas.wantsLayer = true
-        canvas.layer?.backgroundColor = .clear
-        canvas.autoresizingMask = [.width, .height]
-        panel.contentView = canvas
-        self.canvas = canvas
-
-        let surface = SystemSurface.container(material: .popover, cornerRadius: 16)
-        surface.frame = canvas.bounds
-        // Main-only presentation is the common path. Keep the surface locked
-        // to every intermediate window frame so a category resize cannot show
-        // a one-pixel/tiny-strip snapshot of stale glass.
-        surface.autoresizingMask = [.width, .height]
-        let shadow = RoundedCardShadowView(cornerRadius: 16)
-        shadow.frame = shadow.frame(for: canvas.bounds)
-        shadow.autoresizingMask = []
-        canvas.addSubview(shadow)
-        canvas.addSubview(surface)
-        shadow.isHidden = true
-        mainShadow = shadow
-        mainSurface = surface
+        PanelMaterialHost.install(
+            EmptyView(),
+            in: panel,
+            cornerRadius: 12,
+            usesWindowMaterial: false
+        )
+        // Keep the one native NSPanel shadow.  This is Maccy's shadow path;
+        // custom SwiftUI shadows and hand-drawn outlines caused the irregular
+        // dark edges reported around both the preview and clipboard.
+        panel.hasShadow = true
+        mainSurface = panel.contentView
 
         return panel
+    }
+
+    func windowDidMove(_ notification: Notification) {
+        guard let movedPanel = notification.object as? NSPanel, movedPanel === panel else { return }
+        // A user drag changes the true anchor.  Previously `mainScreenFrame`
+        // was left at the old opening location, so the first hover rebuilt the
+        // preview against stale coordinates and snapped the clipboard back.
+        if detailPresentation.isVisible {
+            let gap: CGFloat = 10
+            let sideOffset = detailPresentation.placement == .left
+                ? detailPresentation.cardSize.width + gap
+                : 0
+            let mainY = movedPanel.frame.maxY
+                - detailPresentation.mainTopOffset
+                - detailPresentation.mainHeight
+            mainScreenFrame = NSRect(
+                x: movedPanel.frame.minX + sideOffset,
+                y: mainY,
+                width: ClipboardPanelLayout.panelWidth,
+                height: detailPresentation.mainHeight
+            )
+        } else {
+            mainScreenFrame = movedPanel.frame
+        }
     }
 
     /// The screen the panel lives on, falling back to wherever the mouse is.
@@ -140,7 +217,7 @@ final class ClipboardHistoryPanelController: NSObject {
         let visibleFrame = activeScreen?.visibleFrame ?? NSRect(x: 0, y: 0, width: 900, height: 700)
         let height = ClipboardPanelLayout.panelHeight(
             contentHeight: contentHeight,
-            availableHeight: visibleFrame.height - RoundedCardShadowView.shadowInset * 2
+            availableHeight: visibleFrame.height - panelInset * 2
         )
         let currentMainFrame = mainScreenFrame.isEmpty ? panel.frame : mainScreenFrame
         var frame = currentMainFrame
@@ -155,12 +232,12 @@ final class ClipboardHistoryPanelController: NSObject {
             height: height,
             visibleMinY: visibleFrame.minY,
             visibleMaxY: visibleFrame.maxY,
-            inset: RoundedCardShadowView.shadowInset
+            inset: panelInset
         )
         // SwiftUI can report the same measured content size again after the
         // user starts hovering. Do not tear down a visible detail card for a
         // no-op measurement; that caused a preview to flicker or disappear.
-        if detailSurface?.isHidden == false,
+        if detailPresentation.isVisible,
            abs(frame.width - currentMainFrame.width) < 0.5,
            abs(frame.height - currentMainFrame.height) < 0.5,
            abs(frame.minY - currentMainFrame.minY) < 0.5 {
@@ -173,9 +250,7 @@ final class ClipboardHistoryPanelController: NSObject {
         // The SwiftUI content change is already animated where appropriate;
         // commit the host geometry atomically instead.
         panel.setFrame(frame, display: true, animate: false)
-        mainShadow?.isHidden = true
-        canvas?.layoutSubtreeIfNeeded()
-        mainSurface?.frame = canvas?.bounds ?? .zero
+        panel.contentView?.layoutSubtreeIfNeeded()
         mainScreenFrame = frame
     }
 
@@ -184,7 +259,7 @@ final class ClipboardHistoryPanelController: NSObject {
         let screen = NSScreen.screens.first(where: { $0.frame.contains(mouse) }) ?? NSScreen.main
         let visibleFrame = screen?.visibleFrame ?? NSRect(x: 0, y: 0, width: 900, height: 700)
         let size = panel.frame.size
-        let inset = RoundedCardShadowView.shadowInset
+        let inset = panelInset
         let origin = NSPoint(
             x: min(max(mouse.x - size.width / 2, visibleFrame.minX + inset), visibleFrame.maxX - size.width - inset),
             y: min(max(mouse.y - 24 - size.height, visibleFrame.minY + inset), visibleFrame.maxY - size.height - inset)
@@ -193,11 +268,12 @@ final class ClipboardHistoryPanelController: NSObject {
         mainScreenFrame = panel.frame
     }
 
-    // MARK: - Detail card
+    // MARK: - Detail slideout
 
-    /// Shows the detail as a second glass card inside the same transparent
-    /// panel. Separate cards preserve the gap and individual rounded corners,
-    /// while one host window guarantees one active material state.
+    /// Displays the detail beside the list inside the existing hosting view.
+    /// This is intentionally a single key NSPanel: the system glass is then
+    /// composited once, so the preview and clipboard cannot diverge into active
+    /// and inactive (gray) materials.
     private func updateDetail(entry: ClipboardEntry?) {
         guard let entry, let panel, panel.isVisible else {
             hideDetail()
@@ -209,76 +285,63 @@ final class ClipboardHistoryPanelController: NSObject {
         let visibleFrame = activeScreen?.visibleFrame ?? panel.frame
         let imageURL = store.imageURL(for: entry)
         let mainFrame = mainScreenFrame.isEmpty ? panel.frame : mainScreenFrame
-        let gap: CGFloat = 10
-        let inset = RoundedCardShadowView.shadowInset
-        let leftAvailable = max(0, mainFrame.minX - visibleFrame.minX - gap - inset)
-        let rightAvailable = max(0, visibleFrame.maxX - mainFrame.maxX - gap - inset)
+        let inset = panelInset
+        let cardGap: CGFloat = 10
+        let leftAvailable = max(0, mainFrame.minX - visibleFrame.minX - inset - cardGap)
+        let rightAvailable = max(0, visibleFrame.maxX - mainFrame.maxX - inset - cardGap)
         let size = ClipboardDetailLayout.cardSize(
             for: entry,
             imageURL: imageURL,
-            availableHeight: visibleFrame.height - RoundedCardShadowView.shadowInset * 2,
+            availableHeight: visibleFrame.height - panelInset * 2,
             availableWidth: max(leftAvailable, rightAvailable)
         )
 
-        let content = ClipboardDetailCard(entry: entry, imageURL: imageURL, cardSize: size)
-        let detail = detailSurface ?? makeDetailSurface()
-        detailSurface = detail
-        if detail.superview == nil {
-            let shadow = RoundedCardShadowView(cornerRadius: 12)
-            canvas?.addSubview(shadow)
-            canvas?.addSubview(detail)
-            detailShadow = shadow
-        }
-        SystemSurface.replaceContent(content, in: detail)
-
         let placeLeft = leftAvailable >= size.width || leftAvailable >= rightAvailable
-        let idealX = placeLeft ? mainFrame.minX - size.width - gap : mainFrame.maxX + gap
-        let x = min(max(idealX, visibleFrame.minX + inset), visibleFrame.maxX - size.width - inset)
-        // Top-align with the main panel; clamp so a tall card stays on-screen.
-        let y = min(
-            max(mainFrame.maxY - size.height, visibleFrame.minY + inset),
+        // Align the preview with the hovered row rather than the panel's top.
+        // The pointer is on that row after the two-second dwell, so centering
+        // the card on it provides a stable, nearby relationship for both short
+        // and tall previews.
+        let mouseY = NSEvent.mouseLocation.y
+        let detailY = min(
+            max(mouseY - size.height / 2, visibleFrame.minY + inset),
             visibleFrame.maxY - size.height - inset
         )
-        let detailFrame = NSRect(x: x, y: y, width: size.width, height: size.height)
-        let cardsUnion = mainFrame.union(detailFrame)
-        let hostFrame = cardsUnion.insetBy(dx: -inset, dy: -inset)
-        panel.hasShadow = false
-        mainSurface?.autoresizingMask = []
+        let hostTop = max(mainFrame.maxY, detailY + size.height)
+        let hostBottom = min(mainFrame.minY, detailY)
+        let hostHeight = hostTop - hostBottom
+        var hostFrame = NSRect(
+            x: placeLeft ? mainFrame.minX - size.width - cardGap : mainFrame.minX,
+            y: hostBottom,
+            width: mainFrame.width + size.width + cardGap,
+            height: hostHeight
+        )
+        // Preserve the list's own screen position.  At a side edge the card is
+        // reduced before this point, so no clamping may shift the list under
+        // the pointer.
+        if hostFrame.minX < visibleFrame.minX + inset {
+            hostFrame.origin.x = visibleFrame.minX + inset
+        }
+        if hostFrame.maxX > visibleFrame.maxX - inset {
+            hostFrame.origin.x = visibleFrame.maxX - inset - hostFrame.width
+        }
         panel.setFrame(hostFrame, display: true, animate: false)
-        guard let canvas else { return }
-        let mainCardFrame = mainFrame.offsetBy(dx: -hostFrame.minX, dy: -hostFrame.minY)
-        let detailCardFrame = detailFrame.offsetBy(dx: -hostFrame.minX, dy: -hostFrame.minY)
-        mainShadow?.frame = mainShadow?.frame(for: mainCardFrame) ?? .zero
-        mainSurface?.frame = mainCardFrame
-        detailShadow?.frame = detailShadow?.frame(for: detailCardFrame) ?? .zero
-        detail.frame = detailCardFrame
-        mainShadow?.isHidden = false
-        detailShadow?.isHidden = false
-        detail.isHidden = false
-        canvas.needsLayout = true
-        canvas.layoutSubtreeIfNeeded()
+        detailPresentation.show(
+            entry: entry,
+            imageURL: imageURL,
+            cardSize: size,
+            placement: placeLeft ? .left : .right,
+            mainTopOffset: hostTop - mainFrame.maxY,
+            mainHeight: mainFrame.height,
+            detailTopOffset: hostTop - detailY - size.height
+        )
         mainScreenFrame = mainFrame
-        detailScreenFrame = detailFrame
-    }
-
-    private func makeDetailSurface() -> NSView {
-        let surface = SystemSurface.container(material: .popover, cornerRadius: 12)
-        surface.autoresizingMask = []
-        return surface
     }
 
     private func hideDetail() {
         detailEntryID = nil
-        detailScreenFrame = nil
-        detailShadow?.isHidden = true
-        detailSurface?.isHidden = true
-        guard let panel, !mainScreenFrame.isEmpty, panel.frame != mainScreenFrame else { return }
-        panel.hasShadow = true
-        panel.setFrame(mainScreenFrame, display: panel.isVisible, animate: false)
-        mainShadow?.isHidden = true
-        mainSurface?.autoresizingMask = [.width, .height]
-        canvas?.layoutSubtreeIfNeeded()
-        mainSurface?.frame = canvas?.bounds ?? .zero
+        detailPresentation.hide()
+        guard let panel, !mainScreenFrame.isEmpty else { return }
+        panel.setFrame(mainScreenFrame, display: true, animate: false)
     }
 
     // MARK: - Click-outside dismissal
@@ -412,37 +475,22 @@ final class ClipboardHistoryPanelController: NSObject {
         }
 
         let mainBounds = mainSurface?.bounds ?? .zero
-        if let hosting = SystemSurface.hostingFrame(of: mainSurface) {
-            report.append("mainBounds=\(mainBounds) hosting=\(hosting)")
-            if abs(hosting.height - mainBounds.height) > 1 || abs(hosting.minY - mainBounds.minY) > 1 {
-                failures.append("hosted content is not frame-locked to the window (top clipping)")
-            }
-        } else {
-            failures.append("main surface has no hosted content")
+        report.append("singleHostBounds=\(mainBounds)")
+        // The one host intentionally contains both cards. Its bounds must be
+        // large enough for the main list, but it is no longer expected to equal
+        // the list's frame while a preview is visible.
+        if mainBounds.height + 1 < mainScreenFrame.height || mainBounds.width + 1 < mainScreenFrame.width {
+            failures.append("single material host is smaller than the main list")
         }
-        if let detail = detailScreenFrame, detailSurface?.isHidden == false {
-            report.append("detail=\(detail)")
-            if detail.minY < visible.minY - 1 || detail.maxY > visible.maxY + 1 {
-                failures.append("detail frame leaves the visible screen vertically")
-            }
-            if detail == mainScreenFrame {
-                failures.append("detail preview must size independently from the clipboard panel")
+        if detailPresentation.isVisible {
+            report.append("detail=single-host \(detailPresentation.cardSize)")
+            if panel.frame.minY < visible.minY - 1 || panel.frame.maxY > visible.maxY + 1 {
+                failures.append("single-host detail leaves the visible screen vertically")
             }
         } else {
             failures.append("detail card did not show")
         }
-        let mainKind = SystemSurface.backdropKind(of: mainSurface)
-        let detailKind = SystemSurface.backdropKind(of: detailSurface)
-        if let mainKind, let detailKind {
-            report.append("mainBackdrop=\(mainKind) detailBackdrop=\(detailKind)")
-            if mainKind != detailKind { failures.append("main and detail backdrops differ") }
-            if case .vibrancy(let material, let state) = mainKind {
-                if material != .popover { failures.append("fallback material must be .popover") }
-                if state != .active { failures.append("fallback backdrops must be forced active") }
-            }
-        } else {
-            failures.append("backdrop missing on a surface")
-        }
+        if mainSurface == nil { failures.append("material root is missing") }
 
         hide()
         let passed = failures.isEmpty
@@ -456,7 +504,7 @@ final class ClipboardHistoryPanelController: NSObject {
 /// Borderless panels refuse key status by default; the search field needs it.
 private final class KeyableClipboardPanel: NSPanel {
     // Match a native floating clipboard panel: keyboard navigation and search
-    // remain available, while SystemSurface keeps the visual material fixed.
+    // remain available, while PanelMaterialHost keeps the visual material fixed.
     override var canBecomeKey: Bool { true }
 }
 
@@ -631,6 +679,7 @@ private enum ClipboardDetailLayout {
 
 struct ClipboardHistoryPanelView: View {
     @ObservedObject var store: ClipboardHistoryStore
+    @ObservedObject private var detailPresentation: ClipboardDetailPresentation
     let onDone: () -> Void
     let onContentChange: (CGFloat) -> Void
     let onDetailEntry: (ClipboardEntry?) -> Void
@@ -641,12 +690,61 @@ struct ClipboardHistoryPanelView: View {
     @State private var hoveredID: UUID?
     @State private var keyboardSelectedID: UUID?
     @State private var keyboardSelection = false
+    @State private var pendingPreview: DispatchWorkItem?
+
+    fileprivate init(
+        store: ClipboardHistoryStore,
+        detailPresentation: ClipboardDetailPresentation,
+        onDone: @escaping () -> Void,
+        onContentChange: @escaping (CGFloat) -> Void,
+        onDetailEntry: @escaping (ClipboardEntry?) -> Void,
+        onAddToMemes: @escaping (ClipboardEntry) -> Void,
+        onTogglePin: @escaping (ClipboardEntry) -> Void
+    ) {
+        self.store = store
+        _detailPresentation = ObservedObject(wrappedValue: detailPresentation)
+        self.onDone = onDone
+        self.onContentChange = onContentChange
+        self.onDetailEntry = onDetailEntry
+        self.onAddToMemes = onAddToMemes
+        self.onTogglePin = onTogglePin
+    }
 
     private var activeKey: ClipboardCategoryKey { store.settings.activeCategoryKey }
     private var entries: [ClipboardEntry] { store.orderedEntries(query: query, key: activeKey) }
     private var activeSelectionID: UUID? { hoveredID ?? keyboardSelectedID }
 
     var body: some View {
+        GeometryReader { proxy in
+            let currentMainHeight = detailPresentation.isVisible
+                ? detailPresentation.mainHeight
+                : proxy.size.height
+            ZStack(alignment: .topLeading) {
+                SystemGlassCard {
+                    listContent
+                        .frame(width: ClipboardPanelLayout.panelWidth, height: currentMainHeight)
+                }
+                .frame(width: ClipboardPanelLayout.panelWidth, height: currentMainHeight)
+                .offset(x: mainCardXOffset, y: detailPresentation.mainTopOffset)
+
+                detailCard
+                    .offset(x: detailCardXOffset, y: detailPresentation.detailTopOffset)
+            }
+            .frame(width: proxy.size.width, height: proxy.size.height, alignment: .topLeading)
+        }
+    }
+
+    private var mainCardXOffset: CGFloat {
+        detailPresentation.isVisible && detailPresentation.placement == .left
+            ? detailPresentation.cardSize.width + 10
+            : 0
+    }
+
+    private var detailCardXOffset: CGFloat {
+        detailPresentation.placement == .left ? 0 : ClipboardPanelLayout.panelWidth + 10
+    }
+
+    private var listContent: some View {
         VStack(spacing: ClipboardPanelLayout.sectionSpacing) {
             PanelSearchField(placeholder: "搜索剪贴板", text: $query)
                 .frame(height: ClipboardPanelLayout.headerHeight)
@@ -661,7 +759,12 @@ struct ClipboardHistoryPanelView: View {
                     // doing so made a different cell appear selected. Only
                     // keyboard navigation is allowed to reveal an offscreen row.
                     if keyboardSelection, let id { proxy.scrollTo(id, anchor: .center) }
-                    onDetailEntry(entries.first(where: { $0.id == id }))
+                    // Pointer previews deliberately wait for a dwell; keyboard
+                    // navigation remains immediate because it has no hover
+                    // affordance and users expect a selected row to inspect.
+                    if keyboardSelection {
+                        onDetailEntry(entries.first(where: { $0.id == id }))
+                    }
                 }
             }
             .overlay {
@@ -680,6 +783,25 @@ struct ClipboardHistoryPanelView: View {
         .onChange(of: query) { _, _ in selectionAndSizeChanged() }
         .onChange(of: store.settings.lastCategory) { _, _ in selectionAndSizeChanged() }
         .onChange(of: store.entries) { _, _ in selectionAndSizeChanged() }
+        .onDisappear { cancelPendingPreview() }
+    }
+
+    @ViewBuilder
+    private var detailCard: some View {
+        if let entry = detailPresentation.entry {
+            SystemGlassCard {
+                ClipboardDetailCard(
+                    entry: entry,
+                    imageURL: detailPresentation.imageURL,
+                    cardSize: detailPresentation.cardSize
+                )
+            }
+            .frame(
+                width: detailPresentation.cardSize.width,
+                height: detailPresentation.cardSize.height,
+                alignment: .topLeading
+            )
+        }
     }
 
     private var emptyTitle: String {
@@ -815,9 +937,30 @@ struct ClipboardHistoryPanelView: View {
             keyboardSelection = false
             keyboardSelectedID = nil
             hoveredID = entry.id
+            schedulePreview(for: entry)
         } else if hoveredID == entry.id {
             hoveredID = nil
+            cancelPendingPreview()
+            onDetailEntry(nil)
         }
+    }
+
+    private func schedulePreview(for entry: ClipboardEntry) {
+        cancelPendingPreview()
+        let entryID = entry.id
+        let work = DispatchWorkItem { [weak store] in
+            // The ID check prevents a delayed callback from a previous row
+            // opening after the pointer has already moved elsewhere.
+            guard store != nil, hoveredID == entryID else { return }
+            onDetailEntry(entry)
+        }
+        pendingPreview = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + 2, execute: work)
+    }
+
+    private func cancelPendingPreview() {
+        pendingPreview?.cancel()
+        pendingPreview = nil
     }
 
     private func copy(_ entry: ClipboardEntry) {
@@ -1045,11 +1188,6 @@ private struct KeyCaptureView: NSViewRepresentable {
         var onKey: ((NSEvent) -> Bool)?
 
         override var acceptsFirstResponder: Bool { true }
-
-        override func viewDidMoveToWindow() {
-            super.viewDidMoveToWindow()
-            window?.makeFirstResponder(self)
-        }
 
         override func keyDown(with event: NSEvent) {
             if onKey?(event) == true { return }

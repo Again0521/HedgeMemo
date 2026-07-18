@@ -15,7 +15,7 @@ final class ScreenshotEditorPanelController {
             onSave: { [weak self] editedImage in self?.finish(image: editedImage) },
             onRenderAndSave: { [weak self] request in self?.renderAndFinish(request) }
         )
-        SystemSurface.install(content, in: panel, material: .popover, cornerRadius: 18)
+        PanelMaterialHost.install(content, in: panel, cornerRadius: 18)
         self.panel = panel
         NSApp.activate(ignoringOtherApps: true)
         // A capture editor is an active, transient operation.  Ordering it

@@ -101,7 +101,7 @@ private final class PinnedClipboardWindow {
             onToggleAlwaysOnTop: { [weak self] in self?.toggleAlwaysOnTop() },
             onUnpin: { onUnpin(entry.id) }
         )
-        SystemSurface.install(content, in: panel, material: .popover, cornerRadius: 14)
+        PanelMaterialHost.install(content, in: panel, cornerRadius: 14)
     }
 
     func show() {
