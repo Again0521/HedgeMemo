@@ -108,7 +108,10 @@ private final class PinnedClipboardWindow {
 
         panel.isOpaque = false
         panel.backgroundColor = .clear
-        panel.hasShadow = false
+        // Desktop notes are separate app surfaces. Keep the normal native
+        // outside shadow, while PanelMaterialHost owns the matching rounded
+        // material inside the panel.
+        panel.hasShadow = true
         panel.isMovableByWindowBackground = true
         panel.isReleasedWhenClosed = false
         panel.hidesOnDeactivate = false

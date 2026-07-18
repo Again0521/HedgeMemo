@@ -1292,7 +1292,11 @@ private struct TextEntryRow: View {
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(
             RoundedRectangle(cornerRadius: 7, style: .continuous)
-                .fill(isSelected ? AnyShapeStyle(Color.accentColor) : AnyShapeStyle(Color.white.opacity(0.001)))
+                // The row remains hit-testable because its layout frame is
+                // explicit; a near-white fallback fill here used to become
+                // visible during AppKit hover compositing and made the panel
+                // flash white under the pointer.
+                .fill(isSelected ? AnyShapeStyle(Color.accentColor) : AnyShapeStyle(.clear))
         )
         .onHover { isHovered = $0 }
     }
@@ -1331,7 +1335,7 @@ private struct CodeEntryRow: View {
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(
             RoundedRectangle(cornerRadius: 7, style: .continuous)
-                .fill(isSelected ? AnyShapeStyle(Color.accentColor) : AnyShapeStyle(Color.white.opacity(0.001)))
+                .fill(isSelected ? AnyShapeStyle(Color.accentColor) : AnyShapeStyle(.clear))
         )
         .onHover { isHovered = $0 }
     }

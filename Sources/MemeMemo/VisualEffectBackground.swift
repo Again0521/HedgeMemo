@@ -1,7 +1,18 @@
 import AppKit
 import SwiftUI
 
-// The former shared-material and custom-shadow implementation was removed.
+/// Shared visual vocabulary for every custom panel.  The panel window owns the
+/// glass material (through `PanelMaterialHost`); controls only use semantic
+/// system states on top of it.  In particular, never add an opaque color or a
+/// hover-time material behind an entire panel — that is what made the old
+/// clipboard, preview, and settings surfaces look like different products.
+enum NativePanelMetrics {
+    static let cornerRadius: CGFloat = 12
+    static let compactCornerRadius: CGFloat = 8
+    static let rowHeight: CGFloat = 32
+    static let controlHeight: CGFloat = 28
+    static let horizontalPadding: CGFloat = 12
+}
 
 /// NSImageView is used instead of SwiftUI.Image so animated GIF representations
 /// keep playing in previews while static formats use the same aspect-fit layout.
@@ -82,52 +93,45 @@ struct PanelSearchField: View {
                 .buttonStyle(.plain)
             }
         }
-        .padding(.horizontal, 8)
-        .frame(height: 28)
+        .padding(.horizontal, 9)
+        .frame(height: NativePanelMetrics.controlHeight)
         .background(
-            RoundedRectangle(cornerRadius: 8, style: .continuous)
-                .fill(.quinary)
+            RoundedRectangle(cornerRadius: NativePanelMetrics.compactCornerRadius, style: .continuous)
+                .fill(.quaternary)
         )
         .overlay(
-            RoundedRectangle(cornerRadius: 8, style: .continuous)
-                .strokeBorder(.quaternary, lineWidth: 1)
+            RoundedRectangle(cornerRadius: NativePanelMetrics.compactCornerRadius, style: .continuous)
+                .strokeBorder(.separator.opacity(0.72), lineWidth: 1)
         )
     }
 }
 
-/// Borderless icon button that shows a soft rounded highlight on hover,
-/// like toolbar buttons in system popovers.
+/// Native borderless toolbar button.  We deliberately leave hover rendering to
+/// AppKit instead of inserting a custom white/gray fill; a manual hover layer
+/// was the source of the clipboard and preview material flashes.
 struct HoverIconButton: View {
     let systemImage: String
     var tint: Color = .primary
     var help: String = ""
     let action: () -> Void
-    @State private var isHovered = false
-
     var body: some View {
         Button(action: action) {
             Image(systemName: systemImage)
                 .font(.system(size: 13, weight: .medium))
                 .foregroundStyle(tint)
                 .frame(width: 26, height: 26)
-                .background(
-                    RoundedRectangle(cornerRadius: 6, style: .continuous)
-                        .fill(isHovered ? AnyShapeStyle(.quaternary) : AnyShapeStyle(.clear))
-                )
         }
         .buttonStyle(.plain)
-        .onHover { isHovered = $0 }
         .help(help)
     }
 }
 
-/// Capsule chip used for category filters.
+/// Category filters use the system selection color.  Unselected filters stay
+/// neutral and are intentionally invariant under pointer hover.
 struct CategoryChip: View {
     let title: String
     let isSelected: Bool
     let action: () -> Void
-    @State private var isHovered = false
-
     var body: some View {
         Button(action: action) {
             Text(title)
@@ -140,11 +144,10 @@ struct CategoryChip: View {
                         .fill(
                             isSelected
                                 ? AnyShapeStyle(Color.accentColor)
-                                : isHovered ? AnyShapeStyle(.quaternary) : AnyShapeStyle(.quinary)
+                                : AnyShapeStyle(.quinary)
                         )
                 )
         }
         .buttonStyle(.plain)
-        .onHover { isHovered = $0 }
     }
 }

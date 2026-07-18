@@ -47,7 +47,10 @@ final class ScreenshotEditorPanelController {
         )
         panel.isOpaque = false
         panel.backgroundColor = .clear
-        panel.hasShadow = false
+        // Keep the one native panel shadow that separates the editor from the
+        // captured desktop.  The hosting surface is clipped to the same
+        // continuous radius, so no rectangular compositor shadow can leak.
+        panel.hasShadow = true
         // The canvas owns mouse drags for pen, crop, arrows, and rectangles.
         // Letting a borderless panel move from its background steals those
         // drags before the canvas can complete an annotation.
@@ -251,6 +254,7 @@ private struct ScreenshotEditorPanelView: View {
             }
             .buttonStyle(.borderless)
         }
+        .controlSize(.small)
     }
 
     private var actionButtons: some View {
@@ -290,6 +294,7 @@ private struct ScreenshotEditorPanelView: View {
             .buttonStyle(.borderedProminent)
             .disabled(isFinishing)
         }
+        .controlSize(.small)
     }
 
     private func share() {
@@ -376,7 +381,9 @@ private struct ScreenshotCanvasViewport: View {
             }
             .scrollIndicators(zoomScale > 1 ? .automatic : .hidden)
         }
-        .background(Color.primary.opacity(0.025))
+        // Do not add a tinted canvas backdrop over the shared panel material.
+        // The captured image itself supplies the reading surface.
+        .background(.clear)
     }
 
     private var editor: some View {

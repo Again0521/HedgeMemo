@@ -16,11 +16,17 @@ enum ArchiveExportSelectionPanel {
     static func run(memeStore: MemeStore, clipboardStore: ClipboardHistoryStore) -> ArchiveExportSelection? {
         let panel = NSPanel(
             contentRect: NSRect(x: 0, y: 0, width: 460, height: 520),
-            styleMask: [.titled, .closable],
+            styleMask: [.titled, .closable, .fullSizeContentView],
             backing: .buffered,
             defer: false
         )
         panel.title = "选择导出内容"
+        panel.titleVisibility = .hidden
+        panel.titlebarAppearsTransparent = true
+        panel.titlebarSeparatorStyle = .none
+        panel.isOpaque = false
+        panel.backgroundColor = .clear
+        panel.hasShadow = true
         panel.isReleasedWhenClosed = false
         panel.center()
 
@@ -39,7 +45,10 @@ enum ArchiveExportSelectionPanel {
                 NSApp.stopModal(withCode: .OK)
             }
         )
-        panel.contentView = NSHostingView(rootView: root)
+        // Export is an app-owned utility panel, so it shares exactly the same
+        // system glass host as clipboard, preview, settings and screenshot
+        // editor instead of falling back to an opaque NSHostingView window.
+        PanelMaterialHost.install(root, in: panel, cornerRadius: 14)
         NSApp.runModal(for: panel)
         return result
     }
@@ -86,7 +95,7 @@ private struct ArchiveExportSelectionView: View {
                 .padding(.top, 4)
 
             ScrollView {
-                VStack(alignment: .leading, spacing: 16) {
+                VStack(alignment: .leading, spacing: 18) {
                     selectionSection(title: "表情包", systemImage: "face.smiling") {
                         Toggle("未分类", isOn: $includeUncategorizedMemes)
                         ForEach(memeCategories) { category in
@@ -109,8 +118,10 @@ private struct ArchiveExportSelectionView: View {
                     .foregroundStyle(.secondary)
                 Spacer()
                 Button("取消", action: onCancel)
+                    .buttonStyle(.bordered)
                 Button("继续导出") { onExport(selection) }
                     .keyboardShortcut(.defaultAction)
+                    .buttonStyle(.borderedProminent)
                     .disabled(!selection.exportsMemes && !selection.exportsClipboard)
             }
             .padding(16)
@@ -130,9 +141,8 @@ private struct ArchiveExportSelectionView: View {
     private func selectionSection<Content: View>(title: String, systemImage: String, @ViewBuilder content: () -> Content) -> some View {
         VStack(alignment: .leading, spacing: 8) {
             Label(title, systemImage: systemImage).font(.headline)
-            VStack(alignment: .leading, spacing: 6, content: content)
-                .padding(12)
-                .background(.quaternary, in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+            VStack(alignment: .leading, spacing: 8, content: content)
+                .padding(.vertical, 4)
         }
     }
 

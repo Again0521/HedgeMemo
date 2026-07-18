@@ -29,7 +29,7 @@ final class SettingsWindowController: NSObject {
         // A plain titled window keeps the system's rounded corners, shadow and
         // a real title bar; translucency comes from the vibrancy background inside.
         let panel = NSPanel(
-            contentRect: NSRect(x: 0, y: 0, width: 530, height: 740),
+            contentRect: NSRect(x: 0, y: 0, width: 504, height: 740),
             styleMask: [.titled, .closable, .fullSizeContentView],
             backing: .buffered,
             defer: false
@@ -93,9 +93,11 @@ struct SettingsPanelView: View {
             .padding(.bottom, 24)
         }
         .scrollIndicators(.hidden)
+        // Keep settings at macOS's compact inspector density while retaining
+        // standard controls and their native focus/selection behavior.
         .controlSize(.small)
         .padding(.top, 32)
-        .frame(width: 530, height: 740)
+        .frame(width: 504, height: 740)
         .onAppear {
             refreshAccessibilityTrust()
             launchAtLogin.refresh()
@@ -112,7 +114,7 @@ struct SettingsPanelView: View {
                     Text("\(clipboardStore.settings.maxEntries) 条")
                         .monospacedDigit()
                     Slider(value: maxEntriesStepBinding, in: 0...Double(ClipboardHistorySettings.maxEntryChoices.count - 1), step: 1)
-                        .frame(width: 260)
+                        .frame(width: 232)
                         .accessibilityLabel("剪贴板最多保存条数")
                 }
             }
@@ -406,8 +408,9 @@ private struct SettingsSection<Content: View>: View {
     }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            Text(title).font(.headline)
+        VStack(alignment: .leading, spacing: 9) {
+            Text(title)
+                .font(.headline)
             VStack(spacing: 0) { content }
             if let footer {
                 Text(footer)
@@ -445,7 +448,7 @@ private struct SettingsFormRow<Content: View>: View {
     var body: some View {
         HStack(alignment: .center, spacing: 16) {
             Text(title)
-                .frame(width: 154, alignment: .leading)
+                .frame(width: 142, alignment: .leading)
             Spacer(minLength: 0)
             content
                 .frame(alignment: .trailing)
