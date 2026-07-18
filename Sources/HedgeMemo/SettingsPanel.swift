@@ -15,7 +15,7 @@ private enum AppVersion {
 
 /// Hosts the settings UI in a standalone translucent panel, opened from the status bar menu.
 @MainActor
-final class SettingsWindowController: NSObject {
+final class SettingsWindowController: NSObject, NSWindowDelegate {
     private let clipboardStore: ClipboardHistoryStore
     private let screenshotSettingsStore: ScreenshotSettingsStore
     private let hotKeyWarnings: () -> [String]
@@ -34,6 +34,7 @@ final class SettingsWindowController: NSObject {
     func show() {
         if let panel {
             NSApp.activate(ignoringOtherApps: true)
+            panel.orderFrontRegardless()
             panel.makeKeyAndOrderFront(nil)
             return
         }
@@ -52,10 +53,15 @@ final class SettingsWindowController: NSObject {
         panel.isOpaque = false
         panel.backgroundColor = .clear
         panel.isReleasedWhenClosed = false
+        // A settings operation is deliberate. It should remain visible while
+        // the user switches apps or opens a native picker, and only disappear
+        // after an explicit close.
+        panel.hidesOnDeactivate = false
         // Only the native title bar is draggable. Controls such as sliders,
         // toggles and menus must never steal their drag into a panel move.
         panel.isMovableByWindowBackground = false
         panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
+        panel.delegate = self
 
         let content = SettingsPanelView(
             clipboardStore: clipboardStore,
@@ -67,6 +73,10 @@ final class SettingsWindowController: NSObject {
         NSApp.activate(ignoringOtherApps: true)
         panel.center()
         panel.makeKeyAndOrderFront(nil)
+    }
+
+    func windowWillClose(_ notification: Notification) {
+        panel = nil
     }
 }
 

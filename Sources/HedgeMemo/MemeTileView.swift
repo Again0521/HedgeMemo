@@ -23,7 +23,7 @@ struct MemeTileView: View {
     let isSelected: Bool
     let isDragged: Bool
     let categories: [MemeCategory]
-    let onSelection: (UUID) -> Void
+    let onSelection: (UUID, NSEvent.ModifierFlags) -> Void
     let onCopy: () -> Void
     let onEditNote: () -> Void
     let onMove: (UUID?) -> Void
@@ -52,7 +52,7 @@ struct MemeTileView: View {
         // A plain tap keeps working exactly like the old Button: the drag
         // gesture only claims the interaction after 4pt of movement.
         .onTapGesture {
-            if isManaging { onSelection(meme.id) } else { onCopy() }
+            if isManaging { onSelection(meme.id, NSEvent.modifierFlags) } else { onCopy() }
         }
         .gesture(
             DragGesture(minimumDistance: 4, coordinateSpace: .named(MemeGridSpace.name))

@@ -2,25 +2,41 @@ import AppKit
 import HedgeMemoCore
 import SwiftUI
 
-struct ArchiveExportSelection {
-    var includeUncategorizedMemes = true
+/// A single, explicit selection model is shared by ZIP import and export.  It
+/// keeps the two flows honest: a selected category means exactly the same
+/// thing in both directions.
+struct ArchiveCategorySelection {
+    var includeUncategorizedMemes = false
     var memeCategoryIDs: Set<UUID> = []
     var clipboardCategoryKeys: Set<String> = []
 
-    var exportsMemes: Bool { includeUncategorizedMemes || !memeCategoryIDs.isEmpty }
-    var exportsClipboard: Bool { !clipboardCategoryKeys.isEmpty }
+    var includesMemes: Bool { includeUncategorizedMemes || !memeCategoryIDs.isEmpty }
+    var includesClipboard: Bool { !clipboardCategoryKeys.isEmpty }
+    var includesAnything: Bool { includesMemes || includesClipboard }
 }
 
+typealias ArchiveExportSelection = ArchiveCategorySelection
+typealias ArchiveImportSelection = ArchiveCategorySelection
+
+/// AppKit owns only the modal-window lifecycle. SwiftUI still owns the
+/// checkbox state and passes one final value back through a small closure.
+/// In particular, the traffic-light close button must stop the modal loop;
+/// without this delegate path the status-bar menu remains in a tracking state
+/// after a user closes export/import with the red button.
 @MainActor
-enum ArchiveExportSelectionPanel {
-    static func run(memeStore: MemeStore, clipboardStore: ClipboardHistoryStore) -> ArchiveExportSelection? {
-        let panel = NSPanel(
-            contentRect: NSRect(x: 0, y: 0, width: 460, height: 520),
+private final class ArchiveSelectionSession: NSObject, NSWindowDelegate {
+    let panel: NSPanel
+    private var finished = false
+
+    init(title: String, size: NSSize) {
+        panel = NSPanel(
+            contentRect: NSRect(origin: .zero, size: size),
             styleMask: [.titled, .closable, .fullSizeContentView],
             backing: .buffered,
             defer: false
         )
-        panel.title = "选择导出内容"
+        super.init()
+        panel.title = title
         panel.titleVisibility = .hidden
         panel.titlebarAppearsTransparent = true
         panel.titlebarSeparatorStyle = .none
@@ -28,109 +44,227 @@ enum ArchiveExportSelectionPanel {
         panel.backgroundColor = .clear
         panel.hasShadow = true
         panel.isReleasedWhenClosed = false
-        panel.center()
+        panel.hidesOnDeactivate = false
+        panel.isMovableByWindowBackground = false
+        panel.collectionBehavior = [.moveToActiveSpace, .fullScreenAuxiliary]
+        panel.delegate = self
+    }
 
+    func present() {
+        NSApp.activate(ignoringOtherApps: true)
+        panel.center()
+        panel.makeKeyAndOrderFront(nil)
+        _ = NSApp.runModal(for: panel)
+    }
+
+    func finish(_ response: NSApplication.ModalResponse) {
+        guard !finished else { return }
+        finished = true
+        panel.orderOut(nil)
+        NSApp.stopModal(withCode: response)
+    }
+
+    func windowWillClose(_ notification: Notification) {
+        finish(.cancel)
+    }
+}
+
+@MainActor
+enum ArchiveExportSelectionPanel {
+    static func run(memeStore: MemeStore, clipboardStore: ClipboardHistoryStore) -> ArchiveExportSelection? {
+        let categories = memeStore.categories
+        let clipboardKeys = clipboardStore.settings.orderedCategoryKeys
+        let session = ArchiveSelectionSession(
+            title: "选择导出内容",
+            size: ArchiveSelectionMetrics.size(memeCategoryCount: categories.count, clipboardCategoryCount: clipboardKeys.count)
+        )
         var result: ArchiveExportSelection?
-        let root = ArchiveExportSelectionView(
-            memeCategories: memeStore.categories,
-            clipboardKeys: clipboardStore.settings.orderedCategoryKeys,
+        let root = ArchiveSelectionView(
+            title: "选择导出内容",
+            subtitle: "按分类打包成一个 HedgeMemo ZIP 文件。",
+            confirmationTitle: "导出 ZIP",
+            memeCategories: categories,
+            clipboardKeys: clipboardKeys,
             customCategories: clipboardStore.settings.customCategories ?? [],
-            onCancel: {
-                panel.orderOut(nil)
-                NSApp.stopModal(withCode: .cancel)
-            },
-            onExport: { selection in
+            initialSelection: ArchiveExportSelection(
+                includeUncategorizedMemes: true,
+                memeCategoryIDs: Set(categories.map(\.id)),
+                clipboardCategoryKeys: Set(clipboardKeys.map(\.storageValue))
+            ),
+            onCancel: { session.finish(.cancel) },
+            onConfirm: { selection in
                 result = selection
-                panel.orderOut(nil)
-                NSApp.stopModal(withCode: .OK)
+                session.finish(.OK)
             }
         )
-        // Export is an app-owned utility panel, so it shares exactly the same
-        // system glass host as clipboard, preview, settings and screenshot
-        // editor instead of falling back to an opaque NSHostingView window.
-        PanelMaterialHost.install(root, in: panel, cornerRadius: 14)
-        NSApp.runModal(for: panel)
+        PanelMaterialHost.install(root, in: session.panel, cornerRadius: 14)
+        session.present()
         return result
     }
 }
 
-private struct ArchiveExportSelectionView: View {
+@MainActor
+enum ArchiveImportSelectionPanel {
+    static func run(manifest: MemeArchiveManifest) -> ArchiveImportSelection? {
+        let memeSnapshot = manifest.memeSnapshot
+        let clipboardSnapshot = manifest.clipboardSnapshot
+        let memeCategories = memeSnapshot?.categories ?? []
+        let uncategorizedMemes = memeSnapshot?.memes.contains(where: { $0.categoryID == nil }) == true
+        let clipboardKeys = archiveClipboardKeys(in: clipboardSnapshot)
+        let customs = clipboardSnapshot?.settings.customCategories ?? []
+        let session = ArchiveSelectionSession(
+            title: "选择导入内容",
+            size: ArchiveSelectionMetrics.size(memeCategoryCount: memeCategories.count, clipboardCategoryCount: clipboardKeys.count)
+        )
+        var result: ArchiveImportSelection?
+        let root = ArchiveSelectionView(
+            title: "选择导入内容",
+            subtitle: "已识别压缩包内的分类；只会导入勾选的内容。",
+            confirmationTitle: "导入所选内容",
+            memeCategories: memeCategories,
+            clipboardKeys: clipboardKeys,
+            customCategories: customs,
+            initialSelection: ArchiveImportSelection(
+                includeUncategorizedMemes: uncategorizedMemes,
+                memeCategoryIDs: Set(memeCategories.map(\.id)),
+                clipboardCategoryKeys: Set(clipboardKeys.map(\.storageValue))
+            ),
+            onCancel: { session.finish(.cancel) },
+            onConfirm: { selection in
+                result = selection
+                session.finish(.OK)
+            }
+        )
+        PanelMaterialHost.install(root, in: session.panel, cornerRadius: 14)
+        session.present()
+        return result
+    }
+
+    private static func archiveClipboardKeys(in snapshot: ClipboardHistorySnapshot?) -> [ClipboardCategoryKey] {
+        guard let snapshot else { return [] }
+        var keys = ClipboardContentCategory.allCases
+            .filter { category in snapshot.entries.contains { $0.contentCategory == category } }
+            .map(ClipboardCategoryKey.builtin)
+        let customs = snapshot.settings.customCategories ?? []
+        keys += customs.compactMap { custom in
+            let key = ClipboardCategoryKey.custom(custom.id)
+            return snapshot.entries.contains { $0.matches(key: key, customCategories: customs) } ? key : nil
+        }
+        return keys
+    }
+}
+
+private enum ArchiveSelectionMetrics {
+    static func size(memeCategoryCount: Int, clipboardCategoryCount: Int) -> NSSize {
+        // The panel grows with its real content instead of keeping a vacant
+        // 520-point canvas for a small archive. The scrolling list takes over
+        // only for genuinely large category collections.
+        let rowCount = max(1, memeCategoryCount + clipboardCategoryCount + 2)
+        let height = min(560, max(332, 210 + CGFloat(rowCount) * 29))
+        return NSSize(width: 468, height: height)
+    }
+}
+
+private struct ArchiveSelectionView: View {
+    let title: String
+    let subtitle: String
+    let confirmationTitle: String
     let memeCategories: [MemeCategory]
     let clipboardKeys: [ClipboardCategoryKey]
     let customCategories: [CustomClipboardCategory]
     let onCancel: () -> Void
-    let onExport: (ArchiveExportSelection) -> Void
+    let onConfirm: (ArchiveCategorySelection) -> Void
 
-    @State private var includeUncategorizedMemes = true
-    @State private var memeCategoryIDs: Set<UUID> = []
-    @State private var clipboardCategoryKeys: Set<String> = []
+    @State private var includeUncategorizedMemes: Bool
+    @State private var memeCategoryIDs: Set<UUID>
+    @State private var clipboardCategoryKeys: Set<String>
 
     init(
+        title: String,
+        subtitle: String,
+        confirmationTitle: String,
         memeCategories: [MemeCategory],
         clipboardKeys: [ClipboardCategoryKey],
         customCategories: [CustomClipboardCategory],
+        initialSelection: ArchiveCategorySelection,
         onCancel: @escaping () -> Void,
-        onExport: @escaping (ArchiveExportSelection) -> Void
+        onConfirm: @escaping (ArchiveCategorySelection) -> Void
     ) {
+        self.title = title
+        self.subtitle = subtitle
+        self.confirmationTitle = confirmationTitle
         self.memeCategories = memeCategories
         self.clipboardKeys = clipboardKeys
         self.customCategories = customCategories
         self.onCancel = onCancel
-        self.onExport = onExport
-        _memeCategoryIDs = State(initialValue: Set(memeCategories.map(\.id)))
-        _clipboardCategoryKeys = State(initialValue: Set(clipboardKeys.map(\.storageValue)))
+        self.onConfirm = onConfirm
+        _includeUncategorizedMemes = State(initialValue: initialSelection.includeUncategorizedMemes)
+        _memeCategoryIDs = State(initialValue: initialSelection.memeCategoryIDs)
+        _clipboardCategoryKeys = State(initialValue: initialSelection.clipboardCategoryKeys)
     }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
-            Text("选择要写入 HedgeMemo ZIP 的内容")
-                .font(.headline)
-                .padding(.horizontal, 20)
-                .padding(.top, 18)
+            VStack(alignment: .leading, spacing: 4) {
+                Text(title).font(.headline)
+                Text(subtitle)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+            .padding(.horizontal, 20)
+            .padding(.top, 18)
+            .padding(.bottom, 14)
 
-            Text("可按分类导出；不会导出任何应用外部文件或访问路径。")
-                .font(.caption)
-                .foregroundStyle(.secondary)
-                .padding(.horizontal, 20)
-                .padding(.top, 4)
-
-            ScrollView {
-                VStack(alignment: .leading, spacing: 18) {
-                    selectionSection(title: "表情包", systemImage: "face.smiling") {
-                        Toggle("未分类", isOn: $includeUncategorizedMemes)
-                        ForEach(memeCategories) { category in
-                            Toggle(category.name, isOn: binding(for: category.id, in: $memeCategoryIDs))
+            if memeCategories.isEmpty && clipboardKeys.isEmpty && !includeUncategorizedMemes {
+                ContentUnavailableView("压缩包中没有可导入的分类", systemImage: "archivebox")
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+            } else {
+                ScrollView {
+                    VStack(alignment: .leading, spacing: 16) {
+                        if !memeCategories.isEmpty || includeUncategorizedMemes {
+                            selectionSection(title: "表情包", systemImage: "face.smiling") {
+                                if includeUncategorizedMemes {
+                                    Toggle("未分类", isOn: $includeUncategorizedMemes)
+                                }
+                                ForEach(memeCategories) { category in
+                                    Toggle(category.name, isOn: binding(for: category.id, in: $memeCategoryIDs))
+                                }
+                            }
+                        }
+                        if !clipboardKeys.isEmpty {
+                            selectionSection(title: "剪贴板", systemImage: "clipboard") {
+                                ForEach(clipboardKeys, id: \.storageValue) { key in
+                                    Toggle(clipboardTitle(for: key), isOn: binding(for: key.storageValue, in: $clipboardCategoryKeys))
+                                }
+                            }
                         }
                     }
-                    selectionSection(title: "剪贴板", systemImage: "clipboard") {
-                        ForEach(clipboardKeys, id: \.storageValue) { key in
-                            Toggle(clipboardTitle(for: key), isOn: binding(for: key.storageValue, in: $clipboardCategoryKeys))
-                        }
-                    }
+                    .padding(.horizontal, 20)
+                    .padding(.bottom, 12)
                 }
-                .padding(20)
             }
 
             Divider()
-            HStack {
-                Text(selection.exportsMemes || selection.exportsClipboard ? "将创建 .zip 文件" : "至少选择一个分类")
+            HStack(spacing: 10) {
+                Text(selection.includesAnything ? "可随时从设置或菜单栏继续操作" : "至少选择一个分类")
                     .font(.caption)
                     .foregroundStyle(.secondary)
-                Spacer()
+                Spacer(minLength: 12)
                 Button("取消", action: onCancel)
-                    .buttonStyle(.bordered)
-                Button("继续导出") { onExport(selection) }
+                    .keyboardShortcut(.cancelAction)
+                Button(confirmationTitle) { onConfirm(selection) }
                     .keyboardShortcut(.defaultAction)
                     .buttonStyle(.borderedProminent)
-                    .disabled(!selection.exportsMemes && !selection.exportsClipboard)
+                    .disabled(!selection.includesAnything)
             }
-            .padding(16)
+            .padding(.horizontal, 20)
+            .padding(.vertical, 14)
         }
-        .frame(width: 460, height: 520)
+        .frame(width: 468)
     }
 
-    private var selection: ArchiveExportSelection {
-        ArchiveExportSelection(
+    private var selection: ArchiveCategorySelection {
+        ArchiveCategorySelection(
             includeUncategorizedMemes: includeUncategorizedMemes,
             memeCategoryIDs: memeCategoryIDs,
             clipboardCategoryKeys: clipboardCategoryKeys
@@ -139,10 +273,11 @@ private struct ArchiveExportSelectionView: View {
 
     @ViewBuilder
     private func selectionSection<Content: View>(title: String, systemImage: String, @ViewBuilder content: () -> Content) -> some View {
-        VStack(alignment: .leading, spacing: 8) {
-            Label(title, systemImage: systemImage).font(.headline)
-            VStack(alignment: .leading, spacing: 8, content: content)
-                .padding(.vertical, 4)
+        VStack(alignment: .leading, spacing: 7) {
+            Label(title, systemImage: systemImage)
+                .font(.subheadline.weight(.semibold))
+            VStack(alignment: .leading, spacing: 6, content: content)
+                .padding(.leading, 2)
         }
     }
 

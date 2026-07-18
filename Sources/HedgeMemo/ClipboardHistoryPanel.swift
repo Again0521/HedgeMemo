@@ -153,6 +153,7 @@ final class ClipboardHistoryPanelController: NSObject, NSWindowDelegate {
     private var mainSurface: NSView?
     private var detailEntryID: UUID?
     private var clickOutsideMonitor: Any?
+    private var localClickOutsideMonitor: Any?
     /// The main list's rect in screen coordinates — the single source of truth.
     /// It remains unchanged for the entire detail-preview lifecycle.
     private var mainScreenFrame: NSRect = .zero
@@ -202,7 +203,11 @@ final class ClipboardHistoryPanelController: NSObject, NSWindowDelegate {
                 self?.addToMemes(entry)
             },
             onTogglePin: { [weak self] entry in
+                // Desktop pinning is a completed clipboard action: leave the
+                // newly created note visible, but close the transient history
+                // panel immediately.
                 self?.pinnedWindows.toggle(entry)
+                self?.hide()
             }
         )
         if let mainSurface {
@@ -517,6 +522,16 @@ final class ClipboardHistoryPanelController: NSObject, NSWindowDelegate {
         clickOutsideMonitor = NSEvent.addGlobalMonitorForEvents(matching: [.leftMouseDown, .rightMouseDown]) { [weak self] _ in
             Task { @MainActor in self?.hide() }
         }
+        // Global monitors deliberately do not receive clicks in this app. A
+        // matching local monitor closes the nonactivating clipboard when the
+        // user clicks another HedgeMemo/Codex window, while preserving every
+        // click that lands inside the panel itself.
+        localClickOutsideMonitor = NSEvent.addLocalMonitorForEvents(matching: [.leftMouseDown, .rightMouseDown]) { [weak self] event in
+            guard let self else { return event }
+            if self.isInsideClipboardPanel(event) { return event }
+            self.hide()
+            return event
+        }
     }
 
     private func stopClickOutsideMonitor() {
@@ -524,6 +539,22 @@ final class ClipboardHistoryPanelController: NSObject, NSWindowDelegate {
             NSEvent.removeMonitor(clickOutsideMonitor)
             self.clickOutsideMonitor = nil
         }
+        if let localClickOutsideMonitor {
+            NSEvent.removeMonitor(localClickOutsideMonitor)
+            self.localClickOutsideMonitor = nil
+        }
+    }
+
+    private func isInsideClipboardPanel(_ event: NSEvent) -> Bool {
+        guard let panel else { return false }
+        if event.window === panel { return true }
+        let screenPoint: NSPoint
+        if let eventWindow = event.window {
+            screenPoint = eventWindow.convertPoint(toScreen: event.locationInWindow)
+        } else {
+            screenPoint = NSEvent.mouseLocation
+        }
+        return panel.frame.contains(screenPoint)
     }
 
     // MARK: - Visual stress preview (--preview-clipboard-stress)
@@ -695,7 +726,7 @@ private struct ClipboardDetailCard: View {
             preview
             Divider()
             VStack(alignment: .leading, spacing: 3) {
-                detailRow("来源", entry.sourceApp ?? "未知")
+                sourceRow
                 detailRow("类型", entry.contentCategory.displayName)
                 detailRow("收录时间", entry.createdAt.formatted(date: .abbreviated, time: .shortened))
                 detailRow("上次使用", entry.lastUsedAt?.formatted(date: .abbreviated, time: .shortened) ?? "还未使用")
@@ -729,6 +760,7 @@ private struct ClipboardDetailCard: View {
                     // that genuinely exceeds the available side wraps.
                     .fixedSize(horizontal: false, vertical: true)
                     .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(.bottom, 4)
             }
             .scrollIndicators(.automatic)
             .frame(height: ClipboardDetailLayout.previewAreaHeight(cardHeight: cardSize.height))
@@ -738,6 +770,7 @@ private struct ClipboardDetailCard: View {
                     .font(.system(size: 12))
                     .textSelection(.enabled)
                     .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(.bottom, 4)
             }
             .scrollIndicators(.automatic)
             .frame(height: ClipboardDetailLayout.previewAreaHeight(cardHeight: cardSize.height))
@@ -754,6 +787,56 @@ private struct ClipboardDetailCard: View {
         }
         .font(.system(size: 11))
     }
+
+    private var sourceRow: some View {
+        HStack(alignment: .firstTextBaseline, spacing: 6) {
+            Text("来源")
+                .foregroundStyle(.secondary)
+            Spacer(minLength: 4)
+            SourceApplicationLabel(name: entry.sourceApp)
+        }
+        .font(.system(size: 11))
+    }
+}
+
+/// Source names are persisted as text, not bundle identifiers. Resolve a
+/// miniature icon only when the named app is presently running or can be found
+/// in one of macOS's standard application locations. A failed lookup leaves
+/// no placeholder, which avoids pretending an unknown app has an icon.
+private struct SourceApplicationLabel: View {
+    let name: String?
+
+    var body: some View {
+        HStack(spacing: 4) {
+            if let image = SourceApplicationIcon.image(named: name) {
+                Image(nsImage: image)
+                    .resizable()
+                    .interpolation(.high)
+                    .frame(width: 12, height: 12)
+            }
+            Text(name ?? "未知")
+                .multilineTextAlignment(.trailing)
+        }
+    }
+}
+
+private enum SourceApplicationIcon {
+    static func image(named name: String?) -> NSImage? {
+        guard let name, !name.isEmpty else { return nil }
+        if let app = NSWorkspace.shared.runningApplications.first(where: { $0.localizedName == name }),
+           let bundleURL = app.bundleURL {
+            return NSWorkspace.shared.icon(forFile: bundleURL.path)
+        }
+
+        let fileManager = FileManager.default
+        let candidates = [
+            "/Applications/\(name).app",
+            "/System/Applications/\(name).app",
+            (NSHomeDirectory() as NSString).appendingPathComponent("Applications/\(name).app")
+        ]
+        guard let appPath = candidates.first(where: { fileManager.fileExists(atPath: $0) }) else { return nil }
+        return NSWorkspace.shared.icon(forFile: appPath)
+    }
 }
 
 private enum ClipboardDetailLayout {
@@ -766,7 +849,10 @@ private enum ClipboardDetailLayout {
     /// line: roughly thirty Chinese glyphs per row at the preview font size.
     private static let readableTextCharactersPerLine = 30
     private static let horizontalPadding: CGFloat = 12
-    private static let verticalChrome: CGFloat = 161
+    // Includes the two dividers, metadata and instruction rows plus the card
+    // padding. The previous undercount clipped the final rendered glyph line
+    // below the bottom divider on CJK/code previews.
+    private static let verticalChrome: CGFloat = 177
     // A single text line should not reserve a tall preview; only images get a
     // comfortable minimum so a thumbnail isn't cramped.
     private static let minimumPreviewHeight: CGFloat = 18
@@ -775,7 +861,7 @@ private enum ClipboardDetailLayout {
     /// TextKit's glyph bounds can exceed a font's ascender/descender by a few
     /// points (notably CJK comments and code descenders). Reserve this space so
     /// the final visible line never sits under the following divider.
-    private static let previewSafetyInset: CGFloat = 7
+    private static let previewSafetyInset: CGFloat = 12
 
     static func cardSize(
         for entry: ClipboardEntry,
@@ -999,6 +1085,7 @@ struct ClipboardHistoryPanelView: View {
         }
         .onChange(of: query) { _, _ in selectionAndSizeChanged() }
         .onChange(of: store.settings.lastCategory) { _, _ in selectionAndSizeChanged() }
+        .onChange(of: activeKey.storageValue) { _, _ in selectionAndSizeChanged() }
         .onChange(of: store.entries) { _, _ in selectionAndSizeChanged() }
         .onDisappear { cancelPendingPreview() }
     }
@@ -1046,7 +1133,12 @@ struct ClipboardHistoryPanelView: View {
 
     private func selectionAndSizeChanged() {
         validateSelection()
-        reportContentHeight()
+        // A category/query change replaces the list, so a preview of the old
+        // entry is invalid. Collapse it before calculating the new category's
+        // height; otherwise the controller deliberately ignores a resize while
+        // a detail slideout is visible.
+        onDetailEntry(nil)
+        DispatchQueue.main.async { reportContentHeight() }
     }
 
     private func reportContentHeight() {
@@ -1276,15 +1368,12 @@ private struct TextEntryRow: View {
                 .font(.system(size: 13))
                 .lineLimit(1)
                 .foregroundStyle(isSelected ? Color.white : Color.primary)
-            if entry.isPinned {
-                Image(systemName: "pin.fill")
-                    .font(.system(size: 8))
-                    .foregroundStyle(isSelected ? Color.white.opacity(0.8) : Color.secondary)
-                    .help("剪贴板内置顶")
-            }
             Spacer(minLength: 0)
             if isSelected || isHovered || entry.isDesktopPinned == true {
                 ClipboardPinButton(entry: entry, isSelected: isSelected, action: onTogglePin)
+            }
+            if entry.isPinned && !isSelected {
+                ClipboardHistoryPinIcon()
             }
         }
         .padding(.horizontal, 10)
@@ -1319,15 +1408,12 @@ private struct CodeEntryRow: View {
                 .lineLimit(ClipboardPanelLayout.codePreviewMaxLines)
                 .lineSpacing(1)
                 .foregroundStyle(isSelected ? Color.white : Color.primary)
-            if entry.isPinned {
-                Image(systemName: "pin.fill")
-                    .font(.system(size: 8))
-                    .foregroundStyle(isSelected ? Color.white.opacity(0.8) : Color.secondary)
-                    .help("剪贴板内置顶")
-            }
             Spacer(minLength: 0)
             if isSelected || isHovered || entry.isDesktopPinned == true {
                 ClipboardPinButton(entry: entry, isSelected: isSelected, action: onTogglePin)
+            }
+            if entry.isPinned && !isSelected {
+                ClipboardHistoryPinIcon()
             }
         }
         .padding(.horizontal, 10)
@@ -1377,6 +1463,12 @@ private struct ImageEntryCell: View {
                     .padding(4)
             }
         }
+        .overlay(alignment: .bottomTrailing) {
+            if entry.isPinned && !isSelected {
+                ClipboardHistoryPinIcon()
+                    .padding(3)
+            }
+        }
         .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
         .overlay {
             RoundedRectangle(cornerRadius: 8, style: .continuous)
@@ -1393,7 +1485,9 @@ private struct ClipboardPinButton: View {
 
     var body: some View {
         Button(action: action) {
-            Image(systemName: entry.isDesktopPinned == true ? "pin.fill" : "pin")
+            // A window glyph means "pin as a desktop window". The plain pin
+            // at a row's far-right edge is reserved for clipboard ordering.
+            Image(systemName: entry.isDesktopPinned == true ? "rectangle.fill.on.rectangle.fill" : "rectangle.on.rectangle")
                 .font(.system(size: 10, weight: .medium))
                 .frame(width: 18, height: 18)
                 .contentShape(Rectangle())
@@ -1402,6 +1496,20 @@ private struct ClipboardPinButton: View {
         .foregroundStyle(isSelected ? Color.white : Color.secondary)
         .help(entry.isDesktopPinned == true ? "取消桌面固定" : "固定到桌面")
         .accessibilityLabel(entry.isDesktopPinned == true ? "取消桌面固定" : "固定到桌面")
+    }
+}
+
+/// The clipboard-order pin is intentionally non-interactive and lives at the
+/// final trailing edge of every unselected text/code row. It disappears under
+/// the blue selection highlight so the selected-row affordances stay clean.
+private struct ClipboardHistoryPinIcon: View {
+    var body: some View {
+        Image(systemName: "pin.fill")
+            .font(.system(size: 8, weight: .semibold))
+            .foregroundStyle(Color.secondary)
+            .frame(width: 18, height: 18)
+            .help("剪贴板内置顶")
+            .accessibilityLabel("剪贴板内置顶")
     }
 }
 

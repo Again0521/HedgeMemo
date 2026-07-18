@@ -9,13 +9,22 @@ enum LibraryActions {
         let panel = NSOpenPanel()
         panel.allowsMultipleSelection = false
         panel.allowedContentTypes = [.zip]
+        panel.canChooseDirectories = false
+        panel.canChooseFiles = true
+        panel.prompt = "选择 ZIP"
         guard panel.runModal() == .OK, let url = panel.url else { return }
         do {
             let extracted = try MemeArchiveService.extract(from: url)
             defer { MemeArchiveService.removeExtraction(extracted.directory) }
+            guard let selection = ArchiveImportSelectionPanel.run(manifest: extracted.manifest) else { return }
             let memeImagesDirectory = extracted.manifest.formatVersion == 1 ? "images" : "meme-images"
-            memeStore.importArchive(extracted.manifest, imagesURL: extracted.directory.appendingPathComponent(memeImagesDirectory, isDirectory: true))
-            if let clipboardSnapshot = extracted.manifest.clipboardSnapshot {
+            let memeSnapshot = filteredMemeSnapshot(from: extracted.manifest.memeSnapshot, selection: selection)
+            let clipboardSnapshot = filteredClipboardSnapshot(from: extracted.manifest.clipboardSnapshot, selection: selection)
+            if let memeSnapshot {
+                let manifest = MemeArchiveManifest(memeSnapshot: memeSnapshot, clipboardSnapshot: nil)
+                memeStore.importArchive(manifest, imagesURL: extracted.directory.appendingPathComponent(memeImagesDirectory, isDirectory: true))
+            }
+            if let clipboardSnapshot {
                 clipboardStore.importArchive(clipboardSnapshot, imagesURL: extracted.directory.appendingPathComponent("clipboard-images", isDirectory: true))
             }
         } catch {
@@ -48,8 +57,8 @@ enum LibraryActions {
         }
     }
 
-    private static func filteredMemeSnapshot(from snapshot: MemeSnapshot, selection: ArchiveExportSelection) -> MemeSnapshot? {
-        guard selection.exportsMemes else { return nil }
+    private static func filteredMemeSnapshot(from snapshot: MemeSnapshot?, selection: ArchiveCategorySelection) -> MemeSnapshot? {
+        guard let snapshot, selection.includesMemes else { return nil }
         let memes = snapshot.memes.filter {
             if let categoryID = $0.categoryID { return selection.memeCategoryIDs.contains(categoryID) }
             return selection.includeUncategorizedMemes
@@ -58,8 +67,8 @@ enum LibraryActions {
         return MemeSnapshot(categories: snapshot.categories.filter { categoryIDs.contains($0.id) }, memes: memes)
     }
 
-    private static func filteredClipboardSnapshot(from snapshot: ClipboardHistorySnapshot, selection: ArchiveExportSelection) -> ClipboardHistorySnapshot? {
-        guard selection.exportsClipboard else { return nil }
+    private static func filteredClipboardSnapshot(from snapshot: ClipboardHistorySnapshot?, selection: ArchiveCategorySelection) -> ClipboardHistorySnapshot? {
+        guard let snapshot, selection.includesClipboard else { return nil }
         let keys = selection.clipboardCategoryKeys.compactMap(ClipboardCategoryKey.init(storageValue:))
         let customs = snapshot.settings.customCategories ?? []
         let entries = snapshot.entries.filter { entry in

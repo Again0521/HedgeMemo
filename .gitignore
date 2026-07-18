@@ -7,3 +7,4 @@ Tests/HedgeMemoCoreTests/MemeFilterTests.swift
 .DS_Store
 /.agents
 .DS_Store
+/dist

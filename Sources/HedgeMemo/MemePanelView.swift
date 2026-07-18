@@ -9,9 +9,15 @@ struct MemePanelView: View {
     @State private var query = ""
     @State private var isManaging = false
     @State private var selectedIDs = Set<UUID>()
+    @State private var selectionAnchorID: UUID?
     @State private var draggedID: UUID?
     /// Pointer position in `MemeGridSpace` while a reorder drag is active.
     @State private var dragLocation: CGPoint = .zero
+    /// A prospective insertion is visual state only. Persisting a new order
+    /// while the pointer is still moving makes a slow drag repeatedly rebuild
+    /// the grid, which is the source of the visible tile jitter.
+    @State private var dropTargetID: UUID?
+    @State private var dropsAtEnd = false
     /// The grid's top edge in the scroll viewport's space; negative once the
     /// grid is scrolled. Lets the drag handler know when the pointer reaches
     /// the viewport edges so it can autoscroll.
@@ -19,9 +25,6 @@ struct MemePanelView: View {
     @State private var lastAutoscroll = Date.distantPast
     @State private var captureService: ClipboardCaptureService?
     @State private var editingMeme: MemeItem?
-    @State private var categoryDraft = ""
-    @State private var editingCategory: MemeCategory?
-    @State private var showsCategorySheet = false
     @State private var showsError = false
 
     // Three visible rows of square tiles; the grid scrolls beyond that.
@@ -63,7 +66,7 @@ struct MemePanelView: View {
                                 isSelected: selectedIDs.contains(meme.id),
                                 isDragged: draggedID == meme.id,
                                 categories: store.categories,
-                                onSelection: toggleSelection,
+                                onSelection: select,
                                 onCopy: {
                                     store.copyToPasteboard(meme)
                                     onDismiss()
@@ -80,7 +83,6 @@ struct MemePanelView: View {
                         }
                         MemeImportTile(
                             side: tileSide,
-                            isReordering: draggedID != nil,
                             onImport: importImages
                         )
                     }
@@ -118,13 +120,6 @@ struct MemePanelView: View {
         .sheet(item: $editingMeme) { meme in
             NoteEditorSheet(meme: meme) { store.updateNote(id: meme.id, note: $0) }
         }
-        .sheet(isPresented: $showsCategorySheet) {
-            CategoryEditorSheet(
-                title: editingCategory == nil ? "新建分类" : "重命名分类",
-                name: $categoryDraft,
-                onSave: saveCategory
-            )
-        }
         .alert("操作失败", isPresented: $showsError) {
             Button("好") { store.clearError() }
         } message: {
@@ -136,9 +131,19 @@ struct MemePanelView: View {
         .onChange(of: store.lastError) { _, error in
             showsError = error != nil
         }
+        .background(
+            MemeManagementKeyCapture(
+                isEnabled: isManaging,
+                selectAll: {
+                    selectedIDs = Set(visibleMemes.map(\.id))
+                    selectionAnchorID = visibleMemes.first?.id
+                }
+            )
+            .frame(width: 1, height: 1)
+        )
         .onDisappear {
             captureService?.stop()
-            draggedID = nil
+            clearDragState()
         }
     }
 
@@ -188,12 +193,31 @@ struct MemePanelView: View {
 
     private func toggleManaging() {
         isManaging.toggle()
-        if !isManaging { selectedIDs.removeAll() }
+        if !isManaging {
+            selectedIDs.removeAll()
+            selectionAnchorID = nil
+        }
     }
 
-    private func toggleSelection(_ id: UUID) {
-        if selectedIDs.contains(id) { selectedIDs.remove(id) }
-        else { selectedIDs.insert(id) }
+    /// Management is a batch workflow, so each ordinary click toggles its tile
+    /// instead of silently replacing the previous selection. Command remains
+    /// equivalent to the familiar Finder toggle and Shift still selects a
+    /// visible contiguous range.
+    private func select(_ id: UUID, modifiers: NSEvent.ModifierFlags) {
+        let flags = modifiers.intersection(.deviceIndependentFlagsMask)
+        if flags.contains(.command) || !flags.contains(.shift) {
+            if selectedIDs.contains(id) { selectedIDs.remove(id) }
+            else { selectedIDs.insert(id) }
+            selectionAnchorID = id
+            return
+        }
+        if flags.contains(.shift),
+           let anchor = selectionAnchorID,
+           let first = visibleMemes.firstIndex(where: { $0.id == anchor }),
+           let last = visibleMemes.firstIndex(where: { $0.id == id }) {
+            selectedIDs = Set(visibleMemes[min(first, last)...max(first, last)].map(\.id))
+            return
+        }
     }
 
     private func configureCapture(enabled: Bool) {
@@ -210,28 +234,52 @@ struct MemePanelView: View {
     }
 
     private func beginNewCategory() {
-        editingCategory = nil
-        categoryDraft = ""
-        showsCategorySheet = true
+        presentCategoryEditor(title: "新建分类", initialName: "") { name in
+            store.addCategory(name: name)
+        }
     }
 
     private func beginRenameCategory(_ category: MemeCategory) {
-        editingCategory = category
-        categoryDraft = category.name
-        showsCategorySheet = true
+        presentCategoryEditor(title: "重命名分类", initialName: category.name) { name in
+            store.renameCategory(id: category.id, name: name)
+        }
     }
 
-    private func saveCategory() {
-        if let category = editingCategory { store.renameCategory(id: category.id, name: categoryDraft) }
-        else { store.addCategory(name: categoryDraft) }
-        showsCategorySheet = false
+    /// NSPopover sheets stay in the popover's responder chain. Pressing Return
+    /// there can close the popover before SwiftUI confirms the edit, leaving a
+    /// hidden sheet as the key responder. A small app-modal `NSAlert` is the
+    /// narrow AppKit bridge here: it is frontmost, owns Return itself, and
+    /// returns one value back to the SwiftUI store only after confirmation.
+    @MainActor
+    private func presentCategoryEditor(title: String, initialName: String, onSave: @escaping (String) -> Void) {
+        let alert = NSAlert()
+        alert.messageText = title
+        alert.informativeText = "输入分类名称后按 Return 保存。"
+        alert.alertStyle = .informational
+        alert.addButton(withTitle: "保存")
+        alert.addButton(withTitle: "取消")
+
+        let field = NSTextField(string: initialName)
+        field.placeholderString = "分类名称"
+        field.frame = NSRect(x: 0, y: 0, width: 280, height: 24)
+        alert.accessoryView = field
+        // `NSAlert` otherwise initially focuses its default button. Explicitly
+        // nominate the field so typing and Return stay entirely inside this
+        // frontmost modal session from the first event.
+        alert.window.initialFirstResponder = field
+
+        // Make the native modal dialog the active event target before it runs.
+        // This keeps Return inside the dialog instead of sending it to the
+        // status-item popover's close handler.
+        NSApp.activate(ignoringOtherApps: true)
+        let response = alert.runModal()
+        guard response == .alertFirstButtonReturn else { return }
+        onSave(field.stringValue)
     }
 
     // MARK: - Gesture-driven reordering
 
     private static let viewportSpace = "memeGridViewport"
-    private static let reorderAnimation: Animation = .easeInOut(duration: 0.15)
-
     /// The floating copy that follows the pointer during a reorder drag. It
     /// lives in the grid's own coordinate space (`dragLocation` is captured
     /// there), so it stays aligned with the pointer regardless of scrolling.
@@ -260,26 +308,33 @@ struct MemePanelView: View {
         if draggedID != id { draggedID = id }
         dragLocation = location
         let memes = visibleMemes
-        guard let currentIndex = memes.firstIndex(where: { $0.id == id }) else { return }
         let slot = slotIndex(at: location)
         if slot >= memes.count {
-            // The import tile's slot and anything past it mean "the end":
-            // inside a category the meme also becomes part of that category.
-            if currentIndex != memes.count - 1 {
-                withAnimation(Self.reorderAnimation) {
-                    store.reorderToEnd(draggedID: id, categoryID: store.selectedCategoryID)
-                }
-            }
-        } else if slot != currentIndex {
-            withAnimation(Self.reorderAnimation) {
-                store.reorder(draggedID: id, over: memes[slot].id)
-            }
+            // The import tile's slot and anything past it mean "the end".
+            // This is intentionally not persisted until mouse-up.
+            dropsAtEnd = true
+            dropTargetID = nil
+        } else {
+            dropsAtEnd = false
+            dropTargetID = memes[slot].id
         }
         autoscrollIfNeeded(location: location, proxy: proxy)
     }
 
     private func endDrag() {
-        withAnimation(Self.reorderAnimation) { draggedID = nil }
+        defer { clearDragState() }
+        guard let draggedID else { return }
+        if dropsAtEnd {
+            store.reorderToEnd(draggedID: draggedID, categoryID: store.selectedCategoryID)
+        } else if let targetID = dropTargetID, targetID != draggedID {
+            store.reorder(draggedID: draggedID, over: targetID)
+        }
+    }
+
+    private func clearDragState() {
+        draggedID = nil
+        dropTargetID = nil
+        dropsAtEnd = false
     }
 
     /// `DragGesture` does not scroll the enclosing ScrollView by itself, so
@@ -334,29 +389,29 @@ struct MemePanelView: View {
 
 private struct MemeImportTile: View {
     let side: CGFloat
-    let isReordering: Bool
     let onImport: () -> Void
 
     var body: some View {
         Button(action: onImport) {
             Image(systemName: "plus")
                 .font(.system(size: 24, weight: .regular))
-                .foregroundStyle(isReordering ? Color.accentColor : Color.secondary)
+                // This remains a neutral import affordance even while a meme
+                // is being dragged across its end slot. Reordering has no
+                // visible "move to end" emphasis in the regular UI.
+                .foregroundStyle(Color.secondary)
                 .frame(width: side, height: side)
                 .background(.quinary, in: RoundedRectangle(cornerRadius: 8, style: .continuous))
                 .overlay {
                     RoundedRectangle(cornerRadius: 8, style: .continuous)
                         .strokeBorder(
-                            isReordering ? Color.accentColor : Color.primary.opacity(0.12),
-                            style: StrokeStyle(lineWidth: isReordering ? 2 : 1, dash: isReordering ? [5, 4] : [])
+                            Color.primary.opacity(0.12),
+                            lineWidth: 1
                         )
                 }
         }
         .buttonStyle(.plain)
-        // During a reorder drag this slot doubles as the "move to end" target;
-        // the panel's slot math handles the actual move, this is the visual.
-        .help(isReordering ? "拖到这里移至末尾" : "从文件或文件夹批量导入到当前分类")
-        .accessibilityLabel(isReordering ? "将表情包移到末尾" : "导入表情包")
+        .help("从文件或文件夹批量导入到当前分类")
+        .accessibilityLabel("导入表情包")
     }
 }
 
@@ -417,25 +472,58 @@ private struct CategoryBarView: View {
     }
 }
 
-private struct CategoryEditorSheet: View {
-    let title: String
-    @Binding var name: String
-    let onSave: () -> Void
-    @Environment(\.dismiss) private var dismiss
+/// A popover does not make SwiftUI's invisible key views first responder while
+/// a text field is active. Keep the monitor scoped to this popover window so
+/// Command-A works in management mode without stealing normal text editing.
+private struct MemeManagementKeyCapture: NSViewRepresentable {
+    let isEnabled: Bool
+    let selectAll: () -> Void
 
-    var body: some View {
-        VStack(alignment: .leading, spacing: 14) {
-            Text(title).font(.headline)
-            TextField("分类名称", text: $name)
-            HStack {
-                Spacer()
-                Button("取消") { dismiss() }
-                Button("保存") { onSave() }
-                    .keyboardShortcut(.defaultAction)
+    func makeNSView(context: Context) -> MemeManagementCapturingView {
+        let view = MemeManagementCapturingView()
+        view.isEnabled = isEnabled
+        view.selectAll = selectAll
+        return view
+    }
+
+    func updateNSView(_ nsView: MemeManagementCapturingView, context: Context) {
+        nsView.isEnabled = isEnabled
+        nsView.selectAll = selectAll
+    }
+
+    final class MemeManagementCapturingView: NSView {
+        var isEnabled = false
+        var selectAll: (() -> Void)?
+        private var monitor: Any?
+
+        override func viewDidMoveToWindow() {
+            super.viewDidMoveToWindow()
+            removeMonitor()
+            guard window != nil else { return }
+            monitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
+                guard let self,
+                      self.isEnabled,
+                      event.window === self.window,
+                      event.modifierFlags.intersection(.deviceIndependentFlagsMask).contains(.command),
+                      event.charactersIgnoringModifiers?.lowercased() == "a" else {
+                    return event
+                }
+                self.selectAll?()
+                return nil
             }
         }
-        .padding(20)
-        .frame(width: 280)
+
+        override func viewWillMove(toWindow newWindow: NSWindow?) {
+            if newWindow == nil { removeMonitor() }
+            super.viewWillMove(toWindow: newWindow)
+        }
+
+        private func removeMonitor() {
+            if let monitor {
+                NSEvent.removeMonitor(monitor)
+                self.monitor = nil
+            }
+        }
     }
 }
 
