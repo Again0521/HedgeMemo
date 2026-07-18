@@ -1,0 +1,27 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 260 168">
+<defs>
+<mask id="face">
+<rect width="260" height="168" fill="#ffffff"/>
+<path d="M 150 92 C 178 96 202 116 214 128 C 220 134 216 140 208 141 L 150 146 Z" fill="#000000"/>
+</mask>
+</defs>
+<g mask="url(#face)">
+<path fill="#2b2d31" d="
+M 46 144
+C 24 138 14 122 24 106
+L 8 98 L 32 92
+L 20 70 L 44 80
+L 40 50 L 62 70
+L 62 36 L 82 66
+L 88 30 L 104 64
+L 116 30 L 128 64
+L 144 38 L 154 72
+C 172 70 190 82 194 104
+C 198 126 180 146 152 146
+L 60 146
+C 55 146 50 145 46 144
+Z"/>
+</g>
+<circle cx="176" cy="118" r="8" fill="#2b2d31"/>
+<circle cx="216" cy="132" r="9" fill="#2b2d31"/>
+</svg>

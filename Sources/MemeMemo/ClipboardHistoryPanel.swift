@@ -86,9 +86,13 @@ private final class ClipboardHoverPreviewDelay {
         DispatchQueue.main.asyncAfter(deadline: .now() + 1, execute: work)
     }
 
-    /// Give AppKit only the current run-loop turn to hand off from a replaced
-    /// tracking view to its successor. A genuine pointer exit closes on the
-    /// next frame; a replacement tracking view cancels this work before then.
+    /// Give AppKit a short hand-off interval when a hovered row is rehosted.
+    /// Expanding the single panel for its preview can cause AppKit to emit one
+    /// synthetic exit before the replacement tracking area has its final
+    /// frame.  The previous next-run-loop delay was too short: it cancelled a
+    /// valid one-second hover before the preview could appear.  Eighty
+    /// milliseconds remains visually immediate for a real exit, but lets the
+    /// successor tracking area cancel this stale close reliably.
     func scheduleExit(entry: ClipboardEntry, fire: @escaping () -> Void) {
         let entryID = entry.id
         guard hoveredEntryID == entryID else { return }
@@ -102,7 +106,7 @@ private final class ClipboardHoverPreviewDelay {
             fire()
         }
         exitWork = work
-        DispatchQueue.main.async(execute: work)
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.08, execute: work)
     }
 
     func cancel() {
@@ -436,7 +440,6 @@ final class ClipboardHistoryPanelController: NSObject, NSWindowDelegate {
         case .overlay:
             hostFrame = mainFrame
         }
-        setPanelFrame(hostFrame)
         detailPresentation.show(
             entry: entry,
             imageURL: imageURL,
@@ -449,6 +452,16 @@ final class ClipboardHistoryPanelController: NSObject, NSWindowDelegate {
                 : hostTop - detailY - size.height
         )
         mainScreenFrame = mainFrame
+        // Commit the fixed-height main card before enlarging the AppKit host.
+        // Long previews enlarge the union frame substantially; changing that
+        // frame first lets GeometryReader stretch the clipboard card for one
+        // render pass, which reads as a height twitch under the pointer.
+        DispatchQueue.main.async { [weak self] in
+            guard let self,
+                  self.detailEntryID == entry.id,
+                  self.panel?.isVisible == true else { return }
+            self.setPanelFrame(hostFrame)
+        }
     }
 
     private func hideDetail() {
@@ -865,10 +878,12 @@ struct ClipboardHistoryPanelView: View {
 
         detailCard
             .offset(x: detailCardXOffset, y: detailPresentation.detailTopOffset)
+            // Only the preview card animates. Animating the parent geometry
+            // makes the clipboard card animate its height and position too.
+            .animation(.easeOut(duration: 0.16), value: detailPresentation.entry?.id)
             }
             .frame(width: proxy.size.width, height: proxy.size.height, alignment: .topLeading)
         }
-        .animation(.easeOut(duration: 0.16), value: detailPresentation.entry?.id)
     }
 
     private var mainCardXOffset: CGFloat {
@@ -919,7 +934,12 @@ struct ClipboardHistoryPanelView: View {
         }
         .padding(ClipboardPanelLayout.outerPadding)
         .frame(width: ClipboardPanelLayout.panelWidth)
-        .background(KeyCaptureView { event in handleKey(event) }.frame(width: 0, height: 0))
+        // A non-activating panel's search field normally owns first responder,
+        // so a zero-sized SwiftUI key view never sees navigation or command
+        // keys.  This bridge installs a *window-scoped* local monitor instead:
+        // ordinary text still reaches the search field, while clipboard
+        // actions remain available no matter which control has focus.
+        .background(KeyCaptureView { event in handleKey(event) }.frame(width: 1, height: 1))
         .onAppear {
             validateSelection()
             reportContentHeight()
@@ -1094,8 +1114,15 @@ struct ClipboardHistoryPanelView: View {
             hoveredID = entry.id
             schedulePreview(for: entry)
         } else if hoveredID == entry.id {
-            hoveredID = nil
+            // Keep the visual selection alive until the exit is confirmed.
+            // A preview expansion can replace a tracking area momentarily;
+            // clearing this state immediately made the blue row disappear
+            // while its preview was still visible.
+            let hoveredIDBinding = $hoveredID
             hoverPreviewDelay.scheduleExit(entry: entry) { [onDetailEntry] in
+                if hoveredIDBinding.wrappedValue == entry.id {
+                    hoveredIDBinding.wrappedValue = nil
+                }
                 onDetailEntry(nil)
             }
         }
@@ -1359,11 +1386,13 @@ private struct EntryHoverTrackingOverlay: NSViewRepresentable {
         }
 
         override func mouseEntered(with event: NSEvent) {
-            setHovered(true)
+            // AppKit can synthesize enter/exit pairs while the hosting view
+            // changes geometry. Use the actual pointer position instead.
+            refreshHoverState()
         }
 
         override func mouseExited(with event: NSEvent) {
-            setHovered(false)
+            refreshHoverState()
         }
 
         override func mouseMoved(with event: NSEvent) {
@@ -1411,12 +1440,50 @@ private struct KeyCaptureView: NSViewRepresentable {
 
     final class CapturingView: NSView {
         var onKey: ((NSEvent) -> Bool)?
+        private var keyEventMonitor: Any?
 
         override var acceptsFirstResponder: Bool { true }
+
+        override func viewWillMove(toWindow newWindow: NSWindow?) {
+            if newWindow == nil {
+                removeKeyEventMonitor()
+            }
+            super.viewWillMove(toWindow: newWindow)
+        }
+
+        override func viewDidMoveToWindow() {
+            super.viewDidMoveToWindow()
+            removeKeyEventMonitor()
+            installKeyEventMonitor()
+        }
 
         override func keyDown(with event: NSEvent) {
             if onKey?(event) == true { return }
             super.keyDown(with: event)
+        }
+
+        /// Keep command/navigation routing in the panel even while the search
+        /// field is first responder.  Limiting the monitor to this exact
+        /// window is important: the app's global hotkeys and every other
+        /// window retain their normal responder-chain behavior.
+        private func installKeyEventMonitor() {
+            guard keyEventMonitor == nil, window != nil else { return }
+            keyEventMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
+                guard let self,
+                      let window = self.window,
+                      event.window === window,
+                      window.isVisible else {
+                    return event
+                }
+                return self.onKey?(event) == true ? nil : event
+            }
+        }
+
+        private func removeKeyEventMonitor() {
+            if let keyEventMonitor {
+                NSEvent.removeMonitor(keyEventMonitor)
+                self.keyEventMonitor = nil
+            }
         }
     }
 }
