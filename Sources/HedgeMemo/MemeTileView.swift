@@ -54,8 +54,11 @@ struct MemeTileView: View {
         .onTapGesture {
             if isManaging { onSelection(meme.id, NSEvent.modifierFlags) } else { onCopy() }
         }
+        // A deliberate reorder needs more travel than an ordinary click's
+        // jitter, so a plain selection tap in management mode is never stolen
+        // by this drag and mistaken for a no-op reorder onto the same tile.
         .gesture(
-            DragGesture(minimumDistance: 4, coordinateSpace: .named(MemeGridSpace.name))
+            DragGesture(minimumDistance: 10, coordinateSpace: .named(MemeGridSpace.name))
                 .onChanged { value in onDragChanged(meme.id, value.location) }
                 .onEnded { _ in onDragEnded() }
         )

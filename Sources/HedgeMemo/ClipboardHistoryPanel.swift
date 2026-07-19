@@ -727,7 +727,6 @@ private struct ClipboardDetailCard: View {
             Divider()
             VStack(alignment: .leading, spacing: 3) {
                 sourceRow
-                detailRow("类型", entry.contentCategory.displayName)
                 detailRow("收录时间", entry.createdAt.formatted(date: .abbreviated, time: .shortened))
                 detailRow("上次使用", entry.lastUsedAt?.formatted(date: .abbreviated, time: .shortened) ?? "还未使用")
                 detailRow("使用次数", "\(entry.useCount ?? 0) 次")
@@ -843,16 +842,35 @@ private enum ClipboardDetailLayout {
     /// Maccy's minimum slideout width is 200 pt. Keep the same lower bound so
     /// a preview can still be shown beside a panel parked at a display edge.
     static let minimumSideWidth: CGFloat = 200
-    private static let minimumWidth: CGFloat = minimumSideWidth
     private static let maximumWidth: CGFloat = 720
-    /// Non-code previews are deliberately readable rather than a single wide
-    /// line: roughly thirty Chinese glyphs per row at the preview font size.
+    /// The widest a wrapped text line is ever allowed to grow.  Long text wraps
+    /// at roughly thirty Chinese glyphs per row so a line never becomes an
+    /// unreadable single stretch, while short text is free to be narrower.
     private static let readableTextCharactersPerLine = 30
     private static let horizontalPadding: CGFloat = 12
     // Includes the two dividers, metadata and instruction rows plus the card
-    // padding. The previous undercount clipped the final rendered glyph line
-    // below the bottom divider on CJK/code previews.
-    private static let verticalChrome: CGFloat = 177
+    // padding.  Dropping the former "类型" row removed one metadata line, so the
+    // chrome is one row shorter than before.
+    private static let verticalChrome: CGFloat = 160
+
+    /// The card must stay wide enough that the metadata rows below the preview
+    /// (source, capture time, last-used) never squeeze their label against
+    /// their value.  Derived from the widest predictable row — a label plus a
+    /// fully populated, locale-formatted date — so short previews can be narrow
+    /// without cramping this footer.
+    private static var metadataMinimumWidth: CGFloat {
+        let font = NSFont.systemFont(ofSize: 11)
+        let widestLabel = "收录时间"
+        // Measure a value produced by the same formatter the rows use rather
+        // than hard-coding, so the floor tracks the user's locale and clock.
+        let sampleValue = Date(timeIntervalSince1970: 1_703_772_480)
+            .formatted(date: .abbreviated, time: .shortened)
+        let labelWidth = (widestLabel as NSString).size(withAttributes: [.font: font]).width
+        let valueWidth = (sampleValue as NSString).size(withAttributes: [.font: font]).width
+        // HStack spacing on each side of the Spacer plus its own minimum length.
+        let rowSpacing: CGFloat = 6 + 4 + 6
+        return ceil(labelWidth + valueWidth + rowSpacing) + horizontalPadding * 2
+    }
     // A single text line should not reserve a tall preview; only images get a
     // comfortable minimum so a thumbnail isn't cramped.
     private static let minimumPreviewHeight: CGFloat = 18
@@ -935,31 +953,66 @@ private enum ClipboardDetailLayout {
         return max(lineHeight, min(ceil(bounds.height) + previewSafetyInset, maximumHeight))
     }
 
-    /// Code gets just enough extra width to preserve ordinary source lines,
-    /// then deliberately caps at a readable desktop-card size.  Text and image
-    /// previews retain a compact card unless their source needs more room.
+    /// Chooses the card width so the preview neither leaves a wide blank margin
+    /// beside short snippets nor squashes long text into a single stretched
+    /// line.  Both text and code shrink to fit their content, wrap long content
+    /// into evenly balanced lines, and never drop below the width the metadata
+    /// footer needs.
     private static func preferredWidth(for entry: ClipboardEntry, availableWidth: CGFloat) -> CGFloat {
         let text = entry.text ?? entry.previewText
         let isCode = entry.contentCategory == .code
         let font: NSFont = isCode
             ? .monospacedSystemFont(ofSize: 11, weight: .regular)
             : .systemFont(ofSize: 12)
-        if !isCode {
-            let target = (String(repeating: "中", count: readableTextCharactersPerLine) as NSString)
-                .size(withAttributes: [.font: font]).width + horizontalPadding * 2
-            let readable = min(maximumWidth, max(minimumWidth, target))
-            return min(readable, max(1, availableWidth))
+        let clampToScreen = { (width: CGFloat) in min(width, max(1, availableWidth)) }
+
+        // Code is laid out verbatim: keep whole source lines intact up to the
+        // readable cap so indentation and structure survive.
+        if isCode {
+            let longest = text
+                .components(separatedBy: .newlines)
+                .map { ($0 as NSString).size(withAttributes: [.font: font]).width }
+                .max() ?? 0
+            let preferred = longest + horizontalPadding * 2 + 2
+            let desired = min(maximumWidth, max(metadataMinimumWidth, preferred))
+            return clampToScreen(desired)
         }
-        let longest = text
-            .components(separatedBy: .newlines)
-            .map { ($0 as NSString).size(withAttributes: [.font: font]).width }
-            .max() ?? 0
-        let preferred = longest + horizontalPadding * 2 + 2
-        let desired = min(maximumWidth, max(minimumWidth, preferred))
-        // Do not force the preview wider than the actually available side.
-        // The former 260-pt floor made the united host cross the screen edge
-        // and moved the list out from under the pointer.
-        return min(desired, max(1, availableWidth))
+
+        // Text: pick a content width that balances the number of wrapped lines.
+        // `cap` is the widest a line may get; `singleLine` is how wide the text
+        // would be with no wrapping at all.
+        let cap = (String(repeating: "中", count: readableTextCharactersPerLine) as NSString)
+            .size(withAttributes: [.font: font]).width
+        let flattened = text
+            .replacingOccurrences(of: "\r\n", with: " ")
+            .replacingOccurrences(of: "\n", with: " ")
+            .replacingOccurrences(of: "\r", with: " ")
+        let singleLine = ceil((flattened as NSString).size(withAttributes: [.font: font]).width)
+
+        var content: CGFloat
+        if singleLine <= cap {
+            // Fits on one line — the card only needs to be that wide.
+            content = singleLine
+        } else {
+            // Spread the text across the fewest lines that keep each at or below
+            // the cap, then even them out so the last line is not a lonely tail.
+            let lines = ceil(singleLine / cap)
+            content = ceil(singleLine / lines)
+        }
+
+        // A hard-wrapped source line that already fits should not be re-wrapped
+        // narrower than it is, otherwise its own newlines would fragment it.
+        let hardLines = text.components(separatedBy: .newlines)
+        if hardLines.count > 1 {
+            let longestHardLine = hardLines
+                .map { ceil(($0 as NSString).size(withAttributes: [.font: font]).width) }
+                .max() ?? 0
+            content = max(content, min(longestHardLine, cap))
+        }
+
+        content = min(cap, content)
+        let desired = max(metadataMinimumWidth, content + horizontalPadding * 2)
+        return clampToScreen(min(maximumWidth, desired))
     }
 }
 

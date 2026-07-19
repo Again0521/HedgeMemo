@@ -328,6 +328,11 @@ struct MemePanelView: View {
             store.reorderToEnd(draggedID: draggedID, categoryID: store.selectedCategoryID)
         } else if let targetID = dropTargetID, targetID != draggedID {
             store.reorder(draggedID: draggedID, over: targetID)
+        } else if isManaging {
+            // The pointer never left this tile, so the gesture was a click, not
+            // a reorder. Route it back through selection so a small drag can
+            // never silently drop a tile out of a multi-selection.
+            select(draggedID, modifiers: NSEvent.modifierFlags)
         }
     }
 
