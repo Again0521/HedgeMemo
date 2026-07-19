@@ -1,9 +1,8 @@
 /.build
 Sources/.DS_Store
-Tests/.DS_Store
 .DS_Store
 /Docs
 .DS_Store
 /.agents
-.DS_Store
 /dist
+.DS_Store
