@@ -867,10 +867,10 @@ private enum ClipboardDetailLayout {
     /// unreadable single stretch, while short text is free to be narrower.
     private static let readableTextCharactersPerLine = 30
     private static let horizontalPadding: CGFloat = 12
-    // Includes the two dividers, metadata and instruction rows plus the card
-    // padding.  Dropping the former "类型" row removed one metadata line, so the
-    // chrome is one row shorter than before.
-    private static let verticalChrome: CGFloat = 160
+    // Includes the two dividers, metadata rows, the single shortcut-hint line
+    // and the card padding.  Dropping the "类型" metadata row and collapsing the
+    // two shortcut lines into one each removed a line from the chrome.
+    private static let verticalChrome: CGFloat = 146
 
     /// The card must stay wide enough that the metadata rows below the preview
     /// (source, capture time, last-used) never squeeze their label against
