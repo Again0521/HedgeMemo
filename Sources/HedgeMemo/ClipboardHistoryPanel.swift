@@ -751,12 +751,12 @@ private struct ClipboardDetailCard: View {
                 detailRow("使用次数", "\(entry.useCount ?? 0) 次")
             }
             Divider()
-            VStack(alignment: .leading, spacing: 2) {
-                Text("按 ⏎ 复制。按 ⌫ 删除。")
-                Text(entry.isPinned ? "按 ⌘P 取消置顶。" : "按 ⌘P 置顶。")
-            }
-            .font(.system(size: 10))
-            .foregroundStyle(.secondary)
+            // Shortcut hints share one line in a "动作：按键" format, separated by
+            // three spaces so the keys stay visually distinct without dividers.
+            Text("复制：⏎   删除：⌫   \(entry.isPinned ? "取消置顶" : "置顶")：⌘P")
+                .font(.system(size: 10))
+                .foregroundStyle(.secondary)
+                .lineLimit(1)
         }
         .padding(12)
         .frame(width: cardSize.width, height: cardSize.height, alignment: .topLeading)

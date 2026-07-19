@@ -2,6 +2,7 @@ import AppKit
 import CoreGraphics
 import Foundation
 import HedgeMemoCore
+import ScreenCaptureKit
 
 @MainActor
 final class ScreenshotService: NSObject {
@@ -42,11 +43,15 @@ final class ScreenshotService: NSObject {
             guard let self else { return }
             self.selectionController = nil
             guard let rect, rect.width >= 4, rect.height >= 4 else { return }
+            // Let the selection overlay tear down before the frame is grabbed so
+            // its dimming never lands in the shot.
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.08) {
-                if let image = Self.captureScreen(rect: rect) {
-                    completion(.success(image))
-                } else {
-                    completion(.failure(ScreenshotError.captureFailed))
+                Task { @MainActor in
+                    do {
+                        completion(.success(try await ScreenCaptureKitCapturer.captureRegion(appKitRect: rect)))
+                    } catch {
+                        completion(.failure(ScreenshotError.captureFailed))
+                    }
                 }
             }
         }
@@ -75,28 +80,17 @@ final class ScreenshotService: NSObject {
     }
 
     private func finishSmartWindowCapture(window: CapturableWindow, completion: @escaping (Result<NSImage, Error>) -> Void) {
-        guard let image = CGWindowListCreateImage(
-            window.bounds,
-            .optionIncludingWindow,
-            window.id,
-            [.boundsIgnoreFraming, .bestResolution]
-        ) else {
-            completion(.failure(ScreenshotError.captureFailed))
-            return
+        Task { @MainActor in
+            do {
+                completion(.success(try await ScreenCaptureKitCapturer.captureWindow(id: window.id)))
+            } catch {
+                completion(.failure(ScreenshotError.captureFailed))
+            }
         }
-        completion(.success(NSImage(cgImage: image, size: NSSize(width: image.width, height: image.height))))
     }
 
     private static func hasScreenCaptureAccess() -> Bool {
         CGPreflightScreenCaptureAccess()
-    }
-
-    private static func captureScreen(rect: CGRect) -> NSImage? {
-        let quartzRect = appKitToQuartz(rect)
-        guard let image = CGWindowListCreateImage(quartzRect, .optionOnScreenOnly, kCGNullWindowID, [.bestResolution]) else {
-            return nil
-        }
-        return NSImage(cgImage: image, size: NSSize(width: image.width, height: image.height))
     }
 
     private static func windowUnderPointer() -> CapturableWindow? {
@@ -114,16 +108,6 @@ final class ScreenshotService: NSObject {
             return window
         }
         return nil
-    }
-
-    private static func appKitToQuartz(_ rect: CGRect) -> CGRect {
-        let union = screenUnion
-        return CGRect(
-            x: rect.minX,
-            y: union.maxY - rect.maxY,
-            width: rect.width,
-            height: rect.height
-        )
     }
 
     private static func appKitToQuartz(_ point: NSPoint) -> CGPoint {
@@ -146,6 +130,78 @@ final class ScreenshotService: NSObject {
             partial.union(screen.frame)
         }
     }
+}
+
+/// ScreenCaptureKit replaces the deprecated `CGWindowListCreateImage`.  Both
+/// captures run on the main actor: their `await`s only *suspend* it (SCK does
+/// the work off-main), while the surrounding `NSScreen` reads stay main-thread
+/// safe.  Images keep their full pixel dimensions as the `NSImage` size, matching
+/// the previous behaviour the editor and clipboard downstream rely on.
+@MainActor
+private enum ScreenCaptureKitCapturer {
+    static func captureWindow(id windowID: CGWindowID) async throws -> NSImage {
+        let content = try await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: true)
+        guard let window = content.windows.first(where: { $0.windowID == windowID }) else {
+            throw ScreenshotService.ScreenshotError.captureFailed
+        }
+        // A desktop-independent window filter yields exactly the window, framing
+        // and shadow excluded — the equivalent of `.boundsIgnoreFraming`.
+        let filter = SCContentFilter(desktopIndependentWindow: window)
+        let scale = CGFloat(filter.pointPixelScale)
+        let config = SCStreamConfiguration()
+        config.width = Int((filter.contentRect.width * scale).rounded())
+        config.height = Int((filter.contentRect.height * scale).rounded())
+        config.showsCursor = false
+        config.ignoreShadowsSingleWindow = true
+        let image = try await SCScreenshotManager.captureImage(contentFilter: filter, configuration: config)
+        return NSImage(cgImage: image, size: NSSize(width: image.width, height: image.height))
+    }
+
+    static func captureRegion(appKitRect rect: CGRect) async throws -> NSImage {
+        guard let screen = bestScreen(for: rect), let displayID = screen.displayID else {
+            throw ScreenshotService.ScreenshotError.captureFailed
+        }
+        let content = try await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: true)
+        guard let display = content.displays.first(where: { $0.displayID == displayID }) else {
+            throw ScreenshotService.ScreenshotError.captureFailed
+        }
+        let filter = SCContentFilter(display: display, excludingWindows: [])
+        // `sourceRect` is in points with a top-left origin measured from the
+        // display; AppKit's selection is global and bottom-left, so shift it
+        // into the display and flip Y.
+        let local = CGRect(
+            x: rect.minX - screen.frame.minX,
+            y: screen.frame.maxY - rect.maxY,
+            width: rect.width,
+            height: rect.height
+        )
+        let scale = CGFloat(screen.backingScaleFactor)
+        let config = SCStreamConfiguration()
+        config.sourceRect = local
+        config.width = Int((local.width * scale).rounded())
+        config.height = Int((local.height * scale).rounded())
+        config.showsCursor = false
+        let image = try await SCScreenshotManager.captureImage(contentFilter: filter, configuration: config)
+        return NSImage(cgImage: image, size: NSSize(width: image.width, height: image.height))
+    }
+
+    /// The display holding most of the selection.  A selection dragged across a
+    /// screen boundary is captured from whichever screen it mostly covers.
+    private static func bestScreen(for rect: CGRect) -> NSScreen? {
+        NSScreen.screens.max { lhs, rhs in
+            lhs.frame.intersection(rect).area < rhs.frame.intersection(rect).area
+        }
+    }
+}
+
+private extension NSScreen {
+    var displayID: CGDirectDisplayID? {
+        deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? CGDirectDisplayID
+    }
+}
+
+private extension CGRect {
+    var area: CGFloat { isNull ? 0 : width * height }
 }
 
 private struct CapturableWindow {
