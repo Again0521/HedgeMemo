@@ -1,7 +1,6 @@
 /.build
 Sources/.DS_Store
 Tests/.DS_Store
-Tests/HedgeMemoCoreTests/MemeFilterTests.swift
 .DS_Store
 /Docs
 .DS_Store
