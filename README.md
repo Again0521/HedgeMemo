@@ -4,7 +4,6 @@
 
 **藏在菜单栏里的小刺猬，把复制过的内容、常用表情和截图收在一起。**
 
-![HedgeMemo 功能介绍](Docs/asset/HedgeMemo-软件介绍图-详情版.png)
 ![HedgeMemo 功能介绍](Assets/HedgeMemo-软件介绍图.png)
 
 </div>
