@@ -734,6 +734,23 @@ private struct DetailCardPopIn: ViewModifier {
     }
 }
 
+/// The footer shortcut hint. Kept in one place so the rendered string and the
+/// width the layout reserves for it can never drift apart.
+private enum ClipboardShortcutHint {
+    static func text(isPinned: Bool, isDesktopPinned: Bool) -> String {
+        let pin = isPinned ? "取消置顶" : "置顶"
+        let desktop = isDesktopPinned ? "取消固定" : "固定桌面"
+        return "复制：⏎ ｜ 删除：⌫ ｜ \(pin)：⌘P ｜ \(desktop)：⌥P"
+    }
+
+    /// The widest variant (both actions in their longer "cancel" wording); the
+    /// card minimum width is sized to this so the hint never truncates.
+    static var widest: String { text(isPinned: true, isDesktopPinned: true) }
+
+    /// Matches the footer `Text`'s `.font(.system(size: 10))`, for measurement.
+    static var font: NSFont { .systemFont(ofSize: 10) }
+}
+
 private struct ClipboardDetailCard: View {
     let entry: ClipboardEntry
     let imageURL: URL?
@@ -751,9 +768,10 @@ private struct ClipboardDetailCard: View {
                 detailRow("使用次数", "\(entry.useCount ?? 0) 次")
             }
             Divider()
-            // Shortcut hints share one line in a "动作：按键" format, separated by
-            // three spaces so the keys stay visually distinct without dividers.
-            Text("复制：⏎   删除：⌫   \(entry.isPinned ? "取消置顶" : "置顶")：⌘P")
+            // Shortcut hints share one line in a "动作：按键" format, the actions
+            // separated by " ｜ ". The card min width reserves room for this line
+            // so it never truncates.
+            Text(ClipboardShortcutHint.text(isPinned: entry.isPinned, isDesktopPinned: entry.isDesktopPinned == true))
                 .font(.system(size: 10))
                 .foregroundStyle(.secondary)
                 .lineLimit(1)
@@ -890,6 +908,20 @@ private enum ClipboardDetailLayout {
         let rowSpacing: CGFloat = 6 + 4 + 6
         return ceil(labelWidth + valueWidth + rowSpacing) + horizontalPadding * 2
     }
+
+    /// The single-line footer shortcut hint must fit without truncating, so its
+    /// widest wording sets a floor on the card width.
+    private static var instructionMinimumWidth: CGFloat {
+        let width = (ClipboardShortcutHint.widest as NSString)
+            .size(withAttributes: [.font: ClipboardShortcutHint.font]).width
+        return ceil(width) + horizontalPadding * 2
+    }
+
+    /// The narrowest a card may be: enough for the metadata rows *and* the
+    /// footer hint, whichever needs more room.
+    private static var cardMinimumWidth: CGFloat {
+        max(metadataMinimumWidth, instructionMinimumWidth)
+    }
     // A single text line should not reserve a tall preview; only images get a
     // comfortable minimum so a thumbnail isn't cramped.
     private static let minimumPreviewHeight: CGFloat = 18
@@ -976,7 +1008,7 @@ private enum ClipboardDetailLayout {
     /// beside short snippets nor squashes long text into a single stretched
     /// line.  Both text and code shrink to fit their content, wrap long content
     /// into evenly balanced lines, and never drop below the width the metadata
-    /// footer needs.
+    /// rows and footer hint need.
     private static func preferredWidth(for entry: ClipboardEntry, availableWidth: CGFloat) -> CGFloat {
         let text = entry.text ?? entry.previewText
         let isCode = entry.contentCategory == .code
@@ -993,7 +1025,7 @@ private enum ClipboardDetailLayout {
                 .map { ($0 as NSString).size(withAttributes: [.font: font]).width }
                 .max() ?? 0
             let preferred = longest + horizontalPadding * 2 + 2
-            let desired = min(maximumWidth, max(metadataMinimumWidth, preferred))
+            let desired = min(maximumWidth, max(cardMinimumWidth, preferred))
             return clampToScreen(desired)
         }
 
@@ -1020,7 +1052,7 @@ private enum ClipboardDetailLayout {
             longestHardLineWidth: longestHardLine,
             hasHardBreaks: hardLines.count > 1
         )
-        let desired = max(metadataMinimumWidth, content + horizontalPadding * 2)
+        let desired = max(cardMinimumWidth, content + horizontalPadding * 2)
         return clampToScreen(min(maximumWidth, desired))
     }
 }
@@ -1371,6 +1403,13 @@ struct ClipboardHistoryPanelView: View {
         }
         if flags.contains(.command), event.charactersIgnoringModifiers?.lowercased() == "p", let selectedID = activeSelectionID {
             store.togglePinned(id: selectedID)
+            return true
+        }
+        // ⌥P mirrors the "固定到桌面" button/menu, going through the same callback
+        // so the desktop note is created and the history panel closes.
+        if flags.contains(.option), event.charactersIgnoringModifiers?.lowercased() == "p",
+           let entry = entries.first(where: { $0.id == activeSelectionID }) {
+            onTogglePin(entry)
             return true
         }
         let columns = (activeKey == .builtin(.image) || activeKey == .builtin(.screenshot))
