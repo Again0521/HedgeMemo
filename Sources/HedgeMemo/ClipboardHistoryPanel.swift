@@ -1421,7 +1421,18 @@ struct ClipboardHistoryPanelView: View {
             copy(entry)
             return true
         case 51, 117:
-            if let entry = entries.first(where: { $0.id == activeSelectionID }) { delete(entry) }
+            // The mouse hovering a row always targets that row for deletion.
+            if let hoveredID, let entry = entries.first(where: { $0.id == hoveredID }) {
+                delete(entry)
+                return true
+            }
+            // Otherwise, when the search box holds text, Delete must edit the
+            // query — let the event fall through to the field instead of
+            // removing an entry the pointer isn't even on.
+            if !query.isEmpty { return false }
+            // Empty search and nothing hovered: fall back to the keyboard
+            // selection so arrow-key navigation can still delete.
+            if let entry = entries.first(where: { $0.id == keyboardSelectedID }) { delete(entry) }
             return true
         case 53:
             onDone()
