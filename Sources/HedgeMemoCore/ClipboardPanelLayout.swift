@@ -13,7 +13,7 @@ public enum ClipboardPanelLayout {
     public static let segmentedHeight: CGFloat = 22
     public static let sectionSpacing: CGFloat = 8
 
-    public static let textRowHeight: CGFloat = 30
+    public static let textRowHeight: CGFloat = 27
     public static let listSpacing: CGFloat = 0
 
     public static let codeLineHeight: CGFloat = 14
@@ -53,6 +53,34 @@ public enum ClipboardPanelLayout {
     public static func codeRowHeight(lineCount: Int) -> CGFloat {
         let lines = min(max(lineCount, 1), codePreviewMaxLines)
         return codeRowPadding + CGFloat(lines) * codeLineHeight
+    }
+
+    /// Chooses the content width for a wrapped text preview so it neither leaves
+    /// a wide blank margin beside a short snippet nor squashes long text into an
+    /// unreadable single line.  All widths are point measurements of the same
+    /// font: `singleLineWidth` is how wide the text is with no wrapping, `cap`
+    /// the widest a line may become.  Long text is spread over the fewest lines
+    /// that keep each at or below `cap`, then evened out so the final line is
+    /// not a lonely tail.  A snippet already broken by hard newlines is never
+    /// wrapped narrower than its widest existing line (up to `cap`).
+    public static func balancedPreviewContentWidth(
+        singleLineWidth: CGFloat,
+        cap: CGFloat,
+        longestHardLineWidth: CGFloat = 0,
+        hasHardBreaks: Bool = false
+    ) -> CGFloat {
+        guard cap > 0 else { return max(0, singleLineWidth) }
+        var content: CGFloat
+        if singleLineWidth <= cap {
+            content = max(0, singleLineWidth)
+        } else {
+            let lines = (singleLineWidth / cap).rounded(.up)
+            content = (singleLineWidth / lines).rounded(.up)
+        }
+        if hasHardBreaks {
+            content = max(content, min(longestHardLineWidth, cap))
+        }
+        return min(cap, content)
     }
 
     /// Height of the scrolling content for the given entries in a category.

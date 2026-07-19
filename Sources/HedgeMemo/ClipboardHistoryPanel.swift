@@ -715,6 +715,25 @@ private final class KeyableClipboardPanel: NSPanel {
 
 // MARK: - Detail card content
 
+/// Eases the preview card in with a small scale-and-fade "pop" instead of
+/// snapping into place.  It animates from its own `onAppear`, so it plays once
+/// per hover session (a genuine insertion) and never re-triggers while the
+/// pointer glides between rows and the card is only re-sized.
+private struct DetailCardPopIn: ViewModifier {
+    @State private var appeared = false
+
+    func body(content: Content) -> some View {
+        content
+            .scaleEffect(appeared ? 1 : 0.92)
+            .opacity(appeared ? 1 : 0)
+            .onAppear {
+                withAnimation(.spring(response: 0.3, dampingFraction: 0.74)) {
+                    appeared = true
+                }
+            }
+    }
+}
+
 private struct ClipboardDetailCard: View {
     let entry: ClipboardEntry
     let imageURL: URL?
@@ -989,28 +1008,18 @@ private enum ClipboardDetailLayout {
             .replacingOccurrences(of: "\r", with: " ")
         let singleLine = ceil((flattened as NSString).size(withAttributes: [.font: font]).width)
 
-        var content: CGFloat
-        if singleLine <= cap {
-            // Fits on one line — the card only needs to be that wide.
-            content = singleLine
-        } else {
-            // Spread the text across the fewest lines that keep each at or below
-            // the cap, then even them out so the last line is not a lonely tail.
-            let lines = ceil(singleLine / cap)
-            content = ceil(singleLine / lines)
-        }
-
         // A hard-wrapped source line that already fits should not be re-wrapped
         // narrower than it is, otherwise its own newlines would fragment it.
         let hardLines = text.components(separatedBy: .newlines)
-        if hardLines.count > 1 {
-            let longestHardLine = hardLines
-                .map { ceil(($0 as NSString).size(withAttributes: [.font: font]).width) }
-                .max() ?? 0
-            content = max(content, min(longestHardLine, cap))
-        }
-
-        content = min(cap, content)
+        let longestHardLine = hardLines
+            .map { ceil(($0 as NSString).size(withAttributes: [.font: font]).width) }
+            .max() ?? 0
+        let content = ClipboardPanelLayout.balancedPreviewContentWidth(
+            singleLineWidth: singleLine,
+            cap: cap,
+            longestHardLineWidth: longestHardLine,
+            hasHardBreaks: hardLines.count > 1
+        )
         let desired = max(metadataMinimumWidth, content + horizontalPadding * 2)
         return clampToScreen(min(maximumWidth, desired))
     }
@@ -1070,7 +1079,6 @@ struct ClipboardHistoryPanelView: View {
 
                 detailCard
                     .offset(x: detailCardXOffset, y: detailPresentation.detailTopOffset)
-                    .transition(.opacity.combined(with: .scale(scale: 0.985)))
             }
             .frame(width: proxy.size.width, height: proxy.size.height, alignment: .topLeading)
         }
@@ -1159,6 +1167,10 @@ struct ClipboardHistoryPanelView: View {
                 height: detailPresentation.cardSize.height,
                 alignment: .topLeading
             )
+            // A fresh hover inserts this subtree, so the pop plays only when the
+            // preview first appears — not while the pointer moves between rows
+            // and the same card is merely re-sized in place.
+            .modifier(DetailCardPopIn())
         }
     }
 
@@ -1418,7 +1430,7 @@ private struct TextEntryRow: View {
     var body: some View {
         HStack(spacing: 6) {
             Text(entry.previewText.replacingOccurrences(of: "\n", with: " "))
-                .font(.system(size: 13))
+                .font(.system(size: 12))
                 .lineLimit(1)
                 .foregroundStyle(isSelected ? Color.white : Color.primary)
             Spacer(minLength: 0)
