@@ -160,6 +160,17 @@ public final class ClipboardHistoryStore: ObservableObject {
         ClipboardHistorySnapshot(entries: entries, settings: settings)
     }
 
+    /// Appends first-run guidance entries the caller has already ordered and
+    /// timestamped, then persists. Only first-install seeding uses this; it is
+    /// deliberately separate from `addText`, which timestamps with `.now` and
+    /// merges consecutive duplicates.
+    public func addSeedEntries(_ seedEntries: [ClipboardEntry]) {
+        guard !seedEntries.isEmpty else { return }
+        entries.append(contentsOf: seedEntries)
+        trimToLimit()
+        persist()
+    }
+
     /// Archive import deliberately reuses the ordinary storage path so imported
     /// image assets are re-hashed and never overwrite an existing clipboard file.
     public func importArchive(_ snapshot: ClipboardHistorySnapshot, imagesURL: URL) {

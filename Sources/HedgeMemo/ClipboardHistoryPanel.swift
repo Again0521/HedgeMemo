@@ -1396,8 +1396,8 @@ struct ClipboardHistoryPanelView: View {
     private func handleKey(_ event: NSEvent) -> Bool {
         let flags = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
         if flags.contains(.command), let number = Int(event.charactersIgnoringModifiers ?? ""), (1...9).contains(number) {
-            if store.copyPinned(number: number, autoPaste: store.settings.autoPaste) {
-                onDone()
+            if number <= entries.count {
+                copy(entries[number - 1])
             }
             return true
         }
@@ -1757,6 +1757,13 @@ private struct KeyCaptureView: NSViewRepresentable {
                       window.isVisible else {
                     return event
                 }
+                // While an input method is composing (the search field's field
+                // editor holds marked text), every keystroke belongs to the IME:
+                // Delete edits the in-progress reading, arrows move the candidate
+                // list, Return/Escape commit or cancel. Intercepting any of these
+                // would strand a composition the user cannot finish or erase, so
+                // pass them straight through to the input context.
+                if window.hasMarkedTextInFieldEditor { return event }
                 return self.onKey?(event) == true ? nil : event
             }
         }
@@ -1767,5 +1774,15 @@ private struct KeyCaptureView: NSViewRepresentable {
                 self.keyEventMonitor = nil
             }
         }
+    }
+}
+
+private extension NSWindow {
+    /// True while an input method is composing marked (underlined) text in the
+    /// window's field editor — the transient state before a reading commits.
+    /// Editing a focused text field makes that field editor (an `NSTextView`)
+    /// the first responder, so its `hasMarkedText()` is the authoritative signal.
+    var hasMarkedTextInFieldEditor: Bool {
+        (firstResponder as? NSTextView)?.hasMarkedText() ?? false
     }
 }

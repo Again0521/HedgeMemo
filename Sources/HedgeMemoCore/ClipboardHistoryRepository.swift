@@ -21,6 +21,12 @@ public final class ClipboardHistoryRepository: @unchecked Sendable {
         try fileManager.createDirectory(at: imagesURL, withIntermediateDirectories: true)
     }
 
+    /// True once history has ever been written. Used to tell a fresh install
+    /// (no snapshot yet) from an update by a user who already has clipboard data.
+    public var hasPersistedHistory: Bool {
+        fileManager.fileExists(atPath: snapshotURL.path)
+    }
+
     public func load() throws -> ClipboardHistorySnapshot {
         try prepare()
         guard fileManager.fileExists(atPath: snapshotURL.path) else { return ClipboardHistorySnapshot() }

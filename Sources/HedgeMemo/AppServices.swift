@@ -34,6 +34,9 @@ final class AppServices: ObservableObject {
         guard !didStart else { return }
         didStart = true
         if !CommandLine.arguments.contains(where: { $0.hasPrefix("--preview-") }) {
+            // Seed first-run content before monitoring writes any history, so the
+            // fresh-install check sees a genuinely empty state.
+            OnboardingSeeder.seedIfFreshInstall(memeStore: memeStore, clipboardStore: clipboardStore)
             clipboardStore.startMonitoring()
         }
 

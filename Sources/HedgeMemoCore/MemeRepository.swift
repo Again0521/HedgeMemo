@@ -33,6 +33,12 @@ public final class MemeRepository: @unchecked Sendable {
         try fileManager.createDirectory(at: imagesURL, withIntermediateDirectories: true)
     }
 
+    /// True once a library has ever been written. Used to tell a fresh install
+    /// (no snapshot yet) from an update by a user who already has memes.
+    public var hasPersistedLibrary: Bool {
+        fileManager.fileExists(atPath: snapshotURL.path)
+    }
+
     public func load() throws -> MemeSnapshot {
         try prepare()
         guard fileManager.fileExists(atPath: snapshotURL.path) else { return MemeSnapshot() }

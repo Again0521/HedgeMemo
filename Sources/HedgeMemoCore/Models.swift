@@ -194,12 +194,58 @@ public enum ClipboardCodeDetector {
 
     private static let operators = ["=>", "->", "::", "&&", "||", "==", "!=", ">=", "<=", "+=", "??"]
 
+    /// Common English function words. A run of ordinary prose is dense with
+    /// these; source code almost never is. Deliberately excludes words that
+    /// double as code keywords (`return`, `class`, `public`, `where`, …) so a
+    /// real statement isn't mistaken for prose.
+    private static let proseWords: Set<String> = [
+        "the", "a", "an", "and", "or", "but", "is", "are", "was", "were", "be", "been",
+        "to", "of", "in", "on", "at", "for", "with", "from", "by", "as", "this", "these",
+        "those", "it", "its", "you", "your", "we", "our", "they", "their", "he", "she",
+        "his", "her", "i", "me", "my", "not", "no", "yes", "if", "so", "because", "about",
+        "into", "over", "after", "before", "when", "while", "who", "how", "why", "can",
+        "could", "will", "would", "should", "may", "might", "must", "do", "does", "did",
+        "have", "has", "had", "please", "thanks", "thank", "just", "also", "only", "very",
+        "really", "more", "most", "some", "any", "all", "every", "one", "two", "get",
+        "make", "use", "like", "want", "need", "see", "know", "think", "time", "people",
+        "way", "here", "there", "out", "up", "down", "them", "then", "than",
+    ]
+
     public static func isCode(_ raw: String) -> Bool {
         let text = raw.trimmingCharacters(in: .whitespacesAndNewlines)
         guard text.count >= 6 else { return false }
         guard !isLikelyLink(text) else { return false }
         guard cjkRatio(text) <= 0.3 else { return false }
+        // Natural-language English can incidentally trip keyword ("return",
+        // "public", "where") and parenthesis signals. Unless the text also
+        // carries a genuine structural code marker, treat clear prose as prose.
+        if proseWordCount(text) >= 3, !hasStrongCodeStructure(text) { return false }
         return score(text) >= 3
+    }
+
+    /// Number of distinct common English function words present as whole words.
+    private static func proseWordCount(_ text: String) -> Int {
+        let tokens = text.lowercased().split { !$0.isLetter }.map(String.init)
+        var seen = Set<String>()
+        for token in tokens where proseWords.contains(token) { seen.insert(token) }
+        return seen.count
+    }
+
+    /// Structural markers that prose effectively never produces: statement
+    /// terminators/braces, code operators, comments, bracket or brace pairs, a
+    /// space-less function call (`name(`), or a high symbol density.
+    private static func hasStrongCodeStructure(_ text: String) -> Bool {
+        let lines = text.components(separatedBy: .newlines)
+        if lines.contains(where: { line in
+            let trimmed = line.trimmingCharacters(in: .whitespaces)
+            return trimmed.hasSuffix(";") || trimmed.hasSuffix("{") || trimmed.hasSuffix("}") || trimmed.hasSuffix("):")
+        }) { return true }
+        if operators.contains(where: { text.contains($0) }) { return true }
+        if text.contains("//") || text.contains("/*") || text.contains("#!") { return true }
+        if text.contains("{") && text.contains("}") { return true }
+        if text.contains("[") && text.contains("]") { return true }
+        if text.range(of: "[A-Za-z_][A-Za-z0-9_]*\\(", options: .regularExpression) != nil { return true }
+        return symbolRatio(text) > 0.12
     }
 
     private static func score(_ text: String) -> Int {

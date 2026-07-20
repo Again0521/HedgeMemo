@@ -159,11 +159,12 @@ enum ArchiveImportSelectionPanel {
 private enum ArchiveSelectionMetrics {
     static func size(rowCount: Int) -> NSSize {
         // Size the window from the rows it actually presents.  The header and
-        // footer need about 164 points together; every category adds one native
-        // control row.  This keeps a small import/export sheet compact while
-        // a long list still scrolls rather than growing beyond the screen.
+        // footer need about 180 points together (the header clears the title-bar
+        // controls); every category adds one native control row.  This keeps a
+        // small import/export sheet compact while a long list still scrolls
+        // rather than growing beyond the screen.
         let visibleRows = max(1, rowCount)
-        let height = min(540, max(276, 164 + CGFloat(visibleRows) * 30))
+        let height = min(540, max(292, 180 + CGFloat(visibleRows) * 30))
         return NSSize(width: 468, height: height)
     }
 }
@@ -215,7 +216,10 @@ private struct ArchiveSelectionView: View {
                     .foregroundStyle(.secondary)
             }
             .padding(.horizontal, 20)
-            .padding(.top, 18)
+            // The window uses a full-size content view under a transparent title
+            // bar, so the header must clear the traffic-light controls rather
+            // than crowd up against the very top edge.
+            .padding(.top, 34)
             .padding(.bottom, 14)
 
             if memeCategories.isEmpty && clipboardKeys.isEmpty && !includeUncategorizedMemes {

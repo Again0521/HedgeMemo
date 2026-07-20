@@ -50,6 +50,19 @@ strip -x "$APP_BINARY"
 cp -X "$ROOT_DIR/Sources/HedgeMemo/Resources/Hedgehog.png" "$APP_RESOURCES/Hedgehog.png"
 cp -X "$ROOT_DIR/Sources/HedgeMemo/Resources/Hedgehog.svg" "$APP_RESOURCES/Hedgehog.svg"
 
+# First-run sample memes. Each sample may be supplied in any common image
+# format; copy whichever extension is present. A missing sample is simply
+# skipped at seeding time.
+for meme_index in 1 2 3; do
+  for meme_ext in png jpg jpeg gif; do
+    meme_src="$ROOT_DIR/Sources/HedgeMemo/Resources/DefaultMeme${meme_index}.${meme_ext}"
+    if [[ -f "$meme_src" ]]; then
+      cp -X "$meme_src" "$APP_RESOURCES/DefaultMeme${meme_index}.${meme_ext}"
+      break
+    fi
+  done
+done
+
 if [[ -f "$ROOT_DIR/Assets/AppIcon.icns" ]]; then
   cp -X "$ROOT_DIR/Assets/AppIcon.icns" "$APP_RESOURCES/AppIcon.icns"
 fi

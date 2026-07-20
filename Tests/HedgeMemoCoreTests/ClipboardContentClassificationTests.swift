@@ -38,6 +38,31 @@ final class ClipboardContentClassificationTests: XCTestCase {
         XCTAssertFalse(ClipboardCodeDetector.isCode("如果 { 今天下午我们要开一个很长很长的会议讨论所有的事情 }"))
     }
 
+    func testLongEnglishProseWithKeywordsIsNotCode() {
+        // Trips "return"/"where"/"update" keywords and a parenthesis, but reads
+        // as plain English — must not be classified as code.
+        XCTAssertFalse(ClipboardCodeDetector.isCode(
+            "Please return the package (the large one) to the front desk where you can update the records."
+        ))
+        XCTAssertFalse(ClipboardCodeDetector.isCode(
+            "The class was great and I want to return to it, so please let me know when the next one is."
+        ))
+        XCTAssertFalse(ClipboardCodeDetector.isCode(
+            "We are writing to confirm that your interface with the public records office has been updated."
+        ))
+    }
+
+    func testCodeWithEnglishWordsButRealStructureIsStillCode() {
+        // English words appear, but the structural markers are unmistakable.
+        XCTAssertTrue(ClipboardCodeDetector.isCode("if (user.isActive) { return user.name; }"))
+        XCTAssertTrue(ClipboardCodeDetector.isCode(
+            """
+            // return the total for the current user
+            func total(for user: User) -> Int { user.items.count }
+            """
+        ))
+    }
+
     // MARK: - Link detection
 
     func testCommonSchemesAndDomainsAreLinks() {

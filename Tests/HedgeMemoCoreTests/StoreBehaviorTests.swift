@@ -60,6 +60,37 @@ final class StoreBehaviorTests: XCTestCase {
         XCTAssertEqual(try? Data(contentsOf: store.imageURL(for: gif)), Fixture.gifBytes)
     }
 
+    func testBundledSampleMemesLoadSeedInOrderAndDedup() throws {
+        // Repo root is three levels up from Tests/HedgeMemoCoreTests/<thisFile>.
+        let resources = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .appendingPathComponent("Sources/HedgeMemo/Resources")
+        // Samples may be provided in any common format, matching the seeder.
+        let extensions = ["png", "jpg", "jpeg", "gif"]
+        let urls = try ["DefaultMeme1", "DefaultMeme2", "DefaultMeme3"].map { name -> URL in
+            let url = extensions
+                .map { resources.appendingPathComponent("\(name).\($0)") }
+                .first { FileManager.default.fileExists(atPath: $0.path) }
+            return try XCTUnwrap(url, "\(name).* must be present to bundle")
+        }
+
+        let store = makeMemeStore()
+        for url in urls {
+            let payload = try XCTUnwrap(ImageAssetData(fileURL: url))
+            XCTAssertTrue(store.addImageData(payload))
+        }
+        XCTAssertEqual(store.filteredMemes(query: "").count, 3, "all three samples seed")
+
+        // Re-seeding the identical files must not duplicate them.
+        for url in urls {
+            let payload = try XCTUnwrap(ImageAssetData(fileURL: url))
+            XCTAssertFalse(store.addImageData(payload))
+        }
+        XCTAssertEqual(store.filteredMemes(query: "").count, 3)
+    }
+
     func testMovingAMemeAdoptsTheTargetCategory() {
         let store = makeMemeStore()
         XCTAssertTrue(store.addImage(Fixture.solidImage(0.2, size: 6), note: "图"))
@@ -116,6 +147,45 @@ final class StoreBehaviorTests: XCTestCase {
             store.addImageData(payload, sourceApp: "HedgeMemo", origin: .hedgeMemoScreenshot),
             "a disabled category records nothing further"
         )
+    }
+
+    func testSeedEntriesAppendInGivenOrderNewestFirst() {
+        let store = makeClipboardStore()
+        let now = Date()
+        let lines = ["第一条", "第二条", "第三条"]
+        let seeds = lines.enumerated().map { index, line in
+            ClipboardEntry(
+                kind: .text,
+                text: line,
+                contentHash: "seed\(index)",
+                createdAt: now.addingTimeInterval(-Double(index))
+            )
+        }
+        store.addSeedEntries(seeds)
+        // Index 0 has the latest timestamp, so it sorts to the top.
+        XCTAssertEqual(store.orderedEntries().compactMap(\.text), lines)
+    }
+
+    func testEmptySeedIsANoOp() {
+        let store = makeClipboardStore()
+        store.addSeedEntries([])
+        XCTAssertTrue(store.entries.isEmpty)
+    }
+
+    func testRepositoriesReportPersistenceOnlyAfterFirstWrite() {
+        let clipRepo = ClipboardHistoryRepository(rootURL: tempRoot("clip-flag"))
+        XCTAssertFalse(clipRepo.hasPersistedHistory, "a fresh install has no snapshot yet")
+        let clipStore = ClipboardHistoryStore(repository: clipRepo)
+        XCTAssertFalse(clipRepo.hasPersistedHistory, "loading an empty store must not write a snapshot")
+        XCTAssertTrue(clipStore.addText("首次内容"))
+        XCTAssertTrue(clipRepo.hasPersistedHistory, "the first write marks the store as used")
+
+        let memeRepo = MemeRepository(rootURL: tempRoot("meme-flag"))
+        XCTAssertFalse(memeRepo.hasPersistedLibrary)
+        let memeStore = MemeStore(repository: memeRepo)
+        XCTAssertFalse(memeRepo.hasPersistedLibrary)
+        XCTAssertTrue(memeStore.addImage(Fixture.solidImage(0.3, size: 6), note: "图"))
+        XCTAssertTrue(memeRepo.hasPersistedLibrary)
     }
 
     func testDeleteAndClearHistory() {
