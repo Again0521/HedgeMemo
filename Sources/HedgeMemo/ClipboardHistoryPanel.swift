@@ -1073,6 +1073,7 @@ struct ClipboardHistoryPanelView: View {
     @State private var keyboardSelectedID: UUID?
     @State private var keyboardSelection = false
     @State private var hoverPreviewDelay = ClipboardHoverPreviewDelay()
+    @State private var pendingCommandCopyID: UUID?
 
     fileprivate init(
         store: ClipboardHistoryStore,
@@ -1395,12 +1396,34 @@ struct ClipboardHistoryPanelView: View {
 
     private func handleKey(_ event: NSEvent) -> Bool {
         let flags = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
-        if flags.contains(.command), let number = Int(event.charactersIgnoringModifiers ?? ""), (1...9).contains(number) {
-            if number <= entries.count {
-                copy(entries[number - 1])
+
+        if event.type == .flagsChanged {
+            if !flags.contains(.command), let copyID = pendingCommandCopyID {
+                pendingCommandCopyID = nil
+                if let entry = entries.first(where: { $0.id == copyID }) {
+                    copy(entry)
+                }
+                return true
             }
+            return false
+        }
+
+        if flags.contains(.command), let number = Int(event.charactersIgnoringModifiers ?? ""), (1...9).contains(number) {
+            guard number <= entries.count else { return true }
+            let entry = entries[number - 1]
+            if event.type == .keyDown {
+                keyboardSelectedID = entry.id
+                hoveredID = nil
+                pendingCommandCopyID = entry.id
+            }
+            // Consume keyUp or other events for this shortcut so it doesn't trigger system beep
             return true
         }
+
+        // Other shortcuts should only trigger on keyDown
+        guard event.type == .keyDown else { return false }
+
+
         if flags.contains(.command), event.charactersIgnoringModifiers?.lowercased() == "p", let selectedID = activeSelectionID {
             store.togglePinned(id: selectedID)
             return true
@@ -1415,6 +1438,10 @@ struct ClipboardHistoryPanelView: View {
         let columns = (activeKey == .builtin(.image) || activeKey == .builtin(.screenshot))
             ? ClipboardPanelLayout.imageColumns
             : 1
+            
+        // Clear pending copy if user performs any other keyboard navigation
+        pendingCommandCopyID = nil
+        
         switch event.keyCode {
         case 36, 76:
             guard let entry = entries.first(where: { $0.id == activeSelectionID }) else { return true }
@@ -1744,13 +1771,23 @@ private struct KeyCaptureView: NSViewRepresentable {
             super.keyDown(with: event)
         }
 
+        override func keyUp(with event: NSEvent) {
+            if onKey?(event) == true { return }
+            super.keyUp(with: event)
+        }
+
+        override func flagsChanged(with event: NSEvent) {
+            if onKey?(event) == true { return }
+            super.flagsChanged(with: event)
+        }
+
         /// Keep command/navigation routing in the panel even while the search
         /// field is first responder.  Limiting the monitor to this exact
         /// window is important: the app's global hotkeys and every other
         /// window retain their normal responder-chain behavior.
         private func installKeyEventMonitor() {
             guard keyEventMonitor == nil, window != nil else { return }
-            keyEventMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
+            keyEventMonitor = NSEvent.addLocalMonitorForEvents(matching: [.keyDown, .keyUp, .flagsChanged]) { [weak self] event in
                 guard let self,
                       let window = self.window,
                       event.window === window,
