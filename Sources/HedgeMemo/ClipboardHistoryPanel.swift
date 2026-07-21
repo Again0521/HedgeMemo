@@ -1274,12 +1274,14 @@ struct ClipboardHistoryPanelView: View {
                 alignment: .leading,
                 spacing: ClipboardPanelLayout.imageCellSpacing
             ) {
-                ForEach(entries) { entry in
+                ForEach(Array(entries.enumerated()), id: \.element.id) { index, entry in
                     ImageEntryCell(
                         entry: entry,
+                        index: index,
                         imageURL: store.imageURL(for: entry),
                         isSelected: activeSelectionID == entry.id,
-                        onTogglePin: { onTogglePin(entry) }
+                        onTogglePin: { onTogglePin(entry) },
+                        onToggleClipboardPin: { store.togglePinned(id: entry.id) }
                     )
                     .id(entry.id)
                     .onTapGesture { copy(entry) }
@@ -1296,15 +1298,19 @@ struct ClipboardHistoryPanelView: View {
                         if activeKey == .builtin(.code) {
                             CodeEntryRow(
                                 entry: entry,
+                                index: index,
                                 isSelected: activeSelectionID == entry.id,
                                 codeHighlightTheme: store.settings.resolvedCodeHighlightTheme,
-                                onTogglePin: { onTogglePin(entry) }
+                                onTogglePin: { onTogglePin(entry) },
+                                onToggleClipboardPin: { store.togglePinned(id: entry.id) }
                             )
                         } else {
                             TextEntryRow(
                                 entry: entry,
+                                index: index,
                                 isSelected: activeSelectionID == entry.id,
-                                onTogglePin: { onTogglePin(entry) }
+                                onTogglePin: { onTogglePin(entry) },
+                                onToggleClipboardPin: { store.togglePinned(id: entry.id) }
                             )
                         }
                         if activeKey == .builtin(.code), index < entries.count - 1 {
@@ -1499,8 +1505,10 @@ struct ClipboardHistoryPanelView: View {
 
 private struct TextEntryRow: View {
     let entry: ClipboardEntry
+    let index: Int?
     let isSelected: Bool
     let onTogglePin: () -> Void
+    let onToggleClipboardPin: () -> Void
 
     @State private var isHovered = false
 
@@ -1511,11 +1519,24 @@ private struct TextEntryRow: View {
                 .lineLimit(1)
                 .foregroundStyle(isSelected ? Color.white : Color.primary)
             Spacer(minLength: 0)
+            if isSelected {
+                Button(action: onToggleClipboardPin) {
+                    Image(systemName: entry.isPinned ? "pin.fill" : "pin")
+                        .font(.system(size: 10, weight: .medium))
+                        .frame(width: 18, height: 18)
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .foregroundStyle(.white)
+                .help(entry.isPinned ? "取消剪切板内固定" : "固定到剪切板")
+            } else if let index, index < 9 {
+                Text("⌘ \(index + 1)")
+                    .font(.system(size: 11).monospacedDigit())
+                    .foregroundStyle(entry.isPinned ? Color.primary : Color.secondary)
+                    .frame(width: 28, alignment: .trailing)
+            }
             if isSelected || isHovered || entry.isDesktopPinned == true {
                 ClipboardPinButton(entry: entry, isSelected: isSelected, action: onTogglePin)
-            }
-            if entry.isPinned && !isSelected {
-                ClipboardHistoryPinIcon()
             }
         }
         .padding(.horizontal, 10)
@@ -1535,9 +1556,11 @@ private struct TextEntryRow: View {
 
 private struct CodeEntryRow: View {
     let entry: ClipboardEntry
+    let index: Int?
     let isSelected: Bool
     let codeHighlightTheme: CodeHighlightTheme
     let onTogglePin: () -> Void
+    let onToggleClipboardPin: () -> Void
 
     @State private var isHovered = false
 
@@ -1551,11 +1574,24 @@ private struct CodeEntryRow: View {
                 .lineSpacing(1)
                 .foregroundStyle(isSelected ? Color.white : Color.primary)
             Spacer(minLength: 0)
+            if isSelected {
+                Button(action: onToggleClipboardPin) {
+                    Image(systemName: entry.isPinned ? "pin.fill" : "pin")
+                        .font(.system(size: 10, weight: .medium))
+                        .frame(width: 18, height: 18)
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .foregroundStyle(.white)
+                .help(entry.isPinned ? "取消剪切板内固定" : "固定到剪切板")
+            } else if let index, index < 9 {
+                Text("⌘ \(index + 1)")
+                    .font(.system(size: 11).monospacedDigit())
+                    .foregroundStyle(entry.isPinned ? Color.primary : Color.secondary)
+                    .frame(width: 28, alignment: .trailing)
+            }
             if isSelected || isHovered || entry.isDesktopPinned == true {
                 ClipboardPinButton(entry: entry, isSelected: isSelected, action: onTogglePin)
-            }
-            if entry.isPinned && !isSelected {
-                ClipboardHistoryPinIcon()
             }
         }
         .padding(.horizontal, 10)
@@ -1575,9 +1611,11 @@ private struct CodeEntryRow: View {
 
 private struct ImageEntryCell: View {
     let entry: ClipboardEntry
+    let index: Int?
     let imageURL: URL?
     let isSelected: Bool
     let onTogglePin: () -> Void
+    let onToggleClipboardPin: () -> Void
 
     @State private var isHovered = false
 
@@ -1599,17 +1637,33 @@ private struct ImageEntryCell: View {
         }
         .frame(width: side, height: side)
         .overlay(alignment: .topTrailing) {
-            if isSelected || isHovered || entry.isDesktopPinned == true {
-                ClipboardPinButton(entry: entry, isSelected: true, action: onTogglePin)
+            HStack(spacing: 4) {
+                if isSelected {
+                    Button(action: onToggleClipboardPin) {
+                        Image(systemName: entry.isPinned ? "pin.fill" : "pin")
+                            .font(.system(size: 10, weight: .medium))
+                            .frame(width: 18, height: 18)
+                            .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+                    .foregroundStyle(.white)
                     .background(Circle().fill(.black.opacity(0.4)))
-                    .padding(4)
+                    .help(entry.isPinned ? "取消剪切板内固定" : "固定到剪切板")
+                } else if let index, index < 9 {
+                    Text("⌘ \(index + 1)")
+                        .font(.system(size: 10, weight: .medium).monospacedDigit())
+                        .foregroundStyle(entry.isPinned ? Color.primary : Color.white)
+                        .padding(.horizontal, 4)
+                        .padding(.vertical, 2)
+                        .frame(minWidth: 28)
+                        .background(RoundedRectangle(cornerRadius: 4, style: .continuous).fill(.black.opacity(0.5)))
+                }
+                if isSelected || isHovered || entry.isDesktopPinned == true {
+                    ClipboardPinButton(entry: entry, isSelected: true, action: onTogglePin)
+                        .background(Circle().fill(.black.opacity(0.4)))
+                }
             }
-        }
-        .overlay(alignment: .bottomTrailing) {
-            if entry.isPinned && !isSelected {
-                ClipboardHistoryPinIcon()
-                    .padding(3)
-            }
+            .padding(4)
         }
         .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
         .overlay {
@@ -1641,19 +1695,7 @@ private struct ClipboardPinButton: View {
     }
 }
 
-/// The clipboard-order pin is intentionally non-interactive and lives at the
-/// final trailing edge of every unselected text/code row. It disappears under
-/// the blue selection highlight so the selected-row affordances stay clean.
-private struct ClipboardHistoryPinIcon: View {
-    var body: some View {
-        Image(systemName: "pin.fill")
-            .font(.system(size: 8, weight: .semibold))
-            .foregroundStyle(Color.secondary)
-            .frame(width: 18, height: 18)
-            .help("剪贴板内置顶")
-            .accessibilityLabel("剪贴板内置顶")
-    }
-}
+
 
 /// AppKit-backed row tracking for the non-activating clipboard panel.
 /// SwiftUI's `onHover` can miss an enter transition on macOS 26 when a hosted

@@ -10,7 +10,7 @@ private enum SettingsLayout {
 }
 
 private enum AppVersion {
-    static let display = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "1.0.0"
+    static let display = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "1.0.5"
 }
 
 /// Hosts the settings UI in a standalone translucent panel, opened from the status bar menu.
