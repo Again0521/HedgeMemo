@@ -78,6 +78,10 @@ private final class ClipboardDetailPresentation: ObservableObject {
     }
 
     func hide() {
+        // Publishing an unchanged `.hidden` re-rendered the entire panel on
+        // every hover exit (each row exit schedules a close); only publish a
+        // real visible → hidden transition.
+        guard state.entry != nil else { return }
         state = .hidden
     }
 }
@@ -373,6 +377,13 @@ final class ClipboardHistoryPanelController: NSObject, NSWindowDelegate {
             return
         }
         hideDetail()
+        // Content-height reports arrive on every selection/query change; when
+        // nothing actually moves, skip the window commit — a same-frame
+        // `setFrame` still forces a full glass redraw.
+        if framesMatch(frame, panel.frame) {
+            mainScreenFrame = frame
+            return
+        }
         // Native NSWindow frame animation and a hosted NSGlassEffectView do
         // not share one layout transaction.  Rendering the interpolated frame
         // was the source of the occasional compressed, horizontal-strip panel.
@@ -506,9 +517,15 @@ final class ClipboardHistoryPanelController: NSObject, NSWindowDelegate {
 
     private func hideDetail() {
         detailEntryID = nil
+        let wasVisible = detailPresentation.isVisible
         detailPresentation.hide()
-        guard panel != nil, !mainScreenFrame.isEmpty else { return }
-        setPanelFrame(mainScreenFrame)
+        // Hover exits schedule a close even when no preview ever opened; doing
+        // a same-frame `setFrame` (and its full glass redraw) on each of those
+        // is what made the row highlight lag behind the pointer.
+        guard wasVisible, let panel, !mainScreenFrame.isEmpty else { return }
+        if !framesMatch(panel.frame, mainScreenFrame) {
+            setPanelFrame(mainScreenFrame)
+        }
     }
 
     // MARK: - Click-outside dismissal
@@ -737,15 +754,29 @@ private struct DetailCardPopIn: ViewModifier {
 /// The footer shortcut hint. Kept in one place so the rendered string and the
 /// width the layout reserves for it can never drift apart.
 private enum ClipboardShortcutHint {
-    static func text(isPinned: Bool, isDesktopPinned: Bool) -> String {
+    /// Copying still works via Return — this hint just no longer advertises it,
+    /// since the footer only has room for one entry-point shortcut and editing
+    /// is the one worth surfacing. "编辑" only applies to text-kind entries
+    /// (images have no editable text body), so it is omitted for images rather
+    /// than shown as a dead shortcut.
+    static func text(kind: ClipboardEntryKind, isPinned: Bool, isDesktopPinned: Bool) -> String {
         let pin = isPinned ? "取消置顶" : "置顶"
         let desktop = isDesktopPinned ? "取消固定" : "固定桌面"
-        return "复制：⏎ ｜ 删除：⌫ ｜ \(pin)：⌘P ｜ \(desktop)：⌥P"
+        var segments = [String]()
+        if kind == .text { segments.append("编辑：⌘E") }
+        segments.append("删除：⌫")
+        segments.append("\(pin)：⌘P")
+        segments.append("\(desktop)：⌥P")
+        return segments.joined(separator: " ｜ ")
     }
 
-    /// The widest variant (both actions in their longer "cancel" wording); the
-    /// card minimum width is sized to this so the hint never truncates.
-    static var widest: String { text(isPinned: true, isDesktopPinned: true) }
+    /// Shown instead of the normal hint line while editing.
+    static let editing = "按 ⌘S 保存并退出"
+
+    /// The widest variant (a text entry, both toggles in their longer "cancel"
+    /// wording); the card minimum width is sized to this so the hint never
+    /// truncates. `editing` is always shorter, so it needs no floor of its own.
+    static var widest: String { text(kind: .text, isPinned: true, isDesktopPinned: true) }
 
     /// Matches the footer `Text`'s `.font(.system(size: 10))`, for measurement.
     static var font: NSFont { .systemFont(ofSize: 10) }
@@ -756,6 +787,10 @@ private struct ClipboardDetailCard: View {
     let imageURL: URL?
     let cardSize: NSSize
     let codeHighlightTheme: CodeHighlightTheme
+    let isEditing: Bool
+    @Binding var editText: String
+
+    @FocusState private var isEditorFocused: Bool
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
@@ -771,18 +806,71 @@ private struct ClipboardDetailCard: View {
             // Shortcut hints share one line in a "动作：按键" format, the actions
             // separated by " ｜ ". The card min width reserves room for this line
             // so it never truncates.
-            Text(ClipboardShortcutHint.text(isPinned: entry.isPinned, isDesktopPinned: entry.isDesktopPinned == true))
-                .font(.system(size: 10))
-                .foregroundStyle(.secondary)
-                .lineLimit(1)
+            Text(
+                isEditing
+                    ? ClipboardShortcutHint.editing
+                    : ClipboardShortcutHint.text(kind: entry.kind, isPinned: entry.isPinned, isDesktopPinned: entry.isDesktopPinned == true)
+            )
+            .font(.system(size: 10))
+            .foregroundStyle(.secondary)
+            .lineLimit(1)
         }
         .padding(12)
         .frame(width: cardSize.width, height: cardSize.height, alignment: .topLeading)
+        // Covers both routes into edit mode: a fresh detail card that already
+        // starts out editing (⌘E forced the preview open) and an existing,
+        // already-visible card that transitions into editing in place.
+        .onAppear {
+            guard isEditing else { return }
+            DispatchQueue.main.async { isEditorFocused = true }
+        }
+        .onChange(of: isEditing) { _, editing in
+            guard editing else { return }
+            DispatchQueue.main.async { isEditorFocused = true }
+        }
     }
 
     @ViewBuilder
     private var preview: some View {
-        if entry.kind == .image, let imageURL {
+        if isEditing, entry.contentCategory == .code {
+            // Code keeps syntax highlighting while editing and offers inline
+            // keyword completion (Tab to accept).
+            CodeTextEditor(
+                text: $editText,
+                theme: codeHighlightTheme,
+                font: .monospacedSystemFont(ofSize: 11, weight: .regular)
+            )
+            .padding(6)
+            .background(
+                RoundedRectangle(cornerRadius: 6, style: .continuous)
+                    .fill(Color.primary.opacity(0.05))
+            )
+            .overlay(
+                RoundedRectangle(cornerRadius: 6, style: .continuous)
+                    .strokeBorder(Color.accentColor.opacity(0.4), lineWidth: 1)
+            )
+            .frame(height: ClipboardDetailLayout.previewAreaHeight(cardHeight: cardSize.height))
+        } else if isEditing, entry.kind == .text {
+            // A real TextEditor rather than a Text: typing, selection, cut/copy/
+            // paste, undo and arrow-key navigation all come for free from
+            // AppKit's text system. Its own scrolling handles content that
+            // outgrows the fixed card height — a read-only preview never needs
+            // that, since it never grows once it's on screen.
+            TextEditor(text: $editText)
+                .font(.system(size: 12))
+                .scrollContentBackground(.hidden)
+                .padding(6)
+                .background(
+                    RoundedRectangle(cornerRadius: 6, style: .continuous)
+                        .fill(Color.primary.opacity(0.05))
+                )
+                .overlay(
+                    RoundedRectangle(cornerRadius: 6, style: .continuous)
+                        .strokeBorder(Color.accentColor.opacity(0.4), lineWidth: 1)
+                )
+                .frame(height: ClipboardDetailLayout.previewAreaHeight(cardHeight: cardSize.height))
+                .focused($isEditorFocused)
+        } else if entry.kind == .image, let imageURL {
             AnimatedImageFileView(url: imageURL)
                 .frame(maxWidth: .infinity)
                 .frame(height: ClipboardDetailLayout.previewAreaHeight(cardHeight: cardSize.height))
@@ -856,9 +944,23 @@ private struct SourceApplicationLabel: View {
     }
 }
 
+@MainActor
 private enum SourceApplicationIcon {
+    /// Resolving an icon scans every running app and can touch the filesystem.
+    /// Hovering the same handful of source apps repeatedly would redo that work
+    /// on each preview, so memoize per name (including the "not found" result,
+    /// stored as NSNull) for the session.
+    private static var cache: [String: NSImage?] = [:]
+
     static func image(named name: String?) -> NSImage? {
         guard let name, !name.isEmpty else { return nil }
+        if let cached = cache[name] { return cached }
+        let resolved = resolve(name: name)
+        cache[name] = resolved
+        return resolved
+    }
+
+    private static func resolve(name: String) -> NSImage? {
         if let app = NSWorkspace.shared.runningApplications.first(where: { $0.localizedName == name }),
            let bundleURL = app.bundleURL {
             return NSWorkspace.shared.icon(forFile: bundleURL.path)
@@ -974,10 +1076,7 @@ private enum ClipboardDetailLayout {
         maximumHeight: CGFloat
     ) -> CGFloat {
         let contentWidth = cardWidth - horizontalPadding * 2
-        if entry.kind == .image, let imageURL, let image = NSImage(contentsOf: imageURL) {
-            let size = image.representations.first.map {
-                NSSize(width: $0.pixelsWide, height: $0.pixelsHigh)
-            } ?? image.size
+        if entry.kind == .image, let imageURL, let size = imagePixelSize(of: imageURL) {
             guard size.width > 0, size.height > 0 else { return 140 }
             return min(maximumHeight, max(minimumPreviewHeight, contentWidth * size.height / size.width))
         }
@@ -986,7 +1085,7 @@ private enum ClipboardDetailLayout {
         let font = isCode
             ? NSFont.monospacedSystemFont(ofSize: 11, weight: .regular)
             : NSFont.systemFont(ofSize: 12)
-        let text = entry.text ?? entry.previewText
+        let text = measurementText(for: entry)
         if isCode {
             let bounds = (text as NSString).boundingRect(
                 with: NSSize(width: contentWidth, height: .greatestFiniteMagnitude),
@@ -1009,8 +1108,18 @@ private enum ClipboardDetailLayout {
     /// line.  Both text and code shrink to fit their content, wrap long content
     /// into evenly balanced lines, and never drop below the width the metadata
     /// rows and footer hint need.
+    /// A 40k-character prefix already wraps to far more lines than any screen
+    /// can show and far exceeds the width caps, so measuring beyond it cannot
+    /// change the resulting card size — but TextKit laying out a whole
+    /// multi-megabyte clipboard text made the hover preview hitch.
+    private static let measurementCharacterLimit = 40_000
+
+    private static func measurementText(for entry: ClipboardEntry) -> String {
+        String((entry.text ?? entry.previewText).prefix(measurementCharacterLimit))
+    }
+
     private static func preferredWidth(for entry: ClipboardEntry, availableWidth: CGFloat) -> CGFloat {
-        let text = entry.text ?? entry.previewText
+        let text = measurementText(for: entry)
         let isCode = entry.contentCategory == .code
         let font: NSFont = isCode
             ? .monospacedSystemFont(ofSize: 11, weight: .regular)
@@ -1074,6 +1183,16 @@ struct ClipboardHistoryPanelView: View {
     @State private var keyboardSelection = false
     @State private var hoverPreviewDelay = ClipboardHoverPreviewDelay()
     @State private var pendingCommandCopyID: UUID?
+    /// The entry currently open for in-place editing, if any. Non-nil forces
+    /// the detail card to stay showing that entry (see `updateHover` and
+    /// `selectionAndSizeChanged`), so a stray hover or list refresh mid-edit
+    /// cannot silently swap the preview out from under an unsaved draft.
+    @State private var editingEntryID: UUID?
+    @State private var editDraftText: String = ""
+    /// Drives the fade/scale-out that plays when an edit finishes, before the
+    /// panel actually collapses. Without it the whole expanded preview vanishes
+    /// in a single frame, which reads as a crash rather than a dismissal.
+    @State private var editorClosing = false
 
     fileprivate init(
         store: ClipboardHistoryStore,
@@ -1181,6 +1300,11 @@ struct ClipboardHistoryPanelView: View {
         .onChange(of: store.settings.lastCategory) { _, _ in selectionAndSizeChanged() }
         .onChange(of: activeKey.storageValue) { _, _ in selectionAndSizeChanged() }
         .onChange(of: store.entries) { _, _ in selectionAndSizeChanged() }
+        // Once the card is actually gone, clear the closing flag so the next
+        // preview to appear starts fully visible rather than mid-fade.
+        .onChange(of: detailPresentation.isVisible) { _, visible in
+            if !visible { editorClosing = false }
+        }
         .onDisappear { cancelPendingPreview() }
     }
 
@@ -1192,7 +1316,9 @@ struct ClipboardHistoryPanelView: View {
                     entry: entry,
                     imageURL: detailPresentation.imageURL,
                     cardSize: detailPresentation.cardSize,
-                    codeHighlightTheme: store.settings.resolvedCodeHighlightTheme
+                    codeHighlightTheme: store.settings.resolvedCodeHighlightTheme,
+                    isEditing: editingEntryID == entry.id,
+                    editText: $editDraftText
                 )
             }
             .frame(
@@ -1204,6 +1330,11 @@ struct ClipboardHistoryPanelView: View {
             // preview first appears — not while the pointer moves between rows
             // and the same card is merely re-sized in place.
             .modifier(DetailCardPopIn())
+            // The mirror image of the pop-in: when an edit finishes, this scales
+            // and fades the card out in place (the panel is still expanded) so
+            // the follow-up collapse lands on an already-invisible card.
+            .opacity(editorClosing ? 0 : 1)
+            .scaleEffect(editorClosing ? 0.94 : 1)
         }
     }
 
@@ -1230,6 +1361,9 @@ struct ClipboardHistoryPanelView: View {
     }
 
     private func selectionAndSizeChanged() {
+        // A query/category switch or a background list refresh must not yank
+        // the detail card out from under an active edit and discard the draft.
+        guard editingEntryID == nil else { return }
         validateSelection()
         // A category/query change replaces the list, so a preview of the old
         // entry is invalid. Collapse it before calculating the new category's
@@ -1283,6 +1417,7 @@ struct ClipboardHistoryPanelView: View {
                         onTogglePin: { onTogglePin(entry) },
                         onToggleClipboardPin: { store.togglePinned(id: entry.id) }
                     )
+                    .equatable()
                     .id(entry.id)
                     .onTapGesture { copy(entry) }
                     .overlay {
@@ -1304,6 +1439,7 @@ struct ClipboardHistoryPanelView: View {
                                 onTogglePin: { onTogglePin(entry) },
                                 onToggleClipboardPin: { store.togglePinned(id: entry.id) }
                             )
+                            .equatable()
                         } else {
                             TextEntryRow(
                                 entry: entry,
@@ -1312,6 +1448,7 @@ struct ClipboardHistoryPanelView: View {
                                 onTogglePin: { onTogglePin(entry) },
                                 onToggleClipboardPin: { store.togglePinned(id: entry.id) }
                             )
+                            .equatable()
                         }
                         if activeKey == .builtin(.code), index < entries.count - 1 {
                             Divider()
@@ -1346,6 +1483,9 @@ struct ClipboardHistoryPanelView: View {
             }
             Divider()
         }
+        if entry.kind == .text {
+            Button("编辑") { beginEditing(entry) }
+        }
         Button(entry.isPinned ? "取消置顶" : "置顶") { store.togglePinned(id: entry.id) }
         Button(entry.isDesktopPinned == true ? "取消桌面固定" : "固定到桌面") { onTogglePin(entry) }
         Button("删除", role: .destructive) { delete(entry) }
@@ -1358,6 +1498,11 @@ struct ClipboardHistoryPanelView: View {
     }
 
     private func updateHover(_ isHovered: Bool, entry: ClipboardEntry) {
+        // The pointer drifting on or off some other row mid-edit — or during the
+        // brief close animation right after an edit — must not touch the
+        // preview: `beginEditing` already moved this entry's selection out of
+        // `hoveredID`, so no exit timer targeting it is pending here to cancel.
+        guard editingEntryID == nil, !editorClosing else { return }
         if isHovered {
             keyboardSelection = false
             keyboardSelectedID = nil
@@ -1400,8 +1545,75 @@ struct ClipboardHistoryPanelView: View {
         validateSelection()
     }
 
+    // MARK: - Editing
+
+    /// Only text-kind entries can be edited (images have no text body); this
+    /// is enforced by every caller (the ⌘E handler, the context menu item).
+    private func beginEditing(_ entry: ClipboardEntry) {
+        cancelPendingPreview()
+        // Route the selection through the keyboard slot instead of hover, so
+        // the pointer leaving this row can never trigger the hover-exit path
+        // that would otherwise close the card mid-edit (see `updateHover`).
+        hoveredID = nil
+        keyboardSelectedID = entry.id
+        editDraftText = entry.text ?? ""
+        editingEntryID = entry.id
+        // Force the detail card open immediately — editing shouldn't wait out
+        // the normal hover dwell delay — and pin it to this exact entry even
+        // if it was already showing something else.
+        onDetailEntry(entry)
+    }
+
+    private func commitEditing() { finishEditing(save: true) }
+
+    private func cancelEditing() { finishEditing(save: false) }
+
+    /// Saving blank text would leave a pointless empty entry, so an
+    /// all-whitespace draft quietly discards instead of persisting.
+    ///
+    /// The persist runs *before* `editingEntryID` is cleared so the
+    /// `store.entries` observer stays guarded and cannot collapse the card
+    /// early. Then the card is faded/scaled out in place while the panel is
+    /// still expanded, and only afterwards does the panel actually collapse —
+    /// so finishing an edit reads as a smooth dismissal, not a crash.
+    private func finishEditing(save: Bool) {
+        guard let id = editingEntryID else { return }
+        if save {
+            let draft = editDraftText
+            if !draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                store.updateText(id: id, text: draft)
+            }
+        }
+        editingEntryID = nil
+        withAnimation(.easeOut(duration: 0.22)) { editorClosing = true }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.24) {
+            onDetailEntry(nil)
+            // Recompute the list height once collapsed: an edited code entry may
+            // now occupy a different number of preview lines.
+            DispatchQueue.main.async { reportContentHeight() }
+        }
+    }
+
     private func handleKey(_ event: NSEvent) -> Bool {
         let flags = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
+
+        // While editing, only the save/cancel shortcuts are ours to intercept.
+        // Everything else — letters, arrows, Delete, Return, ⌘A/C/V/X/Z — must
+        // reach the TextEditor's own responder untouched, or typing, cursor
+        // movement and even undo would silently stop working the moment this
+        // monitor is installed on the panel's window.
+        if editingEntryID != nil {
+            guard event.type == .keyDown else { return false }
+            if flags.contains(.command), event.charactersIgnoringModifiers?.lowercased() == "s" {
+                commitEditing()
+                return true
+            }
+            if event.keyCode == 53 {
+                cancelEditing()
+                return true
+            }
+            return false
+        }
 
         if event.type == .flagsChanged {
             if !flags.contains(.command), let copyID = pendingCommandCopyID {
@@ -1430,6 +1642,13 @@ struct ClipboardHistoryPanelView: View {
         guard event.type == .keyDown else { return false }
 
 
+        // ⌘E enters editing for the active text entry. Images have no text
+        // body, so the shortcut simply falls through and does nothing for them.
+        if flags.contains(.command), event.charactersIgnoringModifiers?.lowercased() == "e",
+           let entry = entries.first(where: { $0.id == activeSelectionID }), entry.kind == .text {
+            beginEditing(entry)
+            return true
+        }
         if flags.contains(.command), event.charactersIgnoringModifiers?.lowercased() == "p", let selectedID = activeSelectionID {
             store.togglePinned(id: selectedID)
             return true
@@ -1503,7 +1722,16 @@ struct ClipboardHistoryPanelView: View {
 
 // MARK: - Rows
 
-private struct TextEntryRow: View {
+/// Every row is `Equatable` over its *data* (deliberately ignoring the action
+/// closures, which are recreated each parent pass but capture equal values) and
+/// installed with `.equatable()`. Without this, a hover moving between two rows
+/// re-evaluated every row body in the list — the direct cause of the highlight
+/// lagging behind the pointer even with a dozen entries.
+private struct TextEntryRow: View, Equatable {
+    nonisolated static func == (lhs: TextEntryRow, rhs: TextEntryRow) -> Bool {
+        lhs.entry == rhs.entry && lhs.index == rhs.index && lhs.isSelected == rhs.isSelected
+    }
+
     let entry: ClipboardEntry
     let index: Int?
     let isSelected: Bool
@@ -1512,14 +1740,25 @@ private struct TextEntryRow: View {
 
     @State private var isHovered = false
 
+    /// One truncated line displays only a screenful of characters; running
+    /// `replacingOccurrences` over an entire large clipboard text on every row
+    /// render was a per-frame scroll cost. The prefix is far beyond what
+    /// `lineLimit(1)` can show, so the rendering is unchanged.
+    private var previewLine: String {
+        guard entry.kind == .text, let text = entry.text else { return entry.previewText }
+        guard let start = text.firstIndex(where: { !$0.isWhitespace }) else { return "空白文字" }
+        return String(text[start...].prefix(300)).replacingOccurrences(of: "\n", with: " ")
+    }
+
     var body: some View {
+        let displaysSelection = isSelected || isHovered
         HStack(spacing: 6) {
-            Text(entry.previewText.replacingOccurrences(of: "\n", with: " "))
+            Text(previewLine)
                 .font(.system(size: 12))
                 .lineLimit(1)
-                .foregroundStyle(isSelected ? Color.white : Color.primary)
+                .foregroundStyle(displaysSelection ? Color.white : Color.primary)
             Spacer(minLength: 0)
-            if isSelected {
+            if displaysSelection {
                 Button(action: onToggleClipboardPin) {
                     Image(systemName: entry.isPinned ? "pin.fill" : "pin")
                         .font(.system(size: 10, weight: .medium))
@@ -1529,14 +1768,20 @@ private struct TextEntryRow: View {
                 .buttonStyle(.plain)
                 .foregroundStyle(.white)
                 .help(entry.isPinned ? "取消剪切板内固定" : "固定到剪切板")
-            } else if let index, index < 9 {
-                Text("⌘ \(index + 1)")
-                    .font(.system(size: 11).monospacedDigit())
-                    .foregroundStyle(entry.isPinned ? Color.primary : Color.secondary)
-                    .frame(width: 28, alignment: .trailing)
-            }
-            if isSelected || isHovered || entry.isDesktopPinned == true {
-                ClipboardPinButton(entry: entry, isSelected: isSelected, action: onTogglePin)
+                ClipboardPinButton(entry: entry, isSelected: true, action: onTogglePin)
+            } else {
+                // Unselected: the desktop-pin badge leads and the copy shortcut
+                // trails, so a pinned item's persistent indicator sits left of
+                // the ⌘-number.
+                if isHovered || entry.isDesktopPinned == true {
+                    ClipboardPinButton(entry: entry, isSelected: false, action: onTogglePin)
+                }
+                if let index, index < 9 {
+                    Text("⌘ \(index + 1)")
+                        .font(.system(size: 11).monospacedDigit())
+                        .foregroundStyle(entry.isPinned ? Color.primary : Color.secondary)
+                        .frame(width: 28, alignment: .trailing)
+                }
             }
         }
         .padding(.horizontal, 10)
@@ -1548,13 +1793,20 @@ private struct TextEntryRow: View {
                 // explicit; a near-white fallback fill here used to become
                 // visible during AppKit hover compositing and made the panel
                 // flash white under the pointer.
-                .fill(isSelected ? AnyShapeStyle(Color.accentColor) : AnyShapeStyle(.clear))
+                .fill(displaysSelection ? AnyShapeStyle(Color.accentColor) : AnyShapeStyle(.clear))
         )
         .onHover { isHovered = $0 }
     }
 }
 
-private struct CodeEntryRow: View {
+private struct CodeEntryRow: View, Equatable {
+    nonisolated static func == (lhs: CodeEntryRow, rhs: CodeEntryRow) -> Bool {
+        lhs.entry == rhs.entry
+            && lhs.index == rhs.index
+            && lhs.isSelected == rhs.isSelected
+            && lhs.codeHighlightTheme == rhs.codeHighlightTheme
+    }
+
     let entry: ClipboardEntry
     let index: Int?
     let isSelected: Bool
@@ -1564,17 +1816,19 @@ private struct CodeEntryRow: View {
 
     @State private var isHovered = false
 
-    private var lineCount: Int { ClipboardPanelLayout.previewLineCount(entry.text) }
-
     var body: some View {
-        HStack(alignment: .center, spacing: 6) {
-            Text(CodeHighlighter.highlight(previewCode, theme: codeHighlightTheme))
+        // One lazy scan supplies both the preview text and the row height;
+        // the previous two separate computed properties each split the text.
+        let previewLines = ClipboardPanelLayout.codePreviewLines(entry.text)
+        let displaysSelection = isSelected || isHovered
+        return HStack(alignment: .center, spacing: 6) {
+            Text(CodeHighlighter.highlight(previewLines.joined(separator: "\n"), theme: codeHighlightTheme))
                 .font(.system(size: 11, design: .monospaced))
                 .lineLimit(ClipboardPanelLayout.codePreviewMaxLines)
                 .lineSpacing(1)
-                .foregroundStyle(isSelected ? Color.white : Color.primary)
+                .foregroundStyle(displaysSelection ? Color.white : Color.primary)
             Spacer(minLength: 0)
-            if isSelected {
+            if displaysSelection {
                 Button(action: onToggleClipboardPin) {
                     Image(systemName: entry.isPinned ? "pin.fill" : "pin")
                         .font(.system(size: 10, weight: .medium))
@@ -1584,32 +1838,39 @@ private struct CodeEntryRow: View {
                 .buttonStyle(.plain)
                 .foregroundStyle(.white)
                 .help(entry.isPinned ? "取消剪切板内固定" : "固定到剪切板")
-            } else if let index, index < 9 {
-                Text("⌘ \(index + 1)")
-                    .font(.system(size: 11).monospacedDigit())
-                    .foregroundStyle(entry.isPinned ? Color.primary : Color.secondary)
-                    .frame(width: 28, alignment: .trailing)
-            }
-            if isSelected || isHovered || entry.isDesktopPinned == true {
-                ClipboardPinButton(entry: entry, isSelected: isSelected, action: onTogglePin)
+                ClipboardPinButton(entry: entry, isSelected: true, action: onTogglePin)
+            } else {
+                // Unselected: desktop-pin badge leads, ⌘-number trails.
+                if isHovered || entry.isDesktopPinned == true {
+                    ClipboardPinButton(entry: entry, isSelected: false, action: onTogglePin)
+                }
+                if let index, index < 9 {
+                    Text("⌘ \(index + 1)")
+                        .font(.system(size: 11).monospacedDigit())
+                        .foregroundStyle(entry.isPinned ? Color.primary : Color.secondary)
+                        .frame(width: 28, alignment: .trailing)
+                }
             }
         }
         .padding(.horizontal, 10)
-        .frame(height: ClipboardPanelLayout.codeRowHeight(lineCount: lineCount), alignment: .center)
+        .frame(height: ClipboardPanelLayout.codeRowHeight(lineCount: previewLines.count), alignment: .center)
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(
             RoundedRectangle(cornerRadius: 7, style: .continuous)
-                .fill(isSelected ? AnyShapeStyle(Color.accentColor) : AnyShapeStyle(.clear))
+                .fill(displaysSelection ? AnyShapeStyle(Color.accentColor) : AnyShapeStyle(.clear))
         )
         .onHover { isHovered = $0 }
     }
-
-    private var previewCode: String {
-        ClipboardPanelLayout.codePreviewLines(entry.text).joined(separator: "\n")
-    }
 }
 
-private struct ImageEntryCell: View {
+private struct ImageEntryCell: View, Equatable {
+    nonisolated static func == (lhs: ImageEntryCell, rhs: ImageEntryCell) -> Bool {
+        lhs.entry == rhs.entry
+            && lhs.index == rhs.index
+            && lhs.imageURL == rhs.imageURL
+            && lhs.isSelected == rhs.isSelected
+    }
+
     let entry: ClipboardEntry
     let index: Int?
     let imageURL: URL?
@@ -1622,11 +1883,12 @@ private struct ImageEntryCell: View {
     private var side: CGFloat { ClipboardPanelLayout.imageCellSide }
 
     var body: some View {
+        let displaysSelection = isSelected || isHovered
         ZStack {
             RoundedRectangle(cornerRadius: 8, style: .continuous)
                 .fill(.quinary)
             if let imageURL {
-                AnimatedImageFileView(url: imageURL)
+                ThumbnailImageView(url: imageURL, targetPoints: side, contentIdentity: entry.contentHash)
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
                     .padding(3)
             } else {
@@ -1638,7 +1900,7 @@ private struct ImageEntryCell: View {
         .frame(width: side, height: side)
         .overlay(alignment: .topTrailing) {
             HStack(spacing: 4) {
-                if isSelected {
+                if displaysSelection {
                     Button(action: onToggleClipboardPin) {
                         Image(systemName: entry.isPinned ? "pin.fill" : "pin")
                             .font(.system(size: 10, weight: .medium))
@@ -1649,18 +1911,23 @@ private struct ImageEntryCell: View {
                     .foregroundStyle(.white)
                     .background(Circle().fill(.black.opacity(0.4)))
                     .help(entry.isPinned ? "取消剪切板内固定" : "固定到剪切板")
-                } else if let index, index < 9 {
-                    Text("⌘ \(index + 1)")
-                        .font(.system(size: 10, weight: .medium).monospacedDigit())
-                        .foregroundStyle(entry.isPinned ? Color.primary : Color.white)
-                        .padding(.horizontal, 4)
-                        .padding(.vertical, 2)
-                        .frame(minWidth: 28)
-                        .background(RoundedRectangle(cornerRadius: 4, style: .continuous).fill(.black.opacity(0.5)))
-                }
-                if isSelected || isHovered || entry.isDesktopPinned == true {
                     ClipboardPinButton(entry: entry, isSelected: true, action: onTogglePin)
                         .background(Circle().fill(.black.opacity(0.4)))
+                } else {
+                    // Unselected: desktop-pin badge leads, ⌘-number trails.
+                    if isHovered || entry.isDesktopPinned == true {
+                        ClipboardPinButton(entry: entry, isSelected: true, action: onTogglePin)
+                            .background(Circle().fill(.black.opacity(0.4)))
+                    }
+                    if let index, index < 9 {
+                        Text("⌘ \(index + 1)")
+                            .font(.system(size: 10, weight: .medium).monospacedDigit())
+                            .foregroundStyle(entry.isPinned ? Color.primary : Color.white)
+                            .padding(.horizontal, 4)
+                            .padding(.vertical, 2)
+                            .frame(minWidth: 28)
+                            .background(RoundedRectangle(cornerRadius: 4, style: .continuous).fill(.black.opacity(0.5)))
+                    }
                 }
             }
             .padding(4)
@@ -1668,7 +1935,7 @@ private struct ImageEntryCell: View {
         .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
         .overlay {
             RoundedRectangle(cornerRadius: 8, style: .continuous)
-                .stroke(isSelected ? Color.accentColor : Color.clear, lineWidth: 2)
+                .stroke(displaysSelection ? Color.accentColor : Color.clear, lineWidth: 2)
         }
         .onHover { isHovered = $0 }
     }

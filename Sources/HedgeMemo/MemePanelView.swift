@@ -79,6 +79,7 @@ struct MemePanelView: View {
                                 },
                                 onDragEnded: endDrag
                             )
+                            .equatable()
                             .id(meme.id)
                         }
                         MemeImportTile(

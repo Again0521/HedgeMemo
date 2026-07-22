@@ -14,11 +14,16 @@ public final class ClipboardCaptureService {
     public func start() {
         stop()
         observedChangeCount = NSPasteboard.general.changeCount
-        timer = Timer.scheduledTimer(withTimeInterval: 0.6, repeats: true) { [weak self] _ in
+        let timer = Timer(timeInterval: 0.6, repeats: true) { [weak self] _ in
             Task { @MainActor in
                 self?.inspectPasteboard()
             }
         }
+        // Let the OS coalesce this poll's wakeups with other timers to reduce
+        // energy use while meme capture is active.
+        timer.tolerance = 0.25
+        RunLoop.main.add(timer, forMode: .default)
+        self.timer = timer
     }
 
     public func stop() {

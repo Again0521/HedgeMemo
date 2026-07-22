@@ -35,15 +35,55 @@ public enum ClipboardPanelLayout {
         return (content / CGFloat(imageColumns)).rounded(.down)
     }
 
+    /// A preview line never displays more than a row's width; the cap keeps a
+    /// single enormous pasted line from making SwiftUI lay out megabytes.
+    public static let codePreviewLineCharacterLimit = 600
+
     /// Returns only lines that contain content. This makes "at most three
     /// lines" literal: a one-line snippet occupies one row, while blank
     /// separator lines never reserve phantom height.
+    ///
+    /// Scans lazily and stops at the third content line: this runs from
+    /// scrolling list rows, and splitting an entire large clipboard text on
+    /// every row render was a measurable scroll cost.
     public static func codePreviewLines(_ text: String?) -> [String] {
-        let lines = (text ?? "")
-            .components(separatedBy: .newlines)
-            .filter { !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
-        let preview = Array(lines.prefix(codePreviewMaxLines))
-        return preview.isEmpty ? [""] : preview
+        guard let text, !text.isEmpty else { return [""] }
+        var lines: [String] = []
+        var line = String()
+        line.reserveCapacity(codePreviewLineCharacterLimit)
+        var collectedCount = 0
+        var containsVisibleCharacter = false
+
+        for character in text {
+            if character.isNewline {
+                if containsVisibleCharacter {
+                    lines.append(line)
+                    if lines.count == codePreviewMaxLines { return lines }
+                }
+                line.removeAll(keepingCapacity: true)
+                collectedCount = 0
+                containsVisibleCharacter = false
+                continue
+            }
+
+            if collectedCount < codePreviewLineCharacterLimit {
+                line.append(character)
+                collectedCount += 1
+            }
+            if !character.isWhitespace {
+                containsVisibleCharacter = true
+            }
+            // The rest of an oversized source line cannot be displayed by
+            // this row. Returning as soon as its visible prefix is full is
+            // important for minified JSON/source: the old newline search
+            // walked a multi-megabyte line just to throw the suffix away.
+            if collectedCount == codePreviewLineCharacterLimit, containsVisibleCharacter {
+                lines.append(line)
+                return lines
+            }
+        }
+        if containsVisibleCharacter { lines.append(line) }
+        return lines.isEmpty ? [""] : lines
     }
 
     public static func previewLineCount(_ text: String?) -> Int {

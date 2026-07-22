@@ -95,6 +95,14 @@ final class ClipboardPanelLayoutTests: XCTestCase {
         XCTAssertEqual(ClipboardPanelLayout.previewLineCount(""), 1)
     }
 
+    func testOversizedSingleLineKeepsOnlyItsVisiblePrefix() {
+        let code = String(repeating: "x", count: ClipboardPanelLayout.codePreviewLineCharacterLimit * 20)
+        XCTAssertEqual(
+            ClipboardPanelLayout.codePreviewLines(code),
+            [String(repeating: "x", count: ClipboardPanelLayout.codePreviewLineCharacterLimit)]
+        )
+    }
+
     func testCodeRowHeightGrowsWithLineCountThenClamps() {
         XCTAssertLessThan(
             ClipboardPanelLayout.codeRowHeight(lineCount: 1),

@@ -5,8 +5,14 @@ import Foundation
 @MainActor
 public final class MemeStore: ObservableObject {
     @Published public private(set) var categories: [MemeCategory] = []
-    @Published public private(set) var memes: [MemeItem] = []
+    @Published public private(set) var memes: [MemeItem] = [] {
+        didSet { filteredMemo.removeAll(keepingCapacity: true) }
+    }
     @Published public var selectedCategoryID: UUID?
+    /// `filteredMemes` re-filtered and re-sorted the library on every access —
+    /// several times per popover render and once per mouse-move during a drag.
+    /// Memoized per (category, query) until the library changes.
+    private var filteredMemo: [String: [MemeItem]] = [:]
     @Published public var captureEnabled = false
     @Published public private(set) var lastError: String?
 
@@ -29,7 +35,12 @@ public final class MemeStore: ObservableObject {
     }
 
     public func filteredMemes(query: String) -> [MemeItem] {
-        MemeFilter.apply(memes, categoryID: selectedCategoryID, query: query)
+        let memoKey = (selectedCategoryID?.uuidString ?? "*") + "\u{1}" + query
+        if let cached = filteredMemo[memoKey] { return cached }
+        let result = MemeFilter.apply(memes, categoryID: selectedCategoryID, query: query)
+        if filteredMemo.count >= 24 { filteredMemo.removeAll(keepingCapacity: true) }
+        filteredMemo[memoKey] = result
+        return result
     }
 
     @discardableResult

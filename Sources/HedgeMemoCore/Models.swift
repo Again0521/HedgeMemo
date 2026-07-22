@@ -216,36 +216,47 @@ public enum ClipboardCodeDetector {
         guard text.count >= 6 else { return false }
         guard !isLikelyLink(text) else { return false }
         guard cjkRatio(text) <= 0.3 else { return false }
-        // Natural-language English can incidentally trip keyword ("return",
-        // "public", "where") and parenthesis signals. Unless the text also
-        // carries a genuine structural code marker, treat clear prose as prose.
-        if proseWordCount(text) >= 3, !hasStrongCodeStructure(text) { return false }
+        // Unambiguous structure (braces, terminators, comments, operators, high
+        // symbol density) is code regardless of any incidental English words.
+        if hasHardCodeStructure(text) { return score(text) >= 3 }
+        // Without that structure, a keyword or a stray parenthesis is not enough
+        // on its own: long English prose borrows words like "return", "public"
+        // and "where". If the text reads as sentences, treat it as prose.
+        if looksLikeProse(text) { return false }
         return score(text) >= 3
     }
 
-    /// Number of distinct common English function words present as whole words.
-    private static func proseWordCount(_ text: String) -> Int {
-        let tokens = text.lowercased().split { !$0.isLetter }.map(String.init)
-        var seen = Set<String>()
-        for token in tokens where proseWords.contains(token) { seen.insert(token) }
-        return seen.count
+    /// Whether the text reads as natural-language prose rather than code.
+    /// English is dense with common function words ("the", "is", "to", …) that
+    /// code almost never uses; several distinct ones, or a high proportion of
+    /// them across a longer run, is a decisive prose signal.
+    private static func looksLikeProse(_ text: String) -> Bool {
+        let words = text.lowercased().split { !$0.isLetter }.map(String.init)
+        guard words.count >= 4 else { return false }
+        var distinct = Set<String>()
+        var hits = 0
+        for word in words where proseWords.contains(word) {
+            hits += 1
+            distinct.insert(word)
+        }
+        if distinct.count >= 3 { return true }
+        return words.count >= 6 && Double(hits) / Double(words.count) >= 0.25
     }
 
     /// Structural markers that prose effectively never produces: statement
-    /// terminators/braces, code operators, comments, bracket or brace pairs, a
-    /// space-less function call (`name(`), or a high symbol density.
-    private static func hasStrongCodeStructure(_ text: String) -> Bool {
+    /// terminators/braces, code operators, comments, a brace pair, or a high
+    /// symbol density. Deliberately omits weaker signals that do appear in prose
+    /// — a `word(` call (English writes "item(s)", "file(s)") and `[...]` pairs.
+    private static func hasHardCodeStructure(_ text: String) -> Bool {
         let lines = text.components(separatedBy: .newlines)
         if lines.contains(where: { line in
             let trimmed = line.trimmingCharacters(in: .whitespaces)
             return trimmed.hasSuffix(";") || trimmed.hasSuffix("{") || trimmed.hasSuffix("}") || trimmed.hasSuffix("):")
         }) { return true }
         if operators.contains(where: { text.contains($0) }) { return true }
-        if text.contains("//") || text.contains("/*") || text.contains("#!") { return true }
+        if text.contains("//") || text.contains("/*") || text.contains("*/") || text.contains("#!") { return true }
         if text.contains("{") && text.contains("}") { return true }
-        if text.contains("[") && text.contains("]") { return true }
-        if text.range(of: "[A-Za-z_][A-Za-z0-9_]*\\(", options: .regularExpression) != nil { return true }
-        return symbolRatio(text) > 0.12
+        return symbolRatio(text) > 0.15
     }
 
     private static func score(_ text: String) -> Int {
@@ -568,6 +579,18 @@ public struct ClipboardEntry: Codable, Hashable, Identifiable, Sendable {
         }
     }
 
+    /// Code/link detection scans the whole text with several passes, and the
+    /// category is consulted constantly (every list filter asks it for every
+    /// entry). Memoized by content hash — the hash always tracks the text
+    /// (edits recompute it) — with the text length mixed in to guard against an
+    /// accidentally reused hand-written hash across differently sized texts.
+    /// NSCache is thread-safe, so this does not affect Sendable-ability.
+    nonisolated(unsafe) private static let textCategoryCache: NSCache<NSString, NSString> = {
+        let cache = NSCache<NSString, NSString>()
+        cache.countLimit = 4096
+        return cache
+    }()
+
     public var contentCategory: ClipboardContentCategory {
         if origin == .hedgeMemoScreenshot { return .screenshot }
         switch kind {
@@ -575,9 +598,21 @@ public struct ClipboardEntry: Codable, Hashable, Identifiable, Sendable {
             return .image
         case .text:
             let content = text ?? ""
-            if ClipboardLinkDetector.isLink(content) { return .link }
-            if ClipboardCodeDetector.isCode(content) { return .code }
-            return .text
+            let key = "\(contentHash)|\(content.utf8.count)" as NSString
+            if let cached = Self.textCategoryCache.object(forKey: key),
+               let category = ClipboardContentCategory(rawValue: cached as String) {
+                return category
+            }
+            let category: ClipboardContentCategory
+            if ClipboardLinkDetector.isLink(content) {
+                category = .link
+            } else if ClipboardCodeDetector.isCode(content) {
+                category = .code
+            } else {
+                category = .text
+            }
+            Self.textCategoryCache.setObject(category.rawValue as NSString, forKey: key)
+            return category
         }
     }
 

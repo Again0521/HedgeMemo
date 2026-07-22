@@ -52,6 +52,17 @@ final class ClipboardContentClassificationTests: XCTestCase {
         ))
     }
 
+    func testLongEnglishWithIncidentalParensOrBracketsIsNotCode() {
+        // A word-adjacent "results(" and a "[final]" pair used to read as hard
+        // code structure; long English carrying them is still prose.
+        XCTAssertFalse(ClipboardCodeDetector.isCode(
+            "The report shows the results(2024) for the whole team, and the summary is in the shared notes."
+        ))
+        XCTAssertFalse(ClipboardCodeDetector.isCode(
+            "Please review the list[final] and let me know what you think about the overall timeline for it."
+        ))
+    }
+
     func testCodeWithEnglishWordsButRealStructureIsStillCode() {
         // English words appear, but the structural markers are unmistakable.
         XCTAssertTrue(ClipboardCodeDetector.isCode("if (user.isActive) { return user.name; }"))

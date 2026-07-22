@@ -5,12 +5,21 @@ import Foundation
 
 @MainActor
 public final class ClipboardHistoryStore: ObservableObject {
-    @Published public private(set) var entries: [ClipboardEntry] = []
+    @Published public private(set) var entries: [ClipboardEntry] = [] {
+        didSet { orderedMemo.removeAll(keepingCapacity: true) }
+    }
+    /// `orderedEntries` is asked several times per UI pass (rows, key handling,
+    /// height math), and every miss filters and sorts the entire history.
+    /// Results are memoized per (category, query) until entries or settings
+    /// change. Not published: reads during view rendering must stay silent.
+    private var orderedMemo: [String: [ClipboardEntry]] = [:]
     // Mutating `settings` inside its own didSet re-enters the @Published setter;
     // without this guard normalize() recurses until the stack overflows.
     private var isNormalizingSettings = false
     @Published public var settings: ClipboardHistorySettings {
         didSet {
+            // Category enable/order/custom-pattern changes all affect ordering.
+            orderedMemo.removeAll(keepingCapacity: true)
             guard !isNormalizingSettings else { return }
             isNormalizingSettings = true
             settings.normalize()
@@ -46,9 +55,19 @@ public final class ClipboardHistoryStore: ObservableObject {
     public func startMonitoring() {
         stopMonitoring()
         observedChangeCount = NSPasteboard.general.changeCount
-        timer = Timer.scheduledTimer(withTimeInterval: 0.55, repeats: true) { [weak self] _ in
+        let timer = Timer(timeInterval: 0.55, repeats: true) { [weak self] _ in
             Task { @MainActor in self?.inspectPasteboard() }
         }
+        // This poll runs for the whole session in the background. A generous
+        // tolerance lets the OS coalesce its wakeups with other timers, which
+        // cuts idle energy/CPU use noticeably; a copy is still picked up within
+        // roughly a second, which is imperceptible for a clipboard manager.
+        timer.tolerance = 0.25
+        // `.default` mode matches the previous `scheduledTimer` behavior exactly
+        // (it pauses only during menu/event tracking); the sole change here is
+        // the added tolerance.
+        RunLoop.main.add(timer, forMode: .default)
+        self.timer = timer
     }
 
     public func stopMonitoring() {
@@ -58,12 +77,19 @@ public final class ClipboardHistoryStore: ObservableObject {
 
     public func orderedEntries(query: String = "", key: ClipboardCategoryKey? = nil) -> [ClipboardEntry] {
         if let key, !settings.isCategoryEnabled(key) { return [] }
-        return ClipboardHistoryPolicy.ordered(
+        let memoKey = (key?.storageValue ?? "*") + "\u{1}" + query
+        if let cached = orderedMemo[memoKey] { return cached }
+        let result = ClipboardHistoryPolicy.ordered(
             entries,
             query: query,
             key: key,
             customCategories: settings.customCategories ?? []
         )
+        // Typing a search accumulates one memo entry per query string; keep the
+        // table small rather than tracking usage.
+        if orderedMemo.count >= 24 { orderedMemo.removeAll(keepingCapacity: true) }
+        orderedMemo[memoKey] = result
+        return result
     }
 
     @discardableResult
@@ -215,6 +241,18 @@ public final class ClipboardHistoryStore: ObservableObject {
     public func toggleDesktopPinned(id: UUID) {
         guard let index = entries.firstIndex(where: { $0.id == id }) else { return }
         entries[index].isDesktopPinned = entries[index].isDesktopPinned != true
+        entries[index].updatedAt = .now
+        persist()
+    }
+
+    /// Applies an in-place edit to a text-kind entry's content. The content
+    /// hash is recomputed so later dedup/merge checks see the edited text, not
+    /// the one originally captured. Image entries are left untouched — they
+    /// have no editable text body.
+    public func updateText(id: UUID, text: String) {
+        guard let index = entries.firstIndex(where: { $0.id == id }), entries[index].kind == .text else { return }
+        entries[index].text = text
+        entries[index].contentHash = Data(text.utf8).clipboardContentHash
         entries[index].updatedAt = .now
         persist()
     }

@@ -15,7 +15,21 @@ enum MemeGridSpace {
     static let name = "memeGrid"
 }
 
-struct MemeTileView: View {
+/// Equatable over its data (the action closures are recreated by every parent
+/// pass but capture equal values) and installed with `.equatable()`, so a drag
+/// or selection change re-renders only the affected tiles instead of the whole
+/// grid on every mouse move.
+struct MemeTileView: View, Equatable {
+    nonisolated static func == (lhs: MemeTileView, rhs: MemeTileView) -> Bool {
+        lhs.meme == rhs.meme
+            && lhs.imageURL == rhs.imageURL
+            && lhs.side == rhs.side
+            && lhs.isManaging == rhs.isManaging
+            && lhs.isSelected == rhs.isSelected
+            && lhs.isDragged == rhs.isDragged
+            && lhs.categories == rhs.categories
+    }
+
     let meme: MemeItem
     let imageURL: URL
     let side: CGFloat
@@ -95,8 +109,12 @@ struct MemeTileContent: View {
             RoundedRectangle(cornerRadius: 8, style: .continuous)
                 .fill(.quaternary)
             Group {
-                if NSImage(contentsOf: imageURL) != nil {
-                    AnimatedImageFileView(url: imageURL)
+                // A cheap file-existence check replaces the previous
+                // full-resolution `NSImage(contentsOf:)` decode that ran purely
+                // as a nil-check (and then decoded the same file a second time
+                // in the image view) — the meme grid's main scroll cost.
+                if FileManager.default.fileExists(atPath: imageURL.path) {
+                    ThumbnailImageView(url: imageURL, targetPoints: side, contentIdentity: meme.contentHash)
                         .frame(maxWidth: .infinity, maxHeight: .infinity)
                 } else {
                     Image(systemName: "photo")

@@ -47,6 +47,14 @@ final class PinnedClipboardWindowsController {
         synchronize(with: store.entries)
     }
 
+    /// Persists an in-place edit made from a note's own edit mode. The note
+    /// window updates its own displayed text immediately on save (see
+    /// `PinnedClipboardWindow.saveText`) — `synchronize` only opens windows
+    /// for newly-pinned entries, so it does not refresh an already-open one.
+    private func saveText(id: UUID, text: String) {
+        store.updateText(id: id, text: text)
+    }
+
     private func synchronize(with entries: [ClipboardEntry]) {
         let pinnedEntries = entries.filter { $0.isDesktopPinned == true }
         let pinned = Dictionary(uniqueKeysWithValues: pinnedEntries.map { ($0.id, $0) })
@@ -62,7 +70,8 @@ final class PinnedClipboardWindowsController {
                 imageURL: store.imageURL(for: entry),
                 codeHighlightTheme: store.settings.resolvedCodeHighlightTheme,
                 cascadeIndex: windows.count,
-                onUnpin: { [weak self] id in self?.unpin(id: id) }
+                onUnpin: { [weak self] id in self?.unpin(id: id) },
+                onSaveText: { [weak self] id, text in self?.saveText(id: id, text: text) }
             )
             windows[entry.id] = note
             note.show()
@@ -77,10 +86,11 @@ final class PinnedClipboardWindowsController {
 @MainActor
 private final class PinnedClipboardWindow {
     private let panel: PinnedClipboardPanel
-    private let model = PinnedClipboardWindowModel()
+    private let model: PinnedClipboardWindowModel
     private let entry: ClipboardEntry
     private let imageURL: URL?
     private let onUnpin: (UUID) -> Void
+    private let onSaveText: (UUID, String) -> Void
     private var codeHighlightTheme: CodeHighlightTheme
 
     init(
@@ -88,12 +98,18 @@ private final class PinnedClipboardWindow {
         imageURL: URL?,
         codeHighlightTheme: CodeHighlightTheme,
         cascadeIndex: Int,
-        onUnpin: @escaping (UUID) -> Void
+        onUnpin: @escaping (UUID) -> Void,
+        onSaveText: @escaping (UUID, String) -> Void
     ) {
         self.entry = entry
         self.imageURL = imageURL
         self.onUnpin = onUnpin
+        self.onSaveText = onSaveText
         self.codeHighlightTheme = codeHighlightTheme
+        // The note's displayed text starts as the entry's own text, then
+        // becomes independently editable — `entry` stays the immutable
+        // snapshot the window was built from (see `saveText` below).
+        self.model = PinnedClipboardWindowModel(initialText: entry.text ?? "")
         let size = PinnedClipboardWindowLayout.windowSize(for: entry, imageURL: imageURL)
         let frame = PinnedClipboardWindowLayout.initialFrame(size: size, cascadeIndex: cascadeIndex)
         let panel = PinnedClipboardPanel(
@@ -143,7 +159,8 @@ private final class PinnedClipboardWindow {
             codeHighlightTheme: codeHighlightTheme,
             model: model,
             onToggleAlwaysOnTop: { [weak self] in self?.toggleAlwaysOnTop() },
-            onUnpin: { [onUnpin, entry] in onUnpin(entry.id) }
+            onUnpin: { [onUnpin, entry] in onUnpin(entry.id) },
+            onSaveText: { [weak self] text in self?.saveText(text) }
         )
     }
 
@@ -151,6 +168,11 @@ private final class PinnedClipboardWindow {
         model.isAlwaysOnTop.toggle()
         panel.level = model.isAlwaysOnTop ? .floating : .normal
         panel.orderFrontRegardless()
+    }
+
+    private func saveText(_ text: String) {
+        model.displayedText = text
+        onSaveText(entry.id, text)
     }
 }
 
@@ -161,6 +183,17 @@ private final class PinnedClipboardPanel: NSPanel {
 @MainActor
 private final class PinnedClipboardWindowModel: ObservableObject {
     @Published var isAlwaysOnTop = false
+    @Published var isEditing = false
+    @Published var draftText: String
+    /// The note's own copy of its text, independent of the immutable `entry`
+    /// snapshot the window was built from. Editing updates only this, so the
+    /// note reflects a save immediately without needing the window rebuilt.
+    @Published var displayedText: String
+
+    init(initialText: String) {
+        self.draftText = initialText
+        self.displayedText = initialText
+    }
 }
 
 private struct PinnedClipboardNoteView: View {
@@ -170,6 +203,9 @@ private struct PinnedClipboardNoteView: View {
     @ObservedObject var model: PinnedClipboardWindowModel
     let onToggleAlwaysOnTop: () -> Void
     let onUnpin: () -> Void
+    let onSaveText: (String) -> Void
+
+    @FocusState private var isEditorFocused: Bool
 
     var body: some View {
         VStack(spacing: 0) {
@@ -185,6 +221,30 @@ private struct PinnedClipboardNoteView: View {
             RoundedRectangle(cornerRadius: 14, style: .continuous)
                 .strokeBorder(Color(nsColor: .separatorColor).opacity(0.5), lineWidth: 1)
         }
+        // A plain SwiftUI window with no key-event monitor of its own, so
+        // these shortcuts only need to be registered — nothing here can steal
+        // keystrokes away from the TextEditor the way the clipboard panel's
+        // window-wide monitor would. ⌘E enters editing (no on-screen hint,
+        // matching the request); ⌘S saves, Esc cancels.
+        .background(
+            Group {
+                if model.isEditing {
+                    Button("保存", action: saveEditing)
+                        .keyboardShortcut("s", modifiers: .command)
+                    Button("取消", action: cancelEditing)
+                        .keyboardShortcut(.cancelAction)
+                } else if entry.kind == .text {
+                    Button("编辑", action: beginEditing)
+                        .keyboardShortcut("e", modifiers: .command)
+                }
+            }
+            .opacity(0)
+            .allowsHitTesting(false)
+        )
+        .onChange(of: model.isEditing) { _, editing in
+            guard editing else { return }
+            DispatchQueue.main.async { isEditorFocused = true }
+        }
     }
 
     private var header: some View {
@@ -196,6 +256,20 @@ private struct PinnedClipboardNoteView: View {
                 .lineLimit(1)
                 .foregroundStyle(.secondary)
             Spacer(minLength: 8)
+            // Only a text-kind note has anything to edit; an image note has no
+            // text body. Placed to the left of "保持最前" per the requested layout.
+            // The button toggles: a first click enters editing, a second click
+            // finishes and saves.
+            if entry.kind == .text {
+                Button(action: toggleEditing) {
+                    Image(systemName: model.isEditing ? "checkmark" : "pencil")
+                        .frame(width: 18, height: 18)
+                }
+                .buttonStyle(.plain)
+                .foregroundStyle(model.isEditing ? Color.accentColor : Color.secondary)
+                .help(model.isEditing ? "完成编辑" : "编辑")
+                .accessibilityLabel(model.isEditing ? "完成编辑" : "编辑")
+            }
             Button(action: onToggleAlwaysOnTop) {
                 Image(systemName: model.isAlwaysOnTop ? "rectangle.fill.on.rectangle.fill" : "rectangle.on.rectangle")
                     .frame(width: 18, height: 18)
@@ -221,7 +295,39 @@ private struct PinnedClipboardNoteView: View {
 
     @ViewBuilder
     private var content: some View {
-        if entry.kind == .image, let imageURL {
+        if model.isEditing, entry.contentCategory == .code {
+            CodeTextEditor(
+                text: $model.draftText,
+                theme: codeHighlightTheme,
+                font: .monospacedSystemFont(ofSize: 12, weight: .regular),
+                onCancel: cancelEditing
+            )
+            .padding(6)
+            .background(
+                RoundedRectangle(cornerRadius: 6, style: .continuous)
+                    .fill(Color.primary.opacity(0.05))
+            )
+            .overlay(
+                RoundedRectangle(cornerRadius: 6, style: .continuous)
+                    .strokeBorder(Color.accentColor.opacity(0.4), lineWidth: 1)
+            )
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+        } else if model.isEditing {
+            TextEditor(text: $model.draftText)
+                .font(.system(size: 13))
+                .scrollContentBackground(.hidden)
+                .padding(6)
+                .background(
+                    RoundedRectangle(cornerRadius: 6, style: .continuous)
+                        .fill(Color.primary.opacity(0.05))
+                )
+                .overlay(
+                    RoundedRectangle(cornerRadius: 6, style: .continuous)
+                        .strokeBorder(Color.accentColor.opacity(0.4), lineWidth: 1)
+                )
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                .focused($isEditorFocused)
+        } else if entry.kind == .image, let imageURL {
             AnimatedImageFileView(url: imageURL)
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
                 .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
@@ -229,9 +335,9 @@ private struct PinnedClipboardNoteView: View {
             ScrollView(.vertical) {
                 Group {
                     if entry.contentCategory == .code {
-                        Text(CodeHighlighter.highlight(entry.text ?? "", theme: codeHighlightTheme))
+                        Text(CodeHighlighter.highlight(model.displayedText, theme: codeHighlightTheme))
                     } else {
-                        Text(entry.text ?? entry.previewText)
+                        Text(model.displayedText.isEmpty ? entry.previewText : model.displayedText)
                     }
                 }
                 .font(entry.contentCategory == .code
@@ -244,6 +350,30 @@ private struct PinnedClipboardNoteView: View {
             .scrollIndicators(.automatic)
             .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
+    }
+
+    /// The header pencil/checkmark toggles editing: enter on a first click,
+    /// finish and save on a second.
+    private func toggleEditing() {
+        if model.isEditing { saveEditing() } else { beginEditing() }
+    }
+
+    private func beginEditing() {
+        model.draftText = model.displayedText
+        withAnimation(.easeInOut(duration: 0.18)) { model.isEditing = true }
+    }
+
+    /// Saving blank text would leave a pointless empty note, so an
+    /// all-whitespace draft quietly discards instead of persisting.
+    private func saveEditing() {
+        let text = model.draftText
+        withAnimation(.easeInOut(duration: 0.18)) { model.isEditing = false }
+        guard !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
+        onSaveText(text)
+    }
+
+    private func cancelEditing() {
+        withAnimation(.easeInOut(duration: 0.18)) { model.isEditing = false }
     }
 }
 
@@ -276,10 +406,7 @@ private enum PinnedClipboardWindowLayout {
     }
 
     private static func measuredContentSize(for entry: ClipboardEntry, imageURL: URL?) -> NSSize {
-        if entry.kind == .image, let imageURL, let image = NSImage(contentsOf: imageURL) {
-            let pixels = image.representations.first.map {
-                NSSize(width: $0.pixelsWide, height: $0.pixelsHigh)
-            } ?? image.size
+        if entry.kind == .image, let imageURL, let pixels = imagePixelSize(of: imageURL) {
             guard pixels.width > 0, pixels.height > 0 else {
                 return NSSize(width: 280, height: 220)
             }

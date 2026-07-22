@@ -149,6 +149,51 @@ final class StoreBehaviorTests: XCTestCase {
         )
     }
 
+    func testUpdateTextEditsContentAndRecomputesHash() {
+        let store = makeClipboardStore()
+        XCTAssertTrue(store.addText("原始内容"))
+        let id = store.entries.first!.id
+        let originalHash = store.entries.first!.contentHash
+
+        store.updateText(id: id, text: "编辑后的内容")
+
+        let edited = store.entries.first!
+        XCTAssertEqual(edited.text, "编辑后的内容")
+        XCTAssertNotEqual(edited.contentHash, originalHash, "the hash must track the edited text, not the original")
+    }
+
+    func testUpdateTextIgnoresImageEntries() {
+        let store = makeClipboardStore()
+        let payload = ImageAssetData(data: Fixture.solidImage(0.4, size: 10).pngData!, fileExtension: "png")
+        XCTAssertTrue(store.addImageData(payload))
+        let id = store.entries.first!.id
+
+        store.updateText(id: id, text: "不应生效")
+
+        XCTAssertNil(store.entries.first?.text, "an image entry has no editable text body")
+    }
+
+    func testUpdateTextIgnoresUnknownID() {
+        let store = makeClipboardStore()
+        XCTAssertTrue(store.addText("内容"))
+        let before = store.entries
+
+        store.updateText(id: UUID(), text: "不存在的条目")
+
+        XCTAssertEqual(store.entries, before)
+    }
+
+    func testUpdateTextPersists() {
+        let root = tempRoot("clip-edit-persist")
+        let store = ClipboardHistoryStore(repository: ClipboardHistoryRepository(rootURL: root))
+        XCTAssertTrue(store.addText("原始内容"))
+        let id = store.entries.first!.id
+        store.updateText(id: id, text: "持久化后的内容")
+
+        let reloaded = ClipboardHistoryStore(repository: ClipboardHistoryRepository(rootURL: root))
+        XCTAssertEqual(reloaded.entries.first?.text, "持久化后的内容")
+    }
+
     func testSeedEntriesAppendInGivenOrderNewestFirst() {
         let store = makeClipboardStore()
         let now = Date()

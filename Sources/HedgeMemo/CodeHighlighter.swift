@@ -7,21 +7,30 @@ import SwiftUI
 /// covers the lexical classes shared by Swift, Java, Kotlin, JavaScript,
 /// TypeScript, Python, JSON, SQL and shell snippets.
 enum CodeHighlighter {
+    /// The shared keyword vocabulary, used both to color keywords and to drive
+    /// the editor's inline completion. Language-agnostic on purpose: a clipboard
+    /// snippet has no reliable file type.
+    static let keywords = [
+        "func", "function", "class", "struct", "enum", "interface", "extension", "protocol", "actor",
+        "typealias", "associatedtype", "init", "deinit", "def", "return", "import", "from", "package",
+        "include", "define", "module", "namespace", "using", "var", "let", "const", "static", "public",
+        "private", "protected", "internal", "fileprivate", "open", "final", "override", "mutating",
+        "nonmutating", "if", "else", "elif", "for", "foreach", "while", "repeat", "until", "switch",
+        "case", "default", "break", "continue", "fallthrough", "guard", "where", "in", "do", "defer",
+        "try", "catch", "throw", "throws", "rethrows", "async", "await", "yield", "lambda", "with",
+        "new", "self", "this", "super", "nil", "null", "undefined", "true", "false", "void", "int",
+        "string", "bool", "double", "float", "byte", "short", "long", "char", "any", "some", "as", "is",
+        "instanceof", "implements", "extends", "abstract", "synchronized", "volatile", "transient", "native",
+        "val", "fun", "object", "data", "sealed", "when", "select", "insert", "update", "delete", "into",
+        "values", "join", "on", "group", "by", "order", "limit", "create", "alter", "drop", "table",
+    ]
+
+    /// Sorted, de-duplicated keywords for prefix-matched inline completion.
+    /// Length ≥ 3 so a two-letter partial doesn't complete to a near-identical
+    /// two-letter keyword, which reads as noise.
+    static let completionKeywords: [String] = Array(Set(keywords.filter { $0.count >= 3 })).sorted()
+
     private static let keywordPattern: NSRegularExpression = {
-        let keywords = [
-            "func", "function", "class", "struct", "enum", "interface", "extension", "protocol", "actor",
-            "typealias", "associatedtype", "init", "deinit", "def", "return", "import", "from", "package",
-            "include", "define", "module", "namespace", "using", "var", "let", "const", "static", "public",
-            "private", "protected", "internal", "fileprivate", "open", "final", "override", "mutating",
-            "nonmutating", "if", "else", "elif", "for", "foreach", "while", "repeat", "until", "switch",
-            "case", "default", "break", "continue", "fallthrough", "guard", "where", "in", "do", "defer",
-            "try", "catch", "throw", "throws", "rethrows", "async", "await", "yield", "lambda", "with",
-            "new", "self", "this", "super", "nil", "null", "undefined", "true", "false", "void", "int",
-            "string", "bool", "double", "float", "byte", "short", "long", "char", "any", "some", "as", "is",
-            "instanceof", "implements", "extends", "abstract", "synchronized", "volatile", "transient", "native",
-            "val", "fun", "object", "data", "sealed", "when", "select", "insert", "update", "delete", "into",
-            "values", "join", "on", "group", "by", "order", "limit", "create", "alter", "drop", "table",
-        ]
         let pattern = "\\b(" + keywords.joined(separator: "|") + ")\\b"
         return try! NSRegularExpression(pattern: pattern, options: [.caseInsensitive])
     }()
@@ -40,7 +49,28 @@ enum CodeHighlighter {
     private static let functionPattern = try! NSRegularExpression(pattern: "\\b[A-Za-z_][A-Za-z0-9_]*(?=\\s*\\()")
     private static let annotationPattern = try! NSRegularExpression(pattern: "(?:@|#)\\w+")
 
+    /// Caches highlighted results by exact text + theme. `highlight` is called
+    /// from SwiftUI row bodies, so a scrolling code list re-highlights the same
+    /// snippets repeatedly as cells recycle; the regex passes are the cost. The
+    /// wrapper class is only because `AttributedString` is a value type.
+    private final class HighlightBox { let value: AttributedString; init(_ v: AttributedString) { value = v } }
+    // NSCache is internally thread-safe; `highlight` is only called from SwiftUI
+    // bodies on the main thread in practice.
+    nonisolated(unsafe) private static let highlightCache: NSCache<NSString, HighlightBox> = {
+        let cache = NSCache<NSString, HighlightBox>()
+        cache.countLimit = 600
+        return cache
+    }()
+
     static func highlight(_ code: String, theme: CodeHighlightTheme = .system) -> AttributedString {
+        let key = "\(theme.rawValue)\u{1}\(code)" as NSString
+        if let cached = highlightCache.object(forKey: key) { return cached.value }
+        let result = computeHighlight(code, theme: theme)
+        highlightCache.setObject(HighlightBox(result), forKey: key)
+        return result
+    }
+
+    private static func computeHighlight(_ code: String, theme: CodeHighlightTheme) -> AttributedString {
         var attributed = AttributedString(code)
         let palette = Palette(theme: theme)
         attributed.foregroundColor = palette.plain
@@ -56,6 +86,95 @@ enum CodeHighlighter {
         apply(stringPattern, to: &attributed, in: code, range: nsRange, color: palette.string)
         apply(commentPattern, to: &attributed, in: code, range: nsRange, color: palette.comment)
         return attributed
+    }
+
+    /// Live highlighting for an editable `NSTextView`. Normalizes the whole run
+    /// to the base monospaced font and plain color first (so pasted styling and
+    /// just-typed characters are neutral), then recolors each token class. Cheap
+    /// enough to re-run on every keystroke for clipboard-sized snippets.
+    static func applyHighlighting(to storage: NSTextStorage, baseFont: NSFont, theme: CodeHighlightTheme) {
+        let text = storage.string
+        let full = NSRange(location: 0, length: (text as NSString).length)
+        let palette = NSPalette(theme: theme)
+        storage.beginEditing()
+        storage.setAttributes([.font: baseFont, .foregroundColor: palette.plain], range: full)
+        applyNS(typePattern, to: storage, in: text, range: full, color: palette.type)
+        applyNS(functionPattern, to: storage, in: text, range: full, color: palette.function)
+        applyNS(annotationPattern, to: storage, in: text, range: full, color: palette.annotation)
+        applyNS(keywordPattern, to: storage, in: text, range: full, color: palette.keyword)
+        applyNS(numberPattern, to: storage, in: text, range: full, color: palette.number)
+        applyNS(stringPattern, to: storage, in: text, range: full, color: palette.string)
+        applyNS(commentPattern, to: storage, in: text, range: full, color: palette.comment)
+        storage.endEditing()
+    }
+
+    private static func applyNS(
+        _ regex: NSRegularExpression,
+        to storage: NSTextStorage,
+        in text: String,
+        range: NSRange,
+        color: NSColor
+    ) {
+        for match in regex.matches(in: text, range: range) {
+            storage.addAttribute(.foregroundColor, value: color, range: match.range)
+        }
+    }
+
+    /// NSColor mirror of `Palette`, for the AppKit editor.
+    private struct NSPalette {
+        let plain: NSColor
+        let type: NSColor
+        let function: NSColor
+        let annotation: NSColor
+        let keyword: NSColor
+        let number: NSColor
+        let string: NSColor
+        let comment: NSColor
+
+        init(theme: CodeHighlightTheme) {
+            switch theme {
+            case .system:
+                plain = .labelColor
+                type = .systemTeal
+                function = .systemIndigo
+                annotation = .systemOrange
+                keyword = .systemPurple
+                number = .systemBlue
+                string = .systemRed
+                comment = .secondaryLabelColor
+            case .xcodeLight:
+                plain = Self.rgb(0x1F, 0x1F, 0x24)
+                type = Self.rgb(0x0B, 0x70, 0x70)
+                function = Self.rgb(0x32, 0x4F, 0xA1)
+                annotation = Self.rgb(0x9B, 0x3B, 0x17)
+                keyword = Self.rgb(0xA8, 0x13, 0x6D)
+                number = Self.rgb(0x20, 0x4F, 0xC8)
+                string = Self.rgb(0xC4, 0x1A, 0x16)
+                comment = Self.rgb(0x6C, 0x72, 0x80)
+            case .solarizedLight:
+                plain = Self.rgb(0x58, 0x6E, 0x75)
+                type = Self.rgb(0x26, 0x8B, 0xD2)
+                function = Self.rgb(0x26, 0x8B, 0xD2)
+                annotation = Self.rgb(0xB5, 0x89, 0x00)
+                keyword = Self.rgb(0x85, 0x99, 0x00)
+                number = Self.rgb(0xD3, 0x36, 0x82)
+                string = Self.rgb(0x2A, 0xA1, 0x98)
+                comment = Self.rgb(0x93, 0xA1, 0xA1)
+            case .githubLight:
+                plain = Self.rgb(0x24, 0x2D, 0x3D)
+                type = Self.rgb(0x05, 0x5D, 0xB0)
+                function = Self.rgb(0x82, 0x54, 0xE8)
+                annotation = Self.rgb(0x95, 0x3B, 0x0E)
+                keyword = Self.rgb(0xCF, 0x22, 0xE0)
+                number = Self.rgb(0x05, 0x5D, 0xB0)
+                string = Self.rgb(0x0A, 0x30, 0x6B)
+                comment = Self.rgb(0x65, 0x6D, 0x76)
+            }
+        }
+
+        private static func rgb(_ red: Int, _ green: Int, _ blue: Int) -> NSColor {
+            NSColor(calibratedRed: CGFloat(red) / 255, green: CGFloat(green) / 255, blue: CGFloat(blue) / 255, alpha: 1)
+        }
     }
 
     private struct Palette {

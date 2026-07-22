@@ -96,9 +96,12 @@ private struct SystemGlassSurface: View {
 /// list and SlideoutView are then two pieces of content over one glass sample.
 @available(macOS 26.0, *)
 private struct MaccyGlassBackground: NSViewRepresentable {
-    let glassEffectView = NSGlassEffectView()
-
-    func makeNSView(context: Context) -> NSGlassEffectView { glassEffectView }
+    // Create the backing view inside makeNSView, not as a stored property.
+    // SwiftUI recreates this representable value on every parent body pass; an
+    // eagerly-stored NSView allocated a fresh glass view on each of those passes
+    // only to discard it, since SwiftUI reuses the one it already hosts. The
+    // hosted view and its configuration are unchanged.
+    func makeNSView(context: Context) -> NSGlassEffectView { NSGlassEffectView() }
 
     func updateNSView(_ view: NSGlassEffectView, context: Context) {
         view.style = .regular
@@ -107,9 +110,9 @@ private struct MaccyGlassBackground: NSViewRepresentable {
 
 /// Equivalent to Maccy's pre-Liquid-Glass VisualEffectView fallback.
 private struct MaccyPopoverBackground: NSViewRepresentable {
-    let visualEffectView = NSVisualEffectView()
-
-    func makeNSView(context: Context) -> NSVisualEffectView { visualEffectView }
+    // Same rationale as MaccyGlassBackground: build the view lazily so repeated
+    // body passes don't allocate throwaway effect views.
+    func makeNSView(context: Context) -> NSVisualEffectView { NSVisualEffectView() }
 
     func updateNSView(_ view: NSVisualEffectView, context: Context) {
         view.material = .popover
