@@ -182,6 +182,7 @@ private struct ArchiveSelectionView: View {
     @State private var includeUncategorizedMemes: Bool
     @State private var memeCategoryIDs: Set<UUID>
     @State private var clipboardCategoryKeys: Set<String>
+    @AppStorage(AppPreferences.showsScrollIndicatorsKey) private var showsScrollIndicators = true
 
     init(
         title: String,
@@ -249,6 +250,7 @@ private struct ArchiveSelectionView: View {
                     .padding(.horizontal, 20)
                     .padding(.bottom, 12)
                 }
+                .scrollIndicators(showsScrollIndicators ? .automatic : .hidden)
             }
 
             Divider()

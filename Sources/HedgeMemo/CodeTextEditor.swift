@@ -12,6 +12,7 @@ struct CodeTextEditor: NSViewRepresentable {
     @Binding var text: String
     var theme: CodeHighlightTheme
     var font: NSFont
+    var showsScrollIndicators = true
     /// Invoked on Escape. In the clipboard panel a window monitor consumes
     /// Escape before the text view sees it, so this only fires in the pinned
     /// desktop note; passing a real handler in both places is harmless.
@@ -53,7 +54,7 @@ struct CodeTextEditor: NSViewRepresentable {
         let scroll = NSScrollView()
         scroll.drawsBackground = false
         scroll.backgroundColor = .clear
-        scroll.hasVerticalScroller = true
+        scroll.hasVerticalScroller = showsScrollIndicators
         scroll.hasHorizontalScroller = false
         scroll.autohidesScrollers = true
         scroll.borderType = .noBorder
@@ -67,6 +68,7 @@ struct CodeTextEditor: NSViewRepresentable {
     func updateNSView(_ scroll: NSScrollView, context: Context) {
         guard let textView = scroll.documentView as? CodeNSTextView else { return }
         context.coordinator.parent = self
+        scroll.hasVerticalScroller = showsScrollIndicators
         textView.baseFont = font
         textView.highlightTheme = theme
         textView.onCancel = onCancel

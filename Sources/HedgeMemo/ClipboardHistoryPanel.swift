@@ -791,6 +791,7 @@ private struct ClipboardDetailCard: View {
     @Binding var editText: String
 
     @FocusState private var isEditorFocused: Bool
+    @AppStorage(AppPreferences.showsScrollIndicatorsKey) private var showsScrollIndicators = true
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
@@ -838,7 +839,8 @@ private struct ClipboardDetailCard: View {
             CodeTextEditor(
                 text: $editText,
                 theme: codeHighlightTheme,
-                font: .monospacedSystemFont(ofSize: 11, weight: .regular)
+                font: .monospacedSystemFont(ofSize: 11, weight: .regular),
+                showsScrollIndicators: showsScrollIndicators
             )
             .padding(6)
             .background(
@@ -859,6 +861,7 @@ private struct ClipboardDetailCard: View {
             TextEditor(text: $editText)
                 .font(.system(size: 12))
                 .scrollContentBackground(.hidden)
+                .scrollIndicators(showsScrollIndicators ? .automatic : .hidden)
                 .padding(6)
                 .background(
                     RoundedRectangle(cornerRadius: 6, style: .continuous)
@@ -886,7 +889,7 @@ private struct ClipboardDetailCard: View {
                     .frame(maxWidth: .infinity, alignment: .leading)
                     .padding(.bottom, 4)
             }
-            .scrollIndicators(.automatic)
+            .scrollIndicators(showsScrollIndicators ? .automatic : .hidden)
             .frame(height: ClipboardDetailLayout.previewAreaHeight(cardHeight: cardSize.height))
         } else {
             ScrollView(.vertical) {
@@ -896,7 +899,7 @@ private struct ClipboardDetailCard: View {
                     .frame(maxWidth: .infinity, alignment: .leading)
                     .padding(.bottom, 4)
             }
-            .scrollIndicators(.automatic)
+            .scrollIndicators(showsScrollIndicators ? .automatic : .hidden)
             .frame(height: ClipboardDetailLayout.previewAreaHeight(cardHeight: cardSize.height))
         }
     }
@@ -1193,6 +1196,7 @@ struct ClipboardHistoryPanelView: View {
     /// panel actually collapses. Without it the whole expanded preview vanishes
     /// in a single frame, which reads as a crash rather than a dismissal.
     @State private var editorClosing = false
+    @AppStorage(AppPreferences.showsScrollIndicatorsKey) private var showsScrollIndicators = true
 
     fileprivate init(
         store: ClipboardHistoryStore,
@@ -1265,6 +1269,7 @@ struct ClipboardHistoryPanelView: View {
                 ScrollView {
                     content
                 }
+                .scrollIndicators(showsScrollIndicators ? .automatic : .hidden)
                 .onChange(of: activeSelectionID) { _, id in
                     // Hover must never scroll the view underneath the pointer;
                     // doing so made a different cell appear selected. Only

@@ -26,6 +26,7 @@ struct MemePanelView: View {
     @State private var captureService: ClipboardCaptureService?
     @State private var editingMeme: MemeItem?
     @State private var showsError = false
+    @AppStorage(AppPreferences.showsScrollIndicatorsKey) private var showsScrollIndicators = true
 
     // Three visible rows of square tiles; the grid scrolls beyond that.
     private let tileSide: CGFloat = 92
@@ -101,6 +102,7 @@ struct MemePanelView: View {
                     )
                     .padding(2)
                 }
+                .scrollIndicators(showsScrollIndicators ? .automatic : .hidden)
                 .coordinateSpace(name: Self.viewportSpace)
             }
             .frame(height: gridHeight)

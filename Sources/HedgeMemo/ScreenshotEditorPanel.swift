@@ -373,6 +373,7 @@ private struct ScreenshotCanvasViewport: View {
     @Binding var lineWidth: Double
     @Binding var zoomScale: Double
     @Binding var state: ScreenshotCanvasState
+    @AppStorage(AppPreferences.showsScrollIndicatorsKey) private var showsScrollIndicators = true
 
     var body: some View {
         GeometryReader { geometry in
@@ -389,7 +390,7 @@ private struct ScreenshotCanvasViewport: View {
                     )
                     .padding(ScreenshotEditorLayout.canvasPadding)
             }
-            .scrollIndicators(zoomScale > 1 ? .automatic : .hidden)
+            .scrollIndicators(showsScrollIndicators && zoomScale > 1 ? .automatic : .hidden)
         }
         // Do not add a tinted canvas backdrop over the shared panel material.
         // The captured image itself supplies the reading surface.

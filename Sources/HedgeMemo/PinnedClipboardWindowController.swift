@@ -206,6 +206,7 @@ private struct PinnedClipboardNoteView: View {
     let onSaveText: (String) -> Void
 
     @FocusState private var isEditorFocused: Bool
+    @AppStorage(AppPreferences.showsScrollIndicatorsKey) private var showsScrollIndicators = true
 
     var body: some View {
         VStack(spacing: 0) {
@@ -300,6 +301,7 @@ private struct PinnedClipboardNoteView: View {
                 text: $model.draftText,
                 theme: codeHighlightTheme,
                 font: .monospacedSystemFont(ofSize: 12, weight: .regular),
+                showsScrollIndicators: showsScrollIndicators,
                 onCancel: cancelEditing
             )
             .padding(6)
@@ -316,6 +318,7 @@ private struct PinnedClipboardNoteView: View {
             TextEditor(text: $model.draftText)
                 .font(.system(size: 13))
                 .scrollContentBackground(.hidden)
+                .scrollIndicators(showsScrollIndicators ? .automatic : .hidden)
                 .padding(6)
                 .background(
                     RoundedRectangle(cornerRadius: 6, style: .continuous)
@@ -347,7 +350,7 @@ private struct PinnedClipboardNoteView: View {
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .fixedSize(horizontal: false, vertical: true)
             }
-            .scrollIndicators(.automatic)
+            .scrollIndicators(showsScrollIndicators ? .automatic : .hidden)
             .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
     }

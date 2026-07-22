@@ -10,7 +10,7 @@ private enum SettingsLayout {
 }
 
 private enum AppVersion {
-    static let display = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "1.0.5"
+    static let display = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "1.1.0"
 }
 
 /// Hosts the settings UI in a standalone translucent panel, opened from the status bar menu.
@@ -87,11 +87,13 @@ struct SettingsPanelView: View {
     @State private var accessibilityTrusted = AXIsProcessTrusted()
     @State private var customDraft: CustomCategoryDraft?
     @StateObject private var launchAtLogin = LaunchAtLoginController()
+    @AppStorage(AppPreferences.showsScrollIndicatorsKey) private var showsScrollIndicators = true
 
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 22) {
                 clipboardSection
+                appearanceSection
                 codeAppearanceSection
                 categorySection
                 screenshotSection
@@ -162,6 +164,19 @@ struct SettingsPanelView: View {
                 } label: {
                     Label("清空剪贴板历史", systemImage: "trash")
                 }
+            }
+        }
+    }
+
+    private var appearanceSection: some View {
+        SettingsSection(
+            title: "外观",
+            footer: "关闭后仍可正常滚动，只隐藏剪切板、表情包和其他界面的滚动条。"
+        ) {
+            SettingsFormRow("显示滚动条") {
+                Toggle("显示滚动条", isOn: $showsScrollIndicators)
+                    .labelsHidden()
+                    .accessibilityHint("控制 HedgeMemo 所有可滚动内容的滚动条显示")
             }
         }
     }
