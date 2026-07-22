@@ -160,9 +160,9 @@ struct SettingsPanelView: View {
             SettingsDivider()
             SettingsActionRow {
                 Button(role: .destructive) {
-                    clipboardStore.clearHistory()
+                    ClipboardClearSelectionPanel.run(store: clipboardStore)
                 } label: {
-                    Label("清空剪贴板历史", systemImage: "trash")
+                    Label("清除剪贴板历史…", systemImage: "trash")
                 }
             }
         }

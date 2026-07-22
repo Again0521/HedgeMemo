@@ -182,6 +182,33 @@ public final class ClipboardHistoryStore: ObservableObject {
         persist()
     }
 
+    /// Number of unique entries covered by a set of categories. Custom regex
+    /// categories may overlap built-ins or one another, so entries are counted
+    /// once even when several selected keys match them.
+    public func entryCount(matching keys: Set<ClipboardCategoryKey>) -> Int {
+        guard !keys.isEmpty else { return 0 }
+        let customs = settings.customCategories ?? []
+        return entries.lazy.filter { entry in
+            keys.contains { entry.matches(key: $0, customCategories: customs) }
+        }.count
+    }
+
+    /// Clears only entries matched by at least one selected category, including
+    /// backing image files. Category configuration and enabled state are kept.
+    public func clearHistory(matching keys: Set<ClipboardCategoryKey>) {
+        guard !keys.isEmpty else { return }
+        let customs = settings.customCategories ?? []
+        let removed = entries.filter { entry in
+            keys.contains { entry.matches(key: $0, customCategories: customs) }
+        }
+        guard !removed.isEmpty else { return }
+        let removedIDs = Set(removed.map(\.id))
+        entries.removeAll { removedIDs.contains($0.id) }
+        for entry in removed { removeImageIfNeeded(entry) }
+        normalizePinnedOrders()
+        persist()
+    }
+
     public func snapshot() -> ClipboardHistorySnapshot {
         ClipboardHistorySnapshot(entries: entries, settings: settings)
     }

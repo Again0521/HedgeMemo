@@ -173,6 +173,9 @@ final class StatusItemController: NSObject {
         menu.addItem(screenshot)
         menu.addItem(.separator())
 
+        menu.addItem(actionItem("清除剪贴板…", #selector(clearClipboardHistory)))
+        menu.addItem(.separator())
+
         menu.addItem(actionItem("设置…", #selector(openSettings)))
         menu.addItem(.separator())
         menu.addItem(actionItem("退出 HedgeMemo", #selector(quit)))
@@ -201,6 +204,9 @@ final class StatusItemController: NSObject {
     @objc private func screenshotDefault() { services.captureScreenshot(requestedMode: nil) }
     @objc private func screenshotManual() { services.captureScreenshot(requestedMode: .manualSelection) }
     @objc private func screenshotSmart() { services.captureScreenshot(requestedMode: .smartWindow) }
+    @objc private func clearClipboardHistory() {
+        DispatchQueue.main.async { [services] in services.clearClipboardHistoryByCategory() }
+    }
     @objc private func openSettings() {
         DispatchQueue.main.async { [weak self] in self?.settingsWindow.show() }
     }

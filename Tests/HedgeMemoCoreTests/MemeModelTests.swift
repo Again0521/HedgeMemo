@@ -18,6 +18,17 @@ final class MemeModelTests: XCTestCase {
         XCTAssertTrue(meme.matches(query: "hello"))
     }
 
+    func testPercentWildcardSearchesNoteAndOCR() {
+        let note = Fixture.meme("release-candidate-final", hash: "percent-note")
+        let ocr = Fixture.meme("未命名", hash: "percent-ocr", ocr: "订单 2026 已完成")
+
+        XCTAssertTrue(note.matches(query: "release%final"))
+        XCTAssertTrue(note.matches(query: "%candidate%"))
+        XCTAssertTrue(note.matches(query: "candidate%"), "queries are implicitly fuzzy at both ends")
+        XCTAssertTrue(note.matches(query: "lease%final"))
+        XCTAssertTrue(ocr.matches(query: "%2026%完成"))
+    }
+
     func testCategoryFilterPreservesSortOrder() {
         let category = UUID()
         let first = Fixture.meme("一", hash: "1", category: category, sortOrder: 0)

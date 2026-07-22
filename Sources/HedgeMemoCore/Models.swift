@@ -1,5 +1,47 @@
 import Foundation
 
+/// Case-insensitive fuzzy matching with `%` as an ordered-fragment wildcard.
+/// Queries are implicitly fuzzy on both ends, so `jav%` can match text that has
+/// characters before `jav`; `%` is useful for requiring separated fragments
+/// such as `java%script`. Queries without `%` retain contains behavior.
+public struct PercentFuzzyMatcher: Sendable {
+    private let pattern: String
+    private let fragments: [String]
+    private let hasWildcard: Bool
+
+    public init(query: String) {
+        pattern = query.trimmingCharacters(in: .whitespacesAndNewlines)
+        hasWildcard = pattern.contains("%")
+        fragments = hasWildcard
+            ? pattern.split(separator: "%", omittingEmptySubsequences: false).map(String.init)
+            : []
+    }
+
+    public func matches(_ candidate: String) -> Bool {
+        guard !pattern.isEmpty else { return true }
+        guard hasWildcard else { return candidate.localizedCaseInsensitiveContains(pattern) }
+
+        let options: String.CompareOptions = [.caseInsensitive]
+        var cursor = candidate.startIndex
+        var lastMatch: Range<String.Index>?
+
+        for fragment in fragments where !fragment.isEmpty {
+            guard let match = candidate.range(of: fragment, options: options, range: cursor..<candidate.endIndex) else {
+                return false
+            }
+            lastMatch = match
+            cursor = match.upperBound
+        }
+
+        // A pattern made only from `%` characters matches everything.
+        return lastMatch != nil || fragments.allSatisfy(\.isEmpty)
+    }
+
+    public static func matches(_ candidate: String, query: String) -> Bool {
+        Self(query: query).matches(candidate)
+    }
+}
+
 public struct MemeCategory: Codable, Hashable, Identifiable, Sendable {
     public let id: UUID
     public var name: String
@@ -46,10 +88,11 @@ public struct MemeItem: Codable, Hashable, Identifiable, Sendable {
     }
 
     public func matches(query: String) -> Bool {
-        let normalized = query.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !normalized.isEmpty else { return true }
-        return note.localizedCaseInsensitiveContains(normalized)
-            || ocrText.localizedCaseInsensitiveContains(normalized)
+        matches(matcher: PercentFuzzyMatcher(query: query))
+    }
+
+    public func matches(matcher: PercentFuzzyMatcher) -> Bool {
+        matcher.matches(note) || matcher.matches(ocrText)
     }
 }
 
@@ -65,9 +108,10 @@ public struct MemeSnapshot: Codable, Sendable {
 
 public enum MemeFilter {
     public static func apply(_ memes: [MemeItem], categoryID: UUID?, query: String) -> [MemeItem] {
-        memes
+        let matcher = PercentFuzzyMatcher(query: query)
+        return memes
             .filter { categoryID == nil || $0.categoryID == categoryID }
-            .filter { $0.matches(query: query) }
+            .filter { $0.matches(matcher: matcher) }
             .sorted { lhs, rhs in
                 if lhs.sortOrder == rhs.sortOrder { return lhs.createdAt < rhs.createdAt }
                 return lhs.sortOrder < rhs.sortOrder
@@ -617,9 +661,11 @@ public struct ClipboardEntry: Codable, Hashable, Identifiable, Sendable {
     }
 
     public func matches(query: String) -> Bool {
-        let normalized = query.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !normalized.isEmpty else { return true }
-        return previewText.localizedCaseInsensitiveContains(normalized)
+        matches(matcher: PercentFuzzyMatcher(query: query))
+    }
+
+    public func matches(matcher: PercentFuzzyMatcher) -> Bool {
+        matcher.matches(previewText)
     }
 
     public func matches(key: ClipboardCategoryKey?, customCategories: [CustomClipboardCategory] = []) -> Bool {
@@ -653,8 +699,9 @@ public enum ClipboardHistoryPolicy {
         key: ClipboardCategoryKey? = nil,
         customCategories: [CustomClipboardCategory] = []
     ) -> [ClipboardEntry] {
-        entries
-            .filter { $0.matches(query: query) && $0.matches(key: key, customCategories: customCategories) }
+        let matcher = PercentFuzzyMatcher(query: query)
+        return entries
+            .filter { $0.matches(matcher: matcher) && $0.matches(key: key, customCategories: customCategories) }
             .sorted { lhs, rhs in
                 if lhs.isPinned != rhs.isPinned { return lhs.isPinned && !rhs.isPinned }
                 if lhs.isPinned {

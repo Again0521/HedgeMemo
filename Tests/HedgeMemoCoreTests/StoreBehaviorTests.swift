@@ -243,4 +243,17 @@ final class StoreBehaviorTests: XCTestCase {
         store.clearHistory()
         XCTAssertTrue(store.entries.isEmpty)
     }
+
+    func testClearHistoryCanTargetSelectedCategories() {
+        let store = makeClipboardStore()
+        XCTAssertTrue(store.addText("普通中文内容"))
+        XCTAssertTrue(store.addText("let answer = 42;"))
+        XCTAssertTrue(store.addText("https://example.com/path"))
+
+        let selected: Set<ClipboardCategoryKey> = [.builtin(.code), .builtin(.link)]
+        XCTAssertEqual(store.entryCount(matching: selected), 2)
+        store.clearHistory(matching: selected)
+
+        XCTAssertEqual(store.entries.compactMap(\.text), ["普通中文内容"])
+    }
 }

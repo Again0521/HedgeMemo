@@ -93,4 +93,14 @@ final class ClipboardHistoryPolicyTests: XCTestCase {
         XCTAssertTrue(entry.matches(query: "   "), "blank query keeps the entry")
         XCTAssertFalse(entry.matches(query: "缺席"))
     }
+
+    func testPercentWildcardSearchSupportsImplicitFuzzyEndsAndOrderedFragments() {
+        let entry = Fixture.text("Invoice 2026 approved", hash: "percent")
+        XCTAssertTrue(entry.matches(query: "invoice%approved"))
+        XCTAssertTrue(entry.matches(query: "%2026%"))
+        XCTAssertTrue(entry.matches(query: "%APPROVED"))
+        XCTAssertTrue(entry.matches(query: "2026%"))
+        XCTAssertTrue(entry.matches(query: "%invoice"))
+        XCTAssertFalse(entry.matches(query: "approved%invoice"), "fragments must still appear in order")
+    }
 }
