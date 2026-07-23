@@ -309,7 +309,13 @@ final class GlobalHotKeyController: @unchecked Sendable {
                 )
                 guard status == noErr, hotKeyID.signature == GlobalHotKeyController.signature else { return noErr }
                 let controller = Unmanaged<GlobalHotKeyController>.fromOpaque(userData).takeUnretainedValue()
-                Task { @MainActor in controller.actions[hotKeyID.id]?() }
+                // Carbon delivers this on the main thread. Run the action
+                // synchronously via `assumeIsolated` rather than hopping through
+                // a `Task`: a queued main-actor Task is starved whenever another
+                // nested run loop (an open menu, a modal panel) is up, which made
+                // the hot key silently do nothing until that loop closed. A
+                // synchronous main-thread call is immune to that starvation.
+                MainActor.assumeIsolated { controller.actions[hotKeyID.id]?() }
                 return noErr
             },
             1,

@@ -83,6 +83,15 @@ cat >"$INFO_PLIST" <<PLIST
 <key>LSMinimumSystemVersion</key><string>$MIN_SYSTEM_VERSION</string>
 <key>LSUIElement</key><true/>
 <key>NSPrincipalClass</key><string>NSApplication</string>
+<key>LSEnvironment</key>
+<dict>
+<!-- macOS 26/27's Swift 6 concurrency runtime crashes in
+     swift_task_isCurrentExecutorImpl (a dynamic MainActor-isolation probe that
+     dereferences a stale executor) during ordinary SwiftUI ForEach body
+     updates. "legacy" restores the pre-Swift-6, non-crashing executor check —
+     Apple's supported migration escape hatch for exactly this runtime bug. -->
+<key>SWIFT_IS_CURRENT_EXECUTOR_LEGACY_MODE_OVERRIDE</key><string>legacy</string>
+</dict>
 </dict></plist>
 PLIST
 
