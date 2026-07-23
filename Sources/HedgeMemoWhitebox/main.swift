@@ -106,6 +106,7 @@ expect(ScreenshotHotKeyChoice.controlShiftFive.displayName.contains("Control"), 
 expect(ScreenshotSettings().opensEditorAfterCapture, "screenshot editor should open by default")
 let noEditorSettings = ScreenshotSettings(opensEditorAfterCapture: false)
 expect(!noEditorSettings.opensEditorAfterCapture, "screenshot editor setting must allow direct save")
+expect(MemePanelSettings().hotKey == .defaultMemePanel, "meme panel must default to Command + Shift + E")
 let customClipboardHotKey = HotKeyDefinition(keyCode: 9, key: "V", command: true, option: true)
 expect(customClipboardHotKey.isUsable, "custom hotkey with a modifier must be usable")
 expect(customClipboardHotKey.displayName == "Command + Option + V", "custom hotkey display must include modifiers and key")

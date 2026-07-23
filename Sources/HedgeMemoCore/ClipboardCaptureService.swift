@@ -4,16 +4,19 @@ import Foundation
 @MainActor
 public final class ClipboardCaptureService {
     private var timer: Timer?
-    private var observedChangeCount = NSPasteboard.general.changeCount
+    private let pasteboard: NSPasteboard
+    private var observedChangeCount: Int
     private let onImage: (ImageAssetData) -> Void
 
-    public init(onImage: @escaping (ImageAssetData) -> Void) {
+    public init(pasteboard: NSPasteboard = .general, onImage: @escaping (ImageAssetData) -> Void) {
+        self.pasteboard = pasteboard
+        observedChangeCount = pasteboard.changeCount
         self.onImage = onImage
     }
 
     public func start() {
         stop()
-        observedChangeCount = NSPasteboard.general.changeCount
+        observedChangeCount = pasteboard.changeCount
         let timer = Timer(timeInterval: 0.6, repeats: true) { [weak self] _ in
             Task { @MainActor in
                 self?.inspectPasteboard()
@@ -31,8 +34,10 @@ public final class ClipboardCaptureService {
         timer = nil
     }
 
-    private func inspectPasteboard() {
-        let pasteboard = NSPasteboard.general
+    /// Immediately inspects the configured pasteboard. The timer calls this in
+    /// production; keeping it internal lets the isolated regression test prove
+    /// the exact image-capture path without touching the user's clipboard.
+    func inspectPasteboard() {
         guard pasteboard.changeCount != observedChangeCount else { return }
         observedChangeCount = pasteboard.changeCount
         // Only consume image bytes already present on the pasteboard. Resolving

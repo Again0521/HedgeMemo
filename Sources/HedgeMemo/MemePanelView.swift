@@ -29,7 +29,6 @@ struct MemePanelView: View {
     /// Reference state is intentional: geometry changes must not redraw tiles.
     @State private var scrollMetrics = MemeScrollMetrics()
     @State private var lastAutoscroll = Date.distantPast
-    @State private var captureService: ClipboardCaptureService?
     @State private var editingMeme: MemeItem?
     @State private var showsError = false
     @AppStorage(AppPreferences.showsScrollIndicatorsKey) private var showsScrollIndicators = true
@@ -134,9 +133,6 @@ struct MemePanelView: View {
         } message: {
             Text(store.lastError ?? "未知错误")
         }
-        .onChange(of: store.captureEnabled) { _, enabled in
-            configureCapture(enabled: enabled)
-        }
         .onChange(of: store.lastError) { _, error in
             showsError = error != nil
         }
@@ -151,7 +147,6 @@ struct MemePanelView: View {
             .frame(width: 1, height: 1)
         )
         .onDisappear {
-            captureService?.stop()
             clearDragState()
             store.releaseTransientCaches()
             ImageThumbnailCache.shared.scheduleIdlePurge()
@@ -171,7 +166,7 @@ struct MemePanelView: View {
             HoverIconButton(
                 systemImage: store.captureEnabled ? "record.circle.fill" : "record.circle",
                 tint: store.captureEnabled ? .red : .primary,
-                help: store.captureEnabled ? "结束捕获" : "开始捕获剪贴板图片",
+                help: store.captureEnabled ? "正在捕获：可收起面板后继续复制图片" : "开始捕获剪贴板图片",
                 action: { store.captureEnabled.toggle() }
             )
         }
@@ -229,19 +224,6 @@ struct MemePanelView: View {
            let last = visibleMemes.firstIndex(where: { $0.id == id }) {
             selectedIDs = Set(visibleMemes[min(first, last)...max(first, last)].map(\.id))
             return
-        }
-    }
-
-    private func configureCapture(enabled: Bool) {
-        if enabled {
-            let service = ClipboardCaptureService { image in
-                _ = store.addImageData(image)
-            }
-            captureService = service
-            service.start()
-        } else {
-            captureService?.stop()
-            captureService = nil
         }
     }
 

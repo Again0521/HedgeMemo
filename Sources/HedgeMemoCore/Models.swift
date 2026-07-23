@@ -475,6 +475,9 @@ public struct HotKeyDefinition: Codable, Equatable, Hashable, Sendable {
     /// Screenshot's default shortcut is ⇧⌘P. Keep the prior shortcut as a
     /// migration sentinel so existing default settings move forward once.
     public static let defaultScreenshot = HotKeyDefinition(keyCode: 35, key: "P", command: true, shift: true)
+    /// The meme panel is a quick picker, so its default stays adjacent to the
+    /// other Command-Shift shortcuts without overlapping them.
+    public static let defaultMemePanel = HotKeyDefinition(keyCode: 14, key: "E", command: true, shift: true)
     public static let legacyScreenshot = HotKeyDefinition(keyCode: 23, key: "5", control: true, shift: true)
 
     public var isUsable: Bool {
@@ -932,5 +935,15 @@ public enum ScreenshotPolicy {
         var updated = settings
         updated.mode = usedMode
         return updated
+    }
+}
+
+/// User preference for opening the meme picker. It lives separately from the
+/// library snapshot because changing a shortcut must not rewrite image data.
+public struct MemePanelSettings: Codable, Equatable, Sendable {
+    public var hotKey: HotKeyDefinition
+
+    public init(hotKey: HotKeyDefinition = .defaultMemePanel) {
+        self.hotKey = hotKey
     }
 }

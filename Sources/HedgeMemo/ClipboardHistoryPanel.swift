@@ -30,6 +30,9 @@ private final class ClipboardDetailPresentation: ObservableObject {
         let mainTopOffset: CGFloat
         let mainHeight: CGFloat
         let detailTopOffset: CGFloat
+        /// Vertical location of the selected row inside the detail card. This
+        /// keeps the directional arrow aligned if the card is screen-clamped.
+        let pointerOffsetY: CGFloat
 
         static let hidden = State(
             entry: nil,
@@ -39,7 +42,8 @@ private final class ClipboardDetailPresentation: ObservableObject {
             placement: .right,
             mainTopOffset: 0,
             mainHeight: 0,
-            detailTopOffset: 0
+            detailTopOffset: 0,
+            pointerOffsetY: 0
         )
     }
 
@@ -53,6 +57,7 @@ private final class ClipboardDetailPresentation: ObservableObject {
     var mainTopOffset: CGFloat { state.mainTopOffset }
     var mainHeight: CGFloat { state.mainHeight }
     var detailTopOffset: CGFloat { state.detailTopOffset }
+    var pointerOffsetY: CGFloat { state.pointerOffsetY }
     var isVisible: Bool { state.entry != nil }
 
     func show(
@@ -63,7 +68,8 @@ private final class ClipboardDetailPresentation: ObservableObject {
         placement: Placement,
         mainTopOffset: CGFloat,
         mainHeight: CGFloat,
-        detailTopOffset: CGFloat
+        detailTopOffset: CGFloat,
+        pointerOffsetY: CGFloat
     ) {
         state = State(
             entry: entry,
@@ -73,7 +79,8 @@ private final class ClipboardDetailPresentation: ObservableObject {
             placement: placement,
             mainTopOffset: mainTopOffset,
             mainHeight: mainHeight,
-            detailTopOffset: detailTopOffset
+            detailTopOffset: detailTopOffset,
+            pointerOffsetY: pointerOffsetY
         )
     }
 
@@ -506,6 +513,17 @@ final class ClipboardHistoryPanelController: NSObject, NSWindowDelegate {
         case .overlay:
             hostFrame = mainFrame
         }
+        let detailTopOffset = placement == .overlay
+            ? max(0, min(mainFrame.height - size.height, detailY - mainFrame.minY))
+            : hostFrame.maxY - detailY - size.height
+        // During a pointer preview the cursor is over the selected row. Keep
+        // that vertical relationship if the detail card is clamped at a screen
+        // edge, so its arrow still points at the selected row rather than the
+        // card's geometric center.
+        let pointerOffsetY = min(
+            max(hostFrame.maxY - mouseY - detailTopOffset, ClipboardDetailPointer.height / 2),
+            size.height - ClipboardDetailPointer.height / 2
+        )
         detailPresentation.show(
             entry: entry,
             imageURL: imageURL,
@@ -514,9 +532,8 @@ final class ClipboardHistoryPanelController: NSObject, NSWindowDelegate {
             placement: placement,
             mainTopOffset: hostFrame.maxY - mainFrame.maxY,
             mainHeight: mainFrame.height,
-            detailTopOffset: placement == .overlay
-                ? max(0, min(mainFrame.height - size.height, detailY - mainFrame.minY))
-                : hostFrame.maxY - detailY - size.height
+            detailTopOffset: detailTopOffset,
+            pointerOffsetY: pointerOffsetY
         )
         mainScreenFrame = mainFrame
         // Commit the SwiftUI presentation state and the AppKit host frame in
@@ -1188,6 +1205,31 @@ private enum ClipboardDetailLayout {
 
 // MARK: - Panel content
 
+/// A small directional bridge between the selected clipboard row and its
+/// side-preview. It is only used when the preview has room to sit beside the
+/// list; overlay previews intentionally have no misleading source direction.
+private struct ClipboardDetailPointer: Shape {
+    static let width: CGFloat = 14
+    static let height: CGFloat = 22
+
+    let pointsRight: Bool
+
+    func path(in rect: CGRect) -> Path {
+        var path = Path()
+        if pointsRight {
+            path.move(to: CGPoint(x: rect.minX, y: rect.minY))
+            path.addLine(to: CGPoint(x: rect.maxX, y: rect.midY))
+            path.addLine(to: CGPoint(x: rect.minX, y: rect.maxY))
+        } else {
+            path.move(to: CGPoint(x: rect.maxX, y: rect.minY))
+            path.addLine(to: CGPoint(x: rect.minX, y: rect.midY))
+            path.addLine(to: CGPoint(x: rect.maxX, y: rect.maxY))
+        }
+        path.closeSubpath()
+        return path
+    }
+}
+
 struct ClipboardHistoryPanelView: View {
     @ObservedObject var store: ClipboardHistoryStore
     @ObservedObject private var detailPresentation: ClipboardDetailPresentation
@@ -1260,6 +1302,8 @@ struct ClipboardHistoryPanelView: View {
                 .frame(width: ClipboardPanelLayout.panelWidth, height: currentMainHeight)
                 .offset(x: mainCardXOffset, y: detailPresentation.mainTopOffset)
 
+                detailPointer
+
                 detailCard
                     .offset(x: detailCardXOffset, y: detailPresentation.detailTopOffset)
             }
@@ -1283,6 +1327,25 @@ struct ClipboardHistoryPanelView: View {
             ClipboardPanelLayout.panelWidth + 10
         case .overlay:
             max(0, (ClipboardPanelLayout.panelWidth - detailPresentation.cardSize.width) / 2)
+        }
+    }
+
+    @ViewBuilder
+    private var detailPointer: some View {
+        if detailPresentation.isVisible, detailPresentation.placement != .overlay {
+            let pointsRight = detailPresentation.placement == .left
+            let x: CGFloat = if pointsRight {
+                detailCardXOffset + detailPresentation.cardSize.width - 4
+            } else {
+                detailCardXOffset - 10
+            }
+            ClipboardDetailPointer(pointsRight: pointsRight)
+                .fill(.regularMaterial)
+                .frame(width: ClipboardDetailPointer.width, height: ClipboardDetailPointer.height)
+                .offset(
+                    x: x,
+                    y: detailPresentation.detailTopOffset + detailPresentation.pointerOffsetY - ClipboardDetailPointer.height / 2
+                )
         }
     }
 

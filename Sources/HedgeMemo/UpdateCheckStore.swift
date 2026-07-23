@@ -3,7 +3,7 @@ import Foundation
 import HedgeMemoCore
 
 enum AppVersion {
-    static let display = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "1.1.5"
+    static let display = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "1.1.7"
 }
 
 struct AvailableAppRelease: Equatable, Sendable {

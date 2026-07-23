@@ -11,11 +11,21 @@ final class AppServices: ObservableObject {
     let memeStore = MemeStore()
     let clipboardStore = ClipboardHistoryStore()
     let screenshotSettingsStore = ScreenshotSettingsStore()
+    let memePanelSettingsStore = MemePanelSettingsStore()
     let updateCheckStore = UpdateCheckStore()
     @Published private(set) var hotKeyWarnings: [String] = []
 
+    /// Assigned by the status-item owner after it has built the native popover.
+    /// Keeping the callback here lets the Carbon hot-key controller stay
+    /// app-scoped while the presentation details remain in the UI controller.
+    var memePanelHotKeyAction: (() -> Void)?
+
     private var hotKeyController: GlobalHotKeyController?
     private var clipboardPanelController: ClipboardHistoryPanelController?
+    /// Image capture must outlive the menu-bar popover: users start capture,
+    /// switch to another app to copy an image, and the popover closes as part
+    /// of that normal workflow.
+    private var memeCaptureService: ClipboardCaptureService?
     private let screenshotService = ScreenshotService()
     private let screenshotEditor = ScreenshotEditorPanelController()
     private var cancellables = Set<AnyCancellable>()
@@ -50,6 +60,9 @@ final class AppServices: ObservableObject {
         updateHotKeyWarning(.screenshot, status: hotKey.registerScreenshotHotKey(screenshotSettingsStore.settings.hotKey ?? .defaultScreenshot) { [weak self] in
             self?.captureScreenshot()
         })
+        updateHotKeyWarning(.memePanel, status: hotKey.registerMemePanelHotKey(memePanelSettingsStore.settings.hotKey) { [weak self] in
+            self?.memePanelHotKeyAction?()
+        })
         clipboardStore.$settings
             .dropFirst()
             .map { $0.hotKey ?? .defaultClipboard }
@@ -73,15 +86,43 @@ final class AppServices: ObservableObject {
                 Task { @MainActor in self?.updateHotKeyWarning(.screenshot, status: status) }
             }
             .store(in: &cancellables)
+        memePanelSettingsStore.$settings
+            .dropFirst()
+            .map(\.hotKey)
+            .removeDuplicates()
+            .sink { [weak self, weak hotKey] definition in
+                let status = hotKey?.registerMemePanelHotKey(definition) { [weak self] in
+                    self?.memePanelHotKeyAction?()
+                } ?? OSStatus(eventHotKeyInvalidErr)
+                Task { @MainActor in self?.updateHotKeyWarning(.memePanel, status: status) }
+            }
+            .store(in: &cancellables)
         memeStore.$captureEnabled
             .removeDuplicates()
             .sink { [weak self] capturing in
-                self?.clipboardStore.isRecordingPaused = capturing
+                guard let self else { return }
+                self.clipboardStore.isRecordingPaused = capturing
+                self.configureMemeCapture(enabled: capturing)
             }
             .store(in: &cancellables)
 
         clipboardPanelController = panelController
         hotKeyController = hotKey
+    }
+
+    private func configureMemeCapture(enabled: Bool) {
+        guard enabled else {
+            memeCaptureService?.stop()
+            memeCaptureService = nil
+            return
+        }
+        guard memeCaptureService == nil else { return }
+        let service = ClipboardCaptureService { [weak self] image in
+            guard let self else { return }
+            _ = self.memeStore.addImageData(image)
+        }
+        memeCaptureService = service
+        service.start()
     }
 
     func captureScreenshot(requestedMode: ScreenshotMode? = nil) {
@@ -171,7 +212,11 @@ final class AppServices: ObservableObject {
     }
 
     private func updateHotKeyWarning(_ kind: HotKeyKind, status: OSStatus) {
-        let prefix = kind == .clipboard ? "剪贴板快捷键" : "截图快捷键"
+        let prefix = switch kind {
+        case .clipboard: "剪贴板快捷键"
+        case .screenshot: "截图快捷键"
+        case .memePanel: "表情包面板快捷键"
+        }
         let message: String?
         if status == noErr {
             message = nil
@@ -219,6 +264,10 @@ final class GlobalHotKeyController: @unchecked Sendable {
 
     func registerScreenshotHotKey(_ hotKey: HotKeyDefinition, onTrigger: @escaping () -> Void) -> OSStatus {
         register(id: 2, hotKey: hotKey, onTrigger: onTrigger)
+    }
+
+    func registerMemePanelHotKey(_ hotKey: HotKeyDefinition, onTrigger: @escaping () -> Void) -> OSStatus {
+        register(id: 3, hotKey: hotKey, onTrigger: onTrigger)
     }
 
     private func register(id: UInt32, hotKey: HotKeyDefinition, onTrigger: @escaping () -> Void) -> OSStatus {
@@ -274,6 +323,7 @@ final class GlobalHotKeyController: @unchecked Sendable {
 private enum HotKeyKind {
     case clipboard
     case screenshot
+    case memePanel
 }
 
 private extension HotKeyDefinition {

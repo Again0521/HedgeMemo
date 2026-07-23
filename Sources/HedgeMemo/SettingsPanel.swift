@@ -14,6 +14,7 @@ private enum SettingsLayout {
 final class SettingsWindowController: NSObject, NSWindowDelegate {
     private let clipboardStore: ClipboardHistoryStore
     private let screenshotSettingsStore: ScreenshotSettingsStore
+    private let memePanelSettingsStore: MemePanelSettingsStore
     private let updateCheckStore: UpdateCheckStore
     private let hotKeyWarnings: () -> [String]
     private var panel: NSPanel?
@@ -21,11 +22,13 @@ final class SettingsWindowController: NSObject, NSWindowDelegate {
     init(
         clipboardStore: ClipboardHistoryStore,
         screenshotSettingsStore: ScreenshotSettingsStore,
+        memePanelSettingsStore: MemePanelSettingsStore,
         updateCheckStore: UpdateCheckStore,
         hotKeyWarnings: @escaping () -> [String]
     ) {
         self.clipboardStore = clipboardStore
         self.screenshotSettingsStore = screenshotSettingsStore
+        self.memePanelSettingsStore = memePanelSettingsStore
         self.updateCheckStore = updateCheckStore
         self.hotKeyWarnings = hotKeyWarnings
     }
@@ -66,6 +69,7 @@ final class SettingsWindowController: NSObject, NSWindowDelegate {
         let content = SettingsPanelView(
             clipboardStore: clipboardStore,
             screenshotSettingsStore: screenshotSettingsStore,
+            memePanelSettingsStore: memePanelSettingsStore,
             updateCheckStore: updateCheckStore,
             hotKeyWarnings: hotKeyWarnings()
         )
@@ -84,6 +88,7 @@ final class SettingsWindowController: NSObject, NSWindowDelegate {
 struct SettingsPanelView: View {
     @ObservedObject var clipboardStore: ClipboardHistoryStore
     @ObservedObject var screenshotSettingsStore: ScreenshotSettingsStore
+    @ObservedObject var memePanelSettingsStore: MemePanelSettingsStore
     @ObservedObject var updateCheckStore: UpdateCheckStore
     let hotKeyWarnings: [String]
     @State private var accessibilityTrusted = AXIsProcessTrusted()
@@ -99,13 +104,14 @@ struct SettingsPanelView: View {
                 codeAppearanceSection
                 categorySection
                 screenshotSection
+                memePanelSection
                 startupSection
                 updateSection
                 authorSection
-                if hasHotKeyConflict || !hotKeyWarnings.isEmpty {
+                if !hotKeyConflictMessages.isEmpty || !hotKeyWarnings.isEmpty {
                     SettingsSection(title: "提醒") {
-                    if hasHotKeyConflict {
-                        Label("剪贴板和截图快捷键不能相同", systemImage: "exclamationmark.triangle")
+                    ForEach(hotKeyConflictMessages, id: \.self) { message in
+                        Label(message, systemImage: "exclamationmark.triangle")
                             .font(.caption)
                             .foregroundStyle(.orange)
                     }
@@ -318,6 +324,15 @@ struct SettingsPanelView: View {
         }
     }
 
+    private var memePanelSection: some View {
+        SettingsSection(title: "表情包面板", footer: "按下快捷键后，面板会出现在鼠标附近；复制表情包或点击面板外会自动收起。") {
+            SettingsFormRow("唤醒快捷键") {
+                HotKeyRecorderControl(hotKey: memePanelHotKeyBinding)
+                    .frame(width: 180, height: 28)
+            }
+        }
+    }
+
     private var startupSection: some View {
         SettingsSection(title: "启动") {
             SettingsFormRow("登录时自动启动") {
@@ -479,6 +494,13 @@ struct SettingsPanelView: View {
         )
     }
 
+    private var memePanelHotKeyBinding: Binding<HotKeyDefinition> {
+        Binding(
+            get: { memePanelSettingsStore.settings.hotKey },
+            set: { memePanelSettingsStore.settings.hotKey = $0 }
+        )
+    }
+
     private var remembersScreenshotModeBinding: Binding<Bool> {
         Binding(
             get: { screenshotSettingsStore.settings.remembersLastMode },
@@ -493,8 +515,21 @@ struct SettingsPanelView: View {
         )
     }
 
-    private var hasHotKeyConflict: Bool {
-        HotKeyPolicy.conflicts(clipboardStore.settings.hotKey ?? .defaultClipboard, screenshotSettingsStore.settings.hotKey ?? .defaultScreenshot)
+    private var hotKeyConflictMessages: [String] {
+        let hotKeys = [
+            ("剪贴板", clipboardStore.settings.hotKey ?? .defaultClipboard),
+            ("截图", screenshotSettingsStore.settings.hotKey ?? .defaultScreenshot),
+            ("表情包面板", memePanelSettingsStore.settings.hotKey),
+        ]
+        var messages = [String]()
+        for index in hotKeys.indices {
+            for other in hotKeys.dropFirst(index + 1) {
+                if HotKeyPolicy.conflicts(hotKeys[index].1, other.1) {
+                    messages.append("\(hotKeys[index].0)和\(other.0)快捷键不能相同")
+                }
+            }
+        }
+        return messages
     }
 
     private func refreshAccessibilityTrust() {

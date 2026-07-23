@@ -60,6 +60,21 @@ final class StoreBehaviorTests: XCTestCase {
         XCTAssertEqual(try? Data(contentsOf: store.imageURL(for: gif)), Fixture.gifBytes)
     }
 
+    func testMemeCaptureServiceConsumesClipboardImages() {
+        let pasteboard = NSPasteboard.withUniqueName()
+        let payload = ImageAssetData(data: Fixture.gifBytes, fileExtension: "gif")
+        var captured: ImageAssetData?
+        let service = ClipboardCaptureService(pasteboard: pasteboard) { captured = $0 }
+        service.start()
+        defer { service.stop() }
+
+        XCTAssertTrue(payload.write(to: pasteboard))
+        service.inspectPasteboard()
+
+        XCTAssertEqual(captured?.data, Fixture.gifBytes)
+        XCTAssertEqual(captured?.fileExtension, "gif")
+    }
+
     func testBundledSampleMemesLoadSeedInOrderAndDedup() throws {
         // Repo root is three levels up from Tests/HedgeMemoCoreTests/<thisFile>.
         let resources = URL(fileURLWithPath: #filePath)

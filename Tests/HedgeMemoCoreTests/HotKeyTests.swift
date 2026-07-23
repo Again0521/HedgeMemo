@@ -20,6 +20,7 @@ final class HotKeyTests: XCTestCase {
     func testBuiltInDefaults() {
         XCTAssertEqual(HotKeyDefinition.defaultClipboard.displayName, "Command + Shift + V")
         XCTAssertEqual(HotKeyDefinition.defaultScreenshot.displayName, "Command + Shift + P")
+        XCTAssertEqual(HotKeyDefinition.defaultMemePanel.displayName, "Command + Shift + E")
     }
 
     func testConflictsOnlyBetweenIdenticalUsableHotKeys() {

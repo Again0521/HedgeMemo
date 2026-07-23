@@ -57,10 +57,13 @@ public final class ClipboardHistoryStore: ObservableObject {
         stopMonitoring()
         observedChangeCount = NSPasteboard.general.changeCount
         let timer = Timer(timeInterval: 0.55, repeats: true) { [weak self] _ in
-            // This timer is installed exclusively on RunLoop.main below. Avoid
-            // allocating an unstructured Task on every idle tick; the isolation
-            // assertion documents and enforces that delivery contract.
-            MainActor.assumeIsolated { self?.inspectPasteboard() }
+            // A RunLoop timer is delivered on the main thread, but its closure
+            // is not actor-isolated. Hop explicitly instead of using
+            // `assumeIsolated`, whose runtime assertion can crash while AppKit
+            // is processing another event.
+            Task { @MainActor [weak self] in
+                self?.inspectPasteboard()
+            }
         }
         // This poll runs for the whole session in the background. A generous
         // tolerance lets the OS coalesce its wakeups with other timers, which

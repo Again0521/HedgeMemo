@@ -10,6 +10,9 @@ final class StatusItemController: NSObject {
     private let services: AppServices
     private let statusItem: NSStatusItem
     private let popover = NSPopover()
+    /// A shortcut has no anchor view. It uses a compact native panel so the
+    /// picker can appear at the pointer without a menu-bar popover arrow.
+    private var keyboardMemePanel: NSPanel?
     /// Keep the menu alive until AppKit has finished its tracking loop. Clearing
     /// `statusItem.menu` immediately after `performClick` leaves a stale menu
     /// responder behind when an item opens a modal panel.
@@ -24,6 +27,7 @@ final class StatusItemController: NSObject {
     private lazy var settingsWindow = SettingsWindowController(
         clipboardStore: services.clipboardStore,
         screenshotSettingsStore: services.screenshotSettingsStore,
+        memePanelSettingsStore: services.memePanelSettingsStore,
         updateCheckStore: services.updateCheckStore,
         hotKeyWarnings: { [services] in services.hotKeyWarnings }
     )
@@ -32,6 +36,7 @@ final class StatusItemController: NSObject {
         self.services = services
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
         super.init()
+        services.memePanelHotKeyAction = { [weak self] in self?.showPopoverAtMouseLocation() }
         configureButton()
         configurePopover()
         observeUpdates()
@@ -101,15 +106,88 @@ final class StatusItemController: NSObject {
             return
         }
         guard let button = statusItem.button else { return }
+        showPopover(relativeTo: button.bounds, of: button, preferredEdge: .minY)
+    }
+
+    /// A global shortcut has no status-item anchor. Keep the menu-bar popover
+    /// for mouse clicks, but use an arrowless native panel at the pointer.
+    private func showPopoverAtMouseLocation() {
+        guard !popover.isShown, keyboardMemePanel?.isVisible != true else { return }
+        showKeyboardMemePanel(near: NSEvent.mouseLocation)
+    }
+
+    private func showPopover(relativeTo rect: NSRect, of view: NSView, preferredEdge: NSRectEdge) {
+        hideKeyboardMemePanel()
         installMemeContent()
         ImageThumbnailCache.shared.beginInteractiveUse()
         NSApp.activate(ignoringOtherApps: true)
-        popover.show(relativeTo: button.bounds, of: button, preferredEdge: .minY)
+        popover.show(relativeTo: rect, of: view, preferredEdge: preferredEdge)
         clampPopoverToScreen()
         // AppKit may still adjust the popover frame right after `show`;
         // re-clamp once that settles so the final position is on screen too.
         DispatchQueue.main.async { [weak self] in self?.clampPopoverToScreen() }
         startOutsideClickMonitor()
+    }
+
+    private func showKeyboardMemePanel(near mouseLocation: NSPoint) {
+        let panel = keyboardMemePanel ?? makeKeyboardMemePanel()
+        keyboardMemePanel = panel
+        installKeyboardMemeContent(in: panel)
+        let screen = NSScreen.screens.first(where: { $0.frame.contains(mouseLocation) }) ?? NSScreen.main
+        let visible = (screen?.visibleFrame ?? .zero).insetBy(dx: 8, dy: 8)
+        var frame = panel.frame
+        frame.origin.x = min(max(mouseLocation.x + 8, visible.minX), visible.maxX - frame.width)
+        frame.origin.y = min(max(mouseLocation.y - frame.height + 8, visible.minY), visible.maxY - frame.height)
+        panel.setFrame(frame, display: true)
+        ImageThumbnailCache.shared.beginInteractiveUse()
+        NSApp.activate(ignoringOtherApps: true)
+        panel.makeKeyAndOrderFront(nil)
+        panel.orderFrontRegardless()
+        startOutsideClickMonitor()
+    }
+
+    private func makeKeyboardMemePanel() -> NSPanel {
+        let panel = KeyableMemePanel(
+            contentRect: NSRect(x: 0, y: 0, width: 420, height: 410),
+            styleMask: [.borderless, .nonactivatingPanel],
+            backing: .buffered,
+            defer: false
+        )
+        panel.isOpaque = false
+        panel.backgroundColor = .clear
+        panel.hasShadow = true
+        panel.isFloatingPanel = true
+        panel.level = .statusBar
+        panel.collectionBehavior = [.auxiliary, .moveToActiveSpace, .fullScreenAuxiliary]
+        panel.hidesOnDeactivate = false
+        panel.becomesKeyOnlyIfNeeded = true
+        PanelMaterialHost.install(EmptyView(), in: panel, cornerRadius: 16)
+        return panel
+    }
+
+    private func installKeyboardMemeContent(in panel: NSPanel) {
+        guard let root = panel.contentView else { return }
+        PanelMaterialHost.replace(
+            MemePanelView(
+                store: services.memeStore,
+                onDismiss: { [weak self] in self?.hideKeyboardMemePanel() }
+            ),
+            in: root
+        )
+        root.layoutSubtreeIfNeeded()
+        let fitting = root.fittingSize
+        // Reserve the management row so toggling it cannot crop the panel.
+        panel.setContentSize(NSSize(width: 420, height: max(410, fitting.height)))
+    }
+
+    private func hideKeyboardMemePanel() {
+        guard let panel = keyboardMemePanel else { return }
+        panel.orderOut(nil)
+        panel.contentView = nil
+        keyboardMemePanel = nil
+        if !popover.isShown { stopOutsideClickMonitor() }
+        services.memeStore.releaseTransientCaches()
+        ImageThumbnailCache.shared.scheduleIdlePurge()
     }
 
     /// A status item near the right screen edge can get its wide popover
@@ -143,7 +221,7 @@ final class StatusItemController: NSObject {
         outsideClickMonitor = NSEvent.addGlobalMonitorForEvents(
             matching: [.leftMouseDown, .rightMouseDown]
         ) { [weak self] _ in
-            self?.popover.performClose(nil)
+            self?.closeMemePanel()
         }
         // Application-defined popovers do not get transient dismissal for
         // clicks in our own process. Add the corresponding local monitor, but
@@ -151,7 +229,7 @@ final class StatusItemController: NSObject {
         localOutsideClickMonitor = NSEvent.addLocalMonitorForEvents(matching: [.leftMouseDown, .rightMouseDown]) { [weak self] event in
             guard let self else { return event }
             if self.isInsidePopoverHierarchy(event) { return event }
-            self.popover.performClose(nil)
+            self.closeMemePanel()
             return event
         }
     }
@@ -168,13 +246,21 @@ final class StatusItemController: NSObject {
     }
 
     private func isInsidePopoverHierarchy(_ event: NSEvent) -> Bool {
-        guard let popoverWindow = popover.contentViewController?.view.window else { return false }
         guard let eventWindow = event.window else { return false }
-        return eventWindow === popoverWindow || eventWindow.sheetParent === popoverWindow
+        if let popoverWindow = popover.contentViewController?.view.window,
+           eventWindow === popoverWindow || eventWindow.sheetParent === popoverWindow {
+            return true
+        }
+        return eventWindow === keyboardMemePanel
+    }
+
+    private func closeMemePanel() {
+        popover.performClose(nil)
+        hideKeyboardMemePanel()
     }
 
     private func showMenu() {
-        popover.performClose(nil)
+        closeMemePanel()
         let menu = buildMenu()
         menu.delegate = self
         activeMenu = menu
@@ -251,6 +337,12 @@ extension StatusItemController: NSPopoverDelegate {
         services.memeStore.releaseTransientCaches()
         ImageThumbnailCache.shared.scheduleIdlePurge()
     }
+}
+
+/// A borderless shortcut panel must explicitly accept key status for the
+/// search field to receive keyboard input.
+private final class KeyableMemePanel: NSPanel {
+    override var canBecomeKey: Bool { true }
 }
 
 extension StatusItemController: NSMenuDelegate {
