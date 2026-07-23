@@ -78,7 +78,9 @@ final class StatusItemController: NSObject {
         popover.behavior = .applicationDefined
         popover.animates = true
         popover.delegate = self
-        installMemeContent()
+        // Content is installed lazily on first show (and released again in
+        // `popoverDidClose`), so a session that never opens the meme popover
+        // never builds or retains its SwiftUI graph while idle.
     }
 
     private func installMemeContent() {

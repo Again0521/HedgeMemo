@@ -44,6 +44,12 @@ final class AppServices: ObservableObject {
     func start() {
         guard !didStart else { return }
         didStart = true
+        // Clicking a meme copies its image to the system pasteboard so the user
+        // can paste it, but that write must not be recaptured into the clipboard
+        // history — keep the app's own clipboard clean.
+        memeStore.onDidCopyToPasteboard = { [weak self] in
+            self?.clipboardStore.suppressCurrentPasteboardChange()
+        }
         updateCheckStore.checkAutomaticallyIfNeeded()
         if !CommandLine.arguments.contains(where: { $0.hasPrefix("--preview-") }) {
             // Seed first-run content before monitoring writes any history, so the

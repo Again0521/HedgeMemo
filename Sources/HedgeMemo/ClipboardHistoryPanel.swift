@@ -1484,12 +1484,19 @@ struct ClipboardHistoryPanelView: View {
         visibleEntryLimit = ClipboardPanelPagination.initialLimit(for: activeKey)
     }
 
-    private func loadNextPageIfNeeded(after entry: ClipboardEntry) {
-        guard let last = visibleEntries.last, last.id == entry.id,
-              visibleEntries.count < entries.count else { return }
+    private func loadNextPageIfNeeded(atIndex index: Int) {
+        // `entries` is memoized, so `.count` is O(1); avoid allocating the
+        // `visibleEntries` prefix array on every cell's onAppear.
+        let total = entries.count
+        let visibleCount = min(visibleEntryLimit, total)
+        guard visibleCount < total else { return }
+        // Grow when a cell within the prefetch window near the tail appears,
+        // not only the very last one, so the next page is ready before it is
+        // scrolled to.
+        guard index >= visibleCount - ClipboardPanelPagination.prefetchDistance(for: activeKey) else { return }
         visibleEntryLimit = ClipboardPanelPagination.nextLimit(
             current: visibleEntryLimit,
-            total: entries.count,
+            total: total,
             key: activeKey
         )
     }
@@ -1547,7 +1554,7 @@ struct ClipboardHistoryPanelView: View {
                         EntryHoverTrackingOverlay { updateHover($0, entry: entry) }
                     }
                     .contextMenu { entryMenu(entry) }
-                    .onAppear { loadNextPageIfNeeded(after: entry) }
+                    .onAppear { loadNextPageIfNeeded(atIndex: index) }
                 }
             }
         default:
@@ -1592,7 +1599,7 @@ struct ClipboardHistoryPanelView: View {
                         EntryHoverTrackingOverlay { updateHover($0, entry: entry) }
                     }
                     .contextMenu { entryMenu(entry) }
-                    .onAppear { loadNextPageIfNeeded(after: entry) }
+                    .onAppear { loadNextPageIfNeeded(atIndex: index) }
                 }
             }
         }

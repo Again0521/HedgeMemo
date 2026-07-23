@@ -106,6 +106,56 @@ final class StoreBehaviorTests: XCTestCase {
         XCTAssertEqual(store.filteredMemes(query: "").count, 3)
     }
 
+    func testCopyingAMemeNotifiesSoItStaysOutOfHistory() {
+        let store = makeMemeStore()
+        XCTAssertTrue(store.addImage(Fixture.solidImage(0.5, size: 8), note: "图"))
+        let meme = store.filteredMemes(query: "")[0]
+        var notified = false
+        store.onDidCopyToPasteboard = { notified = true }
+        // A throwaway pasteboard keeps the test off the real system clipboard.
+        store.copyToPasteboard(meme, to: NSPasteboard.withUniqueName())
+        XCTAssertTrue(notified, "a meme copy must notify so the app can suppress recapture")
+    }
+
+    func testSuppressingTheCurrentPasteboardChangeIsIdempotentAndSafe() {
+        // The suppression entry point exists for meme clicks; it must run without
+        // touching entries and reflect the current system change count.
+        let store = makeClipboardStore()
+        XCTAssertTrue(store.addText("原始"))
+        let before = store.entries
+        store.suppressCurrentPasteboardChange()
+        XCTAssertEqual(store.entries, before, "suppression must not add or remove history entries")
+    }
+
+    /// End-to-end: an image the app itself put on the system pasteboard (a meme
+    /// click) must not be recaptured into history, while an ordinary image on
+    /// the pasteboard still is. Uses the real `.general` pasteboard because the
+    /// monitor reads it directly; the written images are tiny.
+    func testMemeCopyIsSuppressedWhileOrdinaryImagesAreRecorded() {
+        // Control: no suppression wired — the pasteboard image IS captured.
+        let control = makeClipboardStore()
+        let memeA = makeMemeStore()
+        XCTAssertTrue(memeA.addImage(Fixture.solidImage(0.5, size: 8)))
+        memeA.copyToPasteboard(memeA.filteredMemes(query: "")[0])
+        control.inspectPasteboard()
+        XCTAssertEqual(
+            control.orderedEntries(key: .builtin(.image)).count, 1,
+            "an ordinary image on the pasteboard is captured"
+        )
+
+        // Wired exactly as AppServices does: the app's own copy is suppressed.
+        let clip = makeClipboardStore()
+        let memeB = makeMemeStore()
+        memeB.onDidCopyToPasteboard = { [weak clip] in clip?.suppressCurrentPasteboardChange() }
+        XCTAssertTrue(memeB.addImage(Fixture.solidImage(0.6, size: 8)))
+        memeB.copyToPasteboard(memeB.filteredMemes(query: "")[0])
+        clip.inspectPasteboard()
+        XCTAssertTrue(
+            clip.orderedEntries(key: .builtin(.image)).isEmpty,
+            "a meme the app copied must stay out of clipboard history"
+        )
+    }
+
     func testMovingAMemeAdoptsTheTargetCategory() {
         let store = makeMemeStore()
         XCTAssertTrue(store.addImage(Fixture.solidImage(0.2, size: 6), note: "图"))

@@ -191,9 +191,15 @@ public final class MemeStore: ObservableObject {
         persist()
     }
 
-    public func copyToPasteboard(_ meme: MemeItem) {
+    /// Invoked right after a meme is written to the system pasteboard, so the
+    /// owner can keep that write out of the app's own clipboard history — a
+    /// pasted meme should reach the next app, not pile up in the clipboard list.
+    public var onDidCopyToPasteboard: (@MainActor () -> Void)?
+
+    public func copyToPasteboard(_ meme: MemeItem, to pasteboard: NSPasteboard = .general) {
         guard let payload = ImageAssetData(fileURL: repository.imageURL(for: meme)) else { return }
-        payload.write(to: .general)
+        guard payload.write(to: pasteboard) else { return }
+        onDidCopyToPasteboard?()
     }
 
     public func imageURL(for meme: MemeItem) -> URL { repository.imageURL(for: meme) }

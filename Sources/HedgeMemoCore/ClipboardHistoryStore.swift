@@ -38,6 +38,12 @@ public final class ClipboardHistoryStore: ObservableObject {
     private var timer: Timer?
     private var observedChangeCount = NSPasteboard.general.changeCount
     private var suppressedChangeCount: Int?
+    /// Sleep/wake observers so the poll can be torn down while nothing can copy.
+    private var sleepWakeObservers: [NSObjectProtocol] = []
+    /// True between `startMonitoring()` and `stopMonitoring()`. Distinguishes a
+    /// deliberate stop from a sleep-induced suspend so the timer only rebuilds
+    /// on wake when monitoring is actually meant to be running.
+    private var isMonitoringEnabled = false
 
     public init(repository: ClipboardHistoryRepository = .default) {
         self.repository = repository
@@ -55,7 +61,23 @@ public final class ClipboardHistoryStore: ObservableObject {
 
     public func startMonitoring() {
         stopMonitoring()
+        isMonitoringEnabled = true
         observedChangeCount = NSPasteboard.general.changeCount
+        schedulePollTimer()
+        installSleepWakeObservers()
+    }
+
+    public func stopMonitoring() {
+        isMonitoringEnabled = false
+        timer?.invalidate()
+        timer = nil
+        let center = NSWorkspace.shared.notificationCenter
+        for observer in sleepWakeObservers { center.removeObserver(observer) }
+        sleepWakeObservers.removeAll()
+    }
+
+    private func schedulePollTimer() {
+        timer?.invalidate()
         let timer = Timer(timeInterval: 0.55, repeats: true) { [weak self] _ in
             // A RunLoop timer is delivered on the main thread, but its closure
             // is not actor-isolated. Hop explicitly instead of using
@@ -77,9 +99,41 @@ public final class ClipboardHistoryStore: ObservableObject {
         self.timer = timer
     }
 
-    public func stopMonitoring() {
+    /// Nothing can be copied while the display is asleep or the machine is
+    /// suspended, so tear the poll timer down for those windows and rebuild it
+    /// on wake. Over a locked-and-away laptop this removes one to two CPU
+    /// wakeups per second for hours; on wake the change-count comparison still
+    /// captures whatever was last on the pasteboard.
+    private func installSleepWakeObservers() {
+        let center = NSWorkspace.shared.notificationCenter
+        let sleepNames: [NSNotification.Name] = [
+            NSWorkspace.screensDidSleepNotification,
+            NSWorkspace.willSleepNotification,
+        ]
+        let wakeNames: [NSNotification.Name] = [
+            NSWorkspace.screensDidWakeNotification,
+            NSWorkspace.didWakeNotification,
+        ]
+        for name in sleepNames {
+            sleepWakeObservers.append(center.addObserver(forName: name, object: nil, queue: .main) { [weak self] _ in
+                Task { @MainActor in self?.suspendPolling() }
+            })
+        }
+        for name in wakeNames {
+            sleepWakeObservers.append(center.addObserver(forName: name, object: nil, queue: .main) { [weak self] _ in
+                Task { @MainActor in self?.resumePollingIfNeeded() }
+            })
+        }
+    }
+
+    private func suspendPolling() {
         timer?.invalidate()
         timer = nil
+    }
+
+    private func resumePollingIfNeeded() {
+        guard isMonitoringEnabled, timer == nil else { return }
+        schedulePollTimer()
     }
 
     public func orderedEntries(query: String = "", key: ClipboardCategoryKey? = nil) -> [ClipboardEntry] {
@@ -172,6 +226,17 @@ public final class ClipboardHistoryStore: ObservableObject {
         observedChangeCount = changeCount
         suppressedChangeCount = changeCount
         return addImageData(payload, sourceApp: "HedgeMemo", origin: .hedgeMemoScreenshot)
+    }
+
+    /// Marks the pasteboard's current change as one the app made itself (e.g. a
+    /// meme click that puts an image on the system clipboard to paste). The next
+    /// poll then treats it as already handled instead of recording it back into
+    /// the history, so pasting a meme never pollutes the clipboard list. Call
+    /// this immediately after the app's own pasteboard write.
+    public func suppressCurrentPasteboardChange() {
+        let changeCount = NSPasteboard.general.changeCount
+        observedChangeCount = changeCount
+        suppressedChangeCount = changeCount
     }
 
     public func delete(id: UUID) {
@@ -355,7 +420,9 @@ public final class ClipboardHistoryStore: ObservableObject {
 
     private var isPersistenceDisabled = false
 
-    private func inspectPasteboard() {
+    /// Internal (not private) so a `@testable` integration test can drive one
+    /// poll deterministically instead of waiting on the real timer.
+    func inspectPasteboard() {
         let pasteboard = NSPasteboard.general
         guard pasteboard.changeCount != observedChangeCount else { return }
         observedChangeCount = pasteboard.changeCount

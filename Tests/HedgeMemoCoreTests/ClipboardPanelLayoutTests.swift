@@ -11,6 +11,10 @@ final class ClipboardPanelLayoutTests: XCTestCase {
         XCTAssertNil(ClipboardPanelPagination.pageSize(for: .builtin(.text)))
         XCTAssertEqual(ClipboardPanelPagination.nextLimit(current: 48, total: 130, key: .builtin(.image)), 96)
         XCTAssertEqual(ClipboardPanelPagination.nextLimit(current: 96, total: 100, key: .builtin(.image)), 100)
+        // Paged categories prefetch a quarter-page before the tail; unpaged ones never do.
+        XCTAssertEqual(ClipboardPanelPagination.prefetchDistance(for: .builtin(.image)), 12)
+        XCTAssertEqual(ClipboardPanelPagination.prefetchDistance(for: .builtin(.code)), 15)
+        XCTAssertEqual(ClipboardPanelPagination.prefetchDistance(for: .builtin(.text)), 0)
     }
 
     // MARK: - Row metrics
