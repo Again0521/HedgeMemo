@@ -29,18 +29,15 @@ enum HedgehogIcon {
     static func statusImage(hasUpdate: Bool) -> NSImage {
         guard hasUpdate else { return baseStatusImage }
         let size = baseStatusImage.size
-        // The update badge must keep a colored hint, so this composite cannot be
-        // a template. Tint the silhouette with the dynamic `labelColor` (which
-        // AppKit re-resolves per appearance when the button redraws) so it still
-        // tracks the menu bar, then stamp a colored up-arrow on top.
+        // Keep the whole badge a template so it stays exactly as adaptive as the
+        // plain icon — a colored (e.g. blue) arrow would follow the app's own
+        // appearance, not the menu bar, and could show a dark hedgehog against
+        // light icons on a dark bar, which is the very thing being fixed. The
+        // up-arrow shape (plus the tooltip) still signals an available update.
         let composed = NSImage(size: size, flipped: false) { rect in
             baseStatusImage.draw(in: rect)
-            NSColor.labelColor.set()
-            rect.fill(using: .sourceAtop)
-            let arrowConfig = NSImage.SymbolConfiguration(pointSize: 7, weight: .heavy)
-                .applying(.init(paletteColors: [.systemBlue]))
             guard let arrow = NSImage(systemSymbolName: "arrow.up", accessibilityDescription: "有新版本")?
-                .withSymbolConfiguration(arrowConfig) else { return true }
+                .withSymbolConfiguration(.init(pointSize: 7, weight: .heavy)) else { return true }
             let arrowSize = NSSize(width: 7, height: 7)
             let arrowRect = NSRect(
                 x: rect.maxX - arrowSize.width,
@@ -51,7 +48,7 @@ enum HedgehogIcon {
             arrow.draw(in: arrowRect, from: .zero, operation: .sourceOver, fraction: 1)
             return true
         }
-        composed.isTemplate = false
+        composed.isTemplate = true
         return composed
     }
 }
