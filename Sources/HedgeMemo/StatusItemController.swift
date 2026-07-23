@@ -1,4 +1,5 @@
 import AppKit
+import Combine
 import HedgeMemoCore
 import SwiftUI
 
@@ -19,9 +20,11 @@ final class StatusItemController: NSObject {
     /// popover is application-defined and dismissal is managed here instead.
     private var outsideClickMonitor: Any?
     private var localOutsideClickMonitor: Any?
+    private var cancellables = Set<AnyCancellable>()
     private lazy var settingsWindow = SettingsWindowController(
         clipboardStore: services.clipboardStore,
         screenshotSettingsStore: services.screenshotSettingsStore,
+        updateCheckStore: services.updateCheckStore,
         hotKeyWarnings: { [services] in services.hotKeyWarnings }
     )
 
@@ -31,6 +34,7 @@ final class StatusItemController: NSObject {
         super.init()
         configureButton()
         configurePopover()
+        observeUpdates()
     }
 
     private func configureButton() {
@@ -38,13 +42,28 @@ final class StatusItemController: NSObject {
         // The hedgehog is a colored picture (dark body, white snout), not a
         // monochrome glyph — keep HedgehogIcon's isTemplate = false. Forcing a
         // template here flattened it into an all-dark silhouette with no face.
-        let icon = HedgehogIcon.statusImage
+        let icon = HedgehogIcon.statusImage(hasUpdate: services.updateCheckStore.showsUpdateBadge)
         button.image = icon
         button.imagePosition = .imageOnly
         button.toolTip = "HedgeMemo"
         button.target = self
         button.action = #selector(handleClick)
         button.sendAction(on: [.leftMouseUp, .rightMouseUp])
+    }
+
+    private func observeUpdates() {
+        services.updateCheckStore.$showsUpdateBadge
+            .removeDuplicates()
+            .sink { [weak self] showsBadge in
+                guard let self, let button = self.statusItem.button else { return }
+                button.image = HedgehogIcon.statusImage(hasUpdate: showsBadge)
+                if showsBadge, let release = self.services.updateCheckStore.availableRelease {
+                    button.toolTip = "HedgeMemo，有新版本 v\(release.version.displayString)"
+                } else {
+                    button.toolTip = "HedgeMemo"
+                }
+            }
+            .store(in: &cancellables)
     }
 
     private func configurePopover() {
@@ -54,6 +73,11 @@ final class StatusItemController: NSObject {
         popover.behavior = .applicationDefined
         popover.animates = true
         popover.delegate = self
+        installMemeContent()
+    }
+
+    private func installMemeContent() {
+        guard popover.contentViewController == nil else { return }
         // NSPopover already renders with native vibrancy chrome.
         popover.contentViewController = NSHostingController(rootView: MemePanelView(
             store: services.memeStore,
@@ -77,6 +101,8 @@ final class StatusItemController: NSObject {
             return
         }
         guard let button = statusItem.button else { return }
+        installMemeContent()
+        ImageThumbnailCache.shared.beginInteractiveUse()
         NSApp.activate(ignoringOtherApps: true)
         popover.show(relativeTo: button.bounds, of: button, preferredEdge: .minY)
         clampPopoverToScreen()
@@ -219,6 +245,11 @@ final class StatusItemController: NSObject {
 extension StatusItemController: NSPopoverDelegate {
     func popoverDidClose(_ notification: Notification) {
         stopOutsideClickMonitor()
+        // Release the hidden LazyVGrid and its visible AppKit image views. The
+        // library model remains in MemeStore and is reattached on the next open.
+        popover.contentViewController = nil
+        services.memeStore.releaseTransientCaches()
+        ImageThumbnailCache.shared.scheduleIdlePurge()
     }
 }
 

@@ -187,10 +187,24 @@ final class ClipboardHistoryPanelController: NSObject, NSWindowDelegate {
     func hide() {
         hideDetail()
         stopClickOutsideMonitor()
-        panel?.orderOut(nil)
+        guard let panel else { return }
+        panel.orderOut(nil)
+        // The hidden hosting tree otherwise retains its visible NSImageViews,
+        // highlighted strings and row state indefinitely. Rebuilding this small
+        // transient panel on demand trades a little open-time setup for a much
+        // smaller true background footprint.
+        panel.delegate = nil
+        panel.contentView = nil
+        self.panel = nil
+        mainSurface = nil
+        mainScreenFrame = .zero
+        pendingProgrammaticFrame = nil
+        store.releaseTransientCaches()
+        ImageThumbnailCache.shared.scheduleIdlePurge()
     }
 
     private func show() {
+        ImageThumbnailCache.shared.beginInteractiveUse()
         let panel = panel ?? makePanel()
         self.panel = panel
         let content = ClipboardHistoryPanelView(
@@ -223,8 +237,11 @@ final class ClipboardHistoryPanelController: NSObject, NSWindowDelegate {
             PanelMaterialHost.replace(content, in: mainSurface, usesWindowMaterial: false)
         }
         let key = store.settings.activeCategoryKey
+        let ordered = store.orderedEntries(key: key)
+        let pageLimit = ClipboardPanelPagination.initialLimit(for: key)
+        let heightEntries = Array(ordered.prefix(min(pageLimit, ordered.count)))
         resize(
-            contentHeight: ClipboardPanelLayout.contentHeight(for: store.orderedEntries(key: key), key: key),
+            contentHeight: ClipboardPanelLayout.contentHeight(for: heightEntries, key: key),
             animate: false
         )
         position(panel)
@@ -1196,6 +1213,11 @@ struct ClipboardHistoryPanelView: View {
     /// panel actually collapses. Without it the whole expanded preview vanishes
     /// in a single frame, which reads as a crash rather than a dismissal.
     @State private var editorClosing = false
+    /// Code highlighting and image decoding are the expensive row types. Keep
+    /// only a bounded prefix in SwiftUI's view tree, extending it when the last
+    /// rendered item becomes visible. The complete ordered result remains in
+    /// `entries` for search, shortcuts and keyboard navigation.
+    @State private var visibleEntryLimit = Int.max
     @AppStorage(AppPreferences.showsScrollIndicatorsKey) private var showsScrollIndicators = true
 
     fileprivate init(
@@ -1214,10 +1236,15 @@ struct ClipboardHistoryPanelView: View {
         self.onDetailEntry = onDetailEntry
         self.onAddToMemes = onAddToMemes
         self.onTogglePin = onTogglePin
+        _visibleEntryLimit = State(initialValue: ClipboardPanelPagination.initialLimit(for: store.settings.activeCategoryKey))
     }
 
     private var activeKey: ClipboardCategoryKey { store.settings.activeCategoryKey }
     private var entries: [ClipboardEntry] { store.orderedEntries(query: query, key: activeKey) }
+    private var visibleEntries: [ClipboardEntry] {
+        guard ClipboardPanelPagination.pageSize(for: activeKey) != nil else { return entries }
+        return Array(entries.prefix(min(visibleEntryLimit, entries.count)))
+    }
     private var activeSelectionID: UUID? { hoveredID ?? keyboardSelectedID }
 
     var body: some View {
@@ -1298,13 +1325,17 @@ struct ClipboardHistoryPanelView: View {
         // actions remain available no matter which control has focus.
         .background(KeyCaptureView { event in handleKey(event) }.frame(width: 1, height: 1))
         .onAppear {
+            resetPagination()
             validateSelection()
             reportContentHeight()
         }
-        .onChange(of: query) { _, _ in selectionAndSizeChanged() }
-        .onChange(of: store.settings.lastCategory) { _, _ in selectionAndSizeChanged() }
-        .onChange(of: activeKey.storageValue) { _, _ in selectionAndSizeChanged() }
-        .onChange(of: store.entries) { _, _ in selectionAndSizeChanged() }
+        .onChange(of: query) { _, _ in selectionAndSizeChanged(resetPage: true) }
+        .onChange(of: store.settings.lastCategory) { _, _ in selectionAndSizeChanged(resetPage: true) }
+        .onChange(of: activeKey.storageValue) { _, _ in selectionAndSizeChanged(resetPage: true) }
+        .onChange(of: store.entries) { _, _ in selectionAndSizeChanged(resetPage: false) }
+        .onChange(of: visibleEntryLimit) { _, _ in
+            DispatchQueue.main.async { reportContentHeight() }
+        }
         // Once the card is actually gone, clear the closing flag so the next
         // preview to appear starts fully visible rather than mid-fade.
         .onChange(of: detailPresentation.isVisible) { _, visible in
@@ -1365,10 +1396,11 @@ struct ClipboardHistoryPanelView: View {
         }
     }
 
-    private func selectionAndSizeChanged() {
+    private func selectionAndSizeChanged(resetPage: Bool) {
         // A query/category switch or a background list refresh must not yank
         // the detail card out from under an active edit and discard the draft.
         guard editingEntryID == nil else { return }
+        if resetPage { resetPagination() }
         validateSelection()
         // A category/query change replaces the list, so a preview of the old
         // entry is invalid. Collapse it before calculating the new category's
@@ -1379,7 +1411,30 @@ struct ClipboardHistoryPanelView: View {
     }
 
     private func reportContentHeight() {
-        onContentChange(ClipboardPanelLayout.contentHeight(for: entries, key: activeKey))
+        // One page is deliberately much taller than the panel's maximum viewport,
+        // so using the rendered prefix yields the same clamped window size without
+        // scanning every long code value solely for height arithmetic.
+        onContentChange(ClipboardPanelLayout.contentHeight(for: visibleEntries, key: activeKey))
+    }
+
+    private func resetPagination() {
+        visibleEntryLimit = ClipboardPanelPagination.initialLimit(for: activeKey)
+    }
+
+    private func loadNextPageIfNeeded(after entry: ClipboardEntry) {
+        guard let last = visibleEntries.last, last.id == entry.id,
+              visibleEntries.count < entries.count else { return }
+        visibleEntryLimit = ClipboardPanelPagination.nextLimit(
+            current: visibleEntryLimit,
+            total: entries.count,
+            key: activeKey
+        )
+    }
+
+    private func ensurePageContains(index: Int) {
+        guard let pageSize = ClipboardPanelPagination.pageSize(for: activeKey),
+              index >= visibleEntryLimit else { return }
+        visibleEntryLimit = min(entries.count, ((index / pageSize) + 1) * pageSize)
     }
 
     private func title(for key: ClipboardCategoryKey) -> String {
@@ -1413,7 +1468,7 @@ struct ClipboardHistoryPanelView: View {
                 alignment: .leading,
                 spacing: ClipboardPanelLayout.imageCellSpacing
             ) {
-                ForEach(Array(entries.enumerated()), id: \.element.id) { index, entry in
+                ForEach(Array(visibleEntries.enumerated()), id: \.element.id) { index, entry in
                     ImageEntryCell(
                         entry: entry,
                         index: index,
@@ -1429,11 +1484,12 @@ struct ClipboardHistoryPanelView: View {
                         EntryHoverTrackingOverlay { updateHover($0, entry: entry) }
                     }
                     .contextMenu { entryMenu(entry) }
+                    .onAppear { loadNextPageIfNeeded(after: entry) }
                 }
             }
         default:
             LazyVStack(spacing: ClipboardPanelLayout.listSpacing) {
-                ForEach(Array(entries.enumerated()), id: \.element.id) { index, entry in
+                ForEach(Array(visibleEntries.enumerated()), id: \.element.id) { index, entry in
                     VStack(spacing: 0) {
                         if activeKey == .builtin(.code) {
                             CodeEntryRow(
@@ -1455,7 +1511,7 @@ struct ClipboardHistoryPanelView: View {
                             )
                             .equatable()
                         }
-                        if activeKey == .builtin(.code), index < entries.count - 1 {
+                        if activeKey == .builtin(.code), index < visibleEntries.count - 1 {
                             Divider()
                                 .padding(.horizontal, 10)
                         }
@@ -1473,6 +1529,7 @@ struct ClipboardHistoryPanelView: View {
                         EntryHoverTrackingOverlay { updateHover($0, entry: entry) }
                     }
                     .contextMenu { entryMenu(entry) }
+                    .onAppear { loadNextPageIfNeeded(after: entry) }
                 }
             }
         }
@@ -1719,6 +1776,7 @@ struct ClipboardHistoryPanelView: View {
         } else {
             nextIndex = 0
         }
+        ensurePageContains(index: nextIndex)
         keyboardSelection = true
         hoveredID = nil
         keyboardSelectedID = entries[nextIndex].id

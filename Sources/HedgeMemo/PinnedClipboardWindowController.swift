@@ -64,7 +64,7 @@ final class PinnedClipboardWindowsController {
             windows.removeValue(forKey: id)?.close()
         }
 
-        for entry in pinnedEntries.sorted(by: { $0.updatedAt < $1.updatedAt }) where windows[entry.id] == nil {
+        for entry in ClipboardHistoryPolicy.desktopPinnedEntries(pinnedEntries) where windows[entry.id] == nil {
             let note = PinnedClipboardWindow(
                 entry: entry,
                 imageURL: store.imageURL(for: entry),

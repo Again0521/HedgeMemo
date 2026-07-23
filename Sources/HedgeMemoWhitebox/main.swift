@@ -69,6 +69,20 @@ expect(ClipboardHistoryPolicy.quickEntry(in: clipboardOrdered, number: 9) == nil
 expect(ClipboardHistoryPolicy.shouldMergeWithLatest(latest: regularNewer, contentHash: "r2"), "consecutive duplicate clipboard entries must merge")
 expect(ClipboardHistoryPolicy.idsToTrim(from: clipboardOrdered, maxEntries: 3).isEmpty, "clipboard history keeps a minimum practical limit")
 expect(ClipboardEntry(kind: .text, text: "发票报销", contentHash: "q").matches(query: "报销"), "clipboard text must be searchable")
+let desktopPinned = ClipboardEntry(
+    kind: .text,
+    text: "桌面固定",
+    contentHash: "desktop",
+    isDesktopPinned: true,
+    desktopPinnedOrder: 0
+)
+let desktopOrderingCandidates = (0..<10).map {
+    ClipboardEntry(kind: .text, text: "普通\($0)", contentHash: "ordinary-\($0)", createdAt: now.addingTimeInterval(Double($0)))
+} + [desktopPinned]
+expect(
+    ClipboardHistoryPolicy.ordered(desktopOrderingCandidates)[9].id == desktopPinned.id,
+    "desktop-pinned entries must begin at the tenth visible position"
+)
 
 let screenshotSettings = ScreenshotSettings(mode: .smartWindow, remembersLastMode: true)
 expect(ScreenshotPolicy.resolvedMode(settings: screenshotSettings, requestedMode: nil) == .smartWindow, "screenshot must use configured mode when no override is requested")
@@ -109,6 +123,17 @@ expect(ClipboardCodeDetector.isCode("const total = items.reduce((a, b) => a + b,
 expect(!ClipboardCodeDetector.isCode("今天下午三点开会，请准时参加。"), "ordinary Chinese prose must not be code")
 expect(!ClipboardCodeDetector.isCode("Let's meet at 3pm."), "ordinary English prose must not be code")
 expect(!ClipboardCodeDetector.isCode("https://github.com/Again0521/hedgememo"), "a bare link must not be code")
+let technicalWorkLog = """
+I'll work through these tasks and inspect the relevant code first.
+
+## Resource optimization
+- Background: set `timer.tolerance = 0.25` to coalesce wakeups.
+- Foreground: reuse the existing native material view.
+- Verification: clean build and tests pass.
+
+This is an implementation report with API names, not source code.
+"""
+expect(!ClipboardCodeDetector.isCode(technicalWorkLog), "long technical work logs with embedded snippets must stay text")
 
 let codeEntry = ClipboardEntry(kind: .text, text: swiftSnippet, contentHash: "code")
 let proseEntry = ClipboardEntry(kind: .text, text: "周五下班一起吃饭", contentHash: "prose")
@@ -178,6 +203,8 @@ expect(
         == ClipboardPanelLayout.imageCellSide * 2 + ClipboardPanelLayout.imageCellSpacing,
     "four images must lay out as two grid rows"
 )
+expect(ClipboardPanelPagination.pageSize(for: .builtin(.code)) == 60, "code rows must render in bounded pages")
+expect(ClipboardPanelPagination.pageSize(for: .builtin(.image)) == 48, "image rows must render in bounded pages")
 expect(ClipboardPanelLayout.previewLineCount("single line") == 1, "single-line code must count one preview line")
 expect(ClipboardPanelLayout.previewLineCount("a\nb\nc\nd\ne") == 3, "long snippets must clamp to three preview lines")
 expect(

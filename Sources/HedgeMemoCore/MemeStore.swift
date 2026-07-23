@@ -200,6 +200,12 @@ public final class MemeStore: ObservableObject {
 
     public func clearError() { lastError = nil }
 
+    /// Search results can each contain the whole library. The popover is an
+    /// ephemeral surface, so discard these arrays once it closes.
+    public func releaseTransientCaches() {
+        filteredMemo.removeAll(keepingCapacity: false)
+    }
+
     public func report(_ error: Error) { lastError = error.localizedDescription }
 
     public func snapshot() -> MemeSnapshot { MemeSnapshot(categories: categories, memes: memes) }

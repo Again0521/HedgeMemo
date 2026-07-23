@@ -9,29 +9,29 @@ private enum SettingsLayout {
     static let controlColumnWidth: CGFloat = 232
 }
 
-private enum AppVersion {
-    static let display = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "1.1.0"
-}
-
 /// Hosts the settings UI in a standalone translucent panel, opened from the status bar menu.
 @MainActor
 final class SettingsWindowController: NSObject, NSWindowDelegate {
     private let clipboardStore: ClipboardHistoryStore
     private let screenshotSettingsStore: ScreenshotSettingsStore
+    private let updateCheckStore: UpdateCheckStore
     private let hotKeyWarnings: () -> [String]
     private var panel: NSPanel?
 
     init(
         clipboardStore: ClipboardHistoryStore,
         screenshotSettingsStore: ScreenshotSettingsStore,
+        updateCheckStore: UpdateCheckStore,
         hotKeyWarnings: @escaping () -> [String]
     ) {
         self.clipboardStore = clipboardStore
         self.screenshotSettingsStore = screenshotSettingsStore
+        self.updateCheckStore = updateCheckStore
         self.hotKeyWarnings = hotKeyWarnings
     }
 
     func show() {
+        updateCheckStore.acknowledgeUpdateBadge()
         if let panel {
             NSApp.activate(ignoringOtherApps: true)
             panel.orderFrontRegardless()
@@ -66,6 +66,7 @@ final class SettingsWindowController: NSObject, NSWindowDelegate {
         let content = SettingsPanelView(
             clipboardStore: clipboardStore,
             screenshotSettingsStore: screenshotSettingsStore,
+            updateCheckStore: updateCheckStore,
             hotKeyWarnings: hotKeyWarnings()
         )
         PanelMaterialHost.install(content, in: panel, cornerRadius: 16)
@@ -83,6 +84,7 @@ final class SettingsWindowController: NSObject, NSWindowDelegate {
 struct SettingsPanelView: View {
     @ObservedObject var clipboardStore: ClipboardHistoryStore
     @ObservedObject var screenshotSettingsStore: ScreenshotSettingsStore
+    @ObservedObject var updateCheckStore: UpdateCheckStore
     let hotKeyWarnings: [String]
     @State private var accessibilityTrusted = AXIsProcessTrusted()
     @State private var customDraft: CustomCategoryDraft?
@@ -98,6 +100,7 @@ struct SettingsPanelView: View {
                 categorySection
                 screenshotSection
                 startupSection
+                updateSection
                 authorSection
                 if hasHotKeyConflict || !hotKeyWarnings.isEmpty {
                     SettingsSection(title: "提醒") {
@@ -347,6 +350,66 @@ struct SettingsPanelView: View {
             SettingsFormRow("邮箱") { Link("zonn.l@foxmail.com", destination: URL(string: "mailto:zonn.l@foxmail.com")!) }
             SettingsDivider()
             SettingsFormRow("GitHub") { Link("Again0521/hedgememo", destination: URL(string: "https://github.com/Again0521/hedgememo")!) }
+        }
+    }
+
+    private var updateSection: some View {
+        SettingsSection(title: "软件更新") {
+            SettingsFormRow("当前版本") {
+                Text(AppVersion.display)
+                    .monospacedDigit()
+                    .foregroundStyle(.secondary)
+            }
+            SettingsDivider()
+            if let release = updateCheckStore.availableRelease {
+                SettingsFormRow("发现新版本") {
+                    Link(destination: release.pageURL) {
+                        Text("v\(release.version.displayString)")
+                            .monospacedDigit()
+                    }
+                    .help("打开 \(release.title) 下载页面")
+                    .accessibilityHint("在浏览器中打开新版本下载页面")
+                }
+                SettingsDivider()
+            }
+            SettingsRow {
+                HStack(spacing: 12) {
+                    Text(updateStatusText)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                        .truncationMode(.tail)
+                        .help(updateStatusText)
+                    Spacer(minLength: 12)
+                    Button {
+                        updateCheckStore.checkNow()
+                    } label: {
+                        if updateCheckStore.isChecking {
+                            ProgressView()
+                                .controlSize(.small)
+                                .frame(minWidth: 72)
+                        } else {
+                            Label("检查更新", systemImage: "arrow.clockwise")
+                        }
+                    }
+                    .disabled(updateCheckStore.isChecking)
+                    .fixedSize()
+                }
+            }
+        }
+    }
+
+    private var updateStatusText: String {
+        if updateCheckStore.isChecking { return "正在检查更新…" }
+        switch updateCheckStore.result {
+        case .idle:
+            return "每日首次启动时自动检查一次"
+        case .upToDate:
+            return "当前已是最新版本。"
+        case .updateAvailable:
+            return "发现新版本，点击版本号前往下载。"
+        case .failed:
+            return "暂时无法检查更新，请稍后重试。"
         }
     }
 

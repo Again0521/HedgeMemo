@@ -2,7 +2,7 @@ import AppKit
 import SwiftUI
 
 enum HedgehogIcon {
-    static let statusImage: NSImage = {
+    private static let baseStatusImage: NSImage = {
         let resourceURL = Bundle.main.url(forResource: "Hedgehog", withExtension: "png")
             ?? Bundle.main.url(forResource: "Hedgehog", withExtension: "svg")
         guard let resourceURL,
@@ -18,4 +18,28 @@ enum HedgehogIcon {
         image.size = NSSize(width: (targetHeight * aspect).rounded(), height: targetHeight)
         return image
     }()
+
+    static func statusImage(hasUpdate: Bool) -> NSImage {
+        guard hasUpdate else { return baseStatusImage }
+        let size = baseStatusImage.size
+        let composed = NSImage(size: size, flipped: false) { rect in
+            baseStatusImage.draw(in: rect)
+            guard let arrow = NSImage(
+                systemSymbolName: "arrow.up",
+                accessibilityDescription: "有新版本"
+            )?.withSymbolConfiguration(.init(pointSize: 7, weight: .heavy)) else { return true }
+            let arrowSize = NSSize(width: 7, height: 7)
+            let arrowRect = NSRect(
+                x: rect.maxX - arrowSize.width,
+                y: rect.maxY - arrowSize.height,
+                width: arrowSize.width,
+                height: arrowSize.height
+            )
+            NSColor.systemBlue.set()
+            arrow.draw(in: arrowRect, from: .zero, operation: .sourceOver, fraction: 1)
+            return true
+        }
+        composed.isTemplate = false
+        return composed
+    }
 }

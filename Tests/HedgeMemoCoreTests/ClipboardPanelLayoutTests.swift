@@ -4,6 +4,15 @@ import XCTest
 @testable import HedgeMemoCore
 
 final class ClipboardPanelLayoutTests: XCTestCase {
+    func testExpensiveClipboardCategoriesUseBoundedPages() {
+        XCTAssertEqual(ClipboardPanelPagination.pageSize(for: .builtin(.code)), 60)
+        XCTAssertEqual(ClipboardPanelPagination.pageSize(for: .builtin(.image)), 48)
+        XCTAssertEqual(ClipboardPanelPagination.pageSize(for: .builtin(.screenshot)), 48)
+        XCTAssertNil(ClipboardPanelPagination.pageSize(for: .builtin(.text)))
+        XCTAssertEqual(ClipboardPanelPagination.nextLimit(current: 48, total: 130, key: .builtin(.image)), 96)
+        XCTAssertEqual(ClipboardPanelPagination.nextLimit(current: 96, total: 100, key: .builtin(.image)), 100)
+    }
+
     // MARK: - Row metrics
 
     /// The clipboard list was tightened: rows stay compact yet remain tall

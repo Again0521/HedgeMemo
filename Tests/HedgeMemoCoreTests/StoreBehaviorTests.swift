@@ -129,6 +129,26 @@ final class StoreBehaviorTests: XCTestCase {
         XCTAssertEqual(reloaded.entries.first?.isDesktopPinned, true, "desktop note state must persist independently")
     }
 
+    func testDesktopPinOrderIsFirstComeAndRepinMovesToEnd() {
+        let root = tempRoot("desktop-order")
+        let store = ClipboardHistoryStore(repository: ClipboardHistoryRepository(rootURL: root))
+        XCTAssertTrue(store.addText("第一条"))
+        XCTAssertTrue(store.addText("第二条"))
+        let firstID = store.entries.first(where: { $0.text == "第一条" })!.id
+        let secondID = store.entries.first(where: { $0.text == "第二条" })!.id
+
+        store.toggleDesktopPinned(id: firstID)
+        store.toggleDesktopPinned(id: secondID)
+        XCTAssertEqual(ClipboardHistoryPolicy.desktopPinnedEntries(store.entries).map(\.id), [firstID, secondID])
+
+        store.toggleDesktopPinned(id: firstID)
+        store.toggleDesktopPinned(id: firstID)
+        XCTAssertEqual(ClipboardHistoryPolicy.desktopPinnedEntries(store.entries).map(\.id), [secondID, firstID])
+
+        let reloaded = ClipboardHistoryStore(repository: ClipboardHistoryRepository(rootURL: root))
+        XCTAssertEqual(ClipboardHistoryPolicy.desktopPinnedEntries(reloaded.entries).map(\.id), [secondID, firstID])
+    }
+
     func testScreenshotsStayInTheirDedicatedCategory() {
         let store = makeClipboardStore()
         let payload = ImageAssetData(data: Fixture.solidImage(0.4, size: 10).pngData!, fileExtension: "png")

@@ -11,6 +11,7 @@ final class AppServices: ObservableObject {
     let memeStore = MemeStore()
     let clipboardStore = ClipboardHistoryStore()
     let screenshotSettingsStore = ScreenshotSettingsStore()
+    let updateCheckStore = UpdateCheckStore()
     @Published private(set) var hotKeyWarnings: [String] = []
 
     private var hotKeyController: GlobalHotKeyController?
@@ -33,6 +34,7 @@ final class AppServices: ObservableObject {
     func start() {
         guard !didStart else { return }
         didStart = true
+        updateCheckStore.checkAutomaticallyIfNeeded()
         if !CommandLine.arguments.contains(where: { $0.hasPrefix("--preview-") }) {
             // Seed first-run content before monitoring writes any history, so the
             // fresh-install check sees a genuinely empty state.

@@ -3,6 +3,14 @@ import HedgeMemoCore
 import SwiftUI
 import UniformTypeIdentifiers
 
+/// Scroll geometry is read by drag autoscroll but is not presentation state.
+/// Keeping it outside `@State` prevents a full SwiftUI invalidation for every
+/// pixel of an ordinary scroll.
+@MainActor
+private final class MemeScrollMetrics {
+    var gridMinYInViewport: CGFloat = 0
+}
+
 struct MemePanelView: View {
     @ObservedObject var store: MemeStore
     var onDismiss: () -> Void = {}
@@ -18,10 +26,8 @@ struct MemePanelView: View {
     /// the grid, which is the source of the visible tile jitter.
     @State private var dropTargetID: UUID?
     @State private var dropsAtEnd = false
-    /// The grid's top edge in the scroll viewport's space; negative once the
-    /// grid is scrolled. Lets the drag handler know when the pointer reaches
-    /// the viewport edges so it can autoscroll.
-    @State private var gridMinYInViewport: CGFloat = 0
+    /// Reference state is intentional: geometry changes must not redraw tiles.
+    @State private var scrollMetrics = MemeScrollMetrics()
     @State private var lastAutoscroll = Date.distantPast
     @State private var captureService: ClipboardCaptureService?
     @State private var editingMeme: MemeItem?
@@ -96,8 +102,8 @@ struct MemePanelView: View {
                         GeometryReader { geometry in
                             let minY = geometry.frame(in: .named(Self.viewportSpace)).minY
                             Color.clear
-                                .onAppear { gridMinYInViewport = minY }
-                                .onChange(of: minY) { _, y in gridMinYInViewport = y }
+                                .onAppear { scrollMetrics.gridMinYInViewport = minY }
+                                .onChange(of: minY) { _, y in scrollMetrics.gridMinYInViewport = y }
                         }
                     )
                     .padding(2)
@@ -147,7 +153,10 @@ struct MemePanelView: View {
         .onDisappear {
             captureService?.stop()
             clearDragState()
+            store.releaseTransientCaches()
+            ImageThumbnailCache.shared.scheduleIdlePurge()
         }
+        .onAppear { ImageThumbnailCache.shared.beginInteractiveUse() }
     }
 
     private var header: some View {
@@ -353,7 +362,7 @@ struct MemePanelView: View {
         guard !memes.isEmpty else { return }
         let edge: CGFloat = 30
         let cell = tileSide + tileSpacing
-        let viewportY = location.y + gridMinYInViewport
+        let viewportY = location.y + scrollMetrics.gridMinYInViewport
         let row = max(0, Int(location.y / cell))
         if viewportY < edge {
             let index = (row - 1) * columnCount

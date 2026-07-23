@@ -50,13 +50,17 @@ public final class ClipboardHistoryStore: ObservableObject {
             settings = ClipboardHistorySettings()
             lastError = error.localizedDescription
         }
+        if normalizeDesktopPinnedOrders() { persist() }
     }
 
     public func startMonitoring() {
         stopMonitoring()
         observedChangeCount = NSPasteboard.general.changeCount
         let timer = Timer(timeInterval: 0.55, repeats: true) { [weak self] _ in
-            Task { @MainActor in self?.inspectPasteboard() }
+            // This timer is installed exclusively on RunLoop.main below. Avoid
+            // allocating an unstructured Task on every idle tick; the isolation
+            // assertion documents and enforces that delivery contract.
+            MainActor.assumeIsolated { self?.inspectPasteboard() }
         }
         // This poll runs for the whole session in the background. A generous
         // tolerance lets the OS coalesce its wakeups with other timers, which
@@ -171,7 +175,7 @@ public final class ClipboardHistoryStore: ObservableObject {
         guard let index = entries.firstIndex(where: { $0.id == id }) else { return }
         let removed = entries.remove(at: index)
         removeImageIfNeeded(removed)
-        normalizePinnedOrders()
+        normalizePinOrders()
         persist()
     }
 
@@ -205,7 +209,7 @@ public final class ClipboardHistoryStore: ObservableObject {
         let removedIDs = Set(removed.map(\.id))
         entries.removeAll { removedIDs.contains($0.id) }
         for entry in removed { removeImageIfNeeded(entry) }
-        normalizePinnedOrders()
+        normalizePinOrders()
         persist()
     }
 
@@ -261,14 +265,22 @@ public final class ClipboardHistoryStore: ObservableObject {
             entries[index].pinnedOrder = nextOrder
         }
         entries[index].updatedAt = .now
-        normalizePinnedOrders()
+        normalizePinOrders()
         persist()
     }
 
     public func toggleDesktopPinned(id: UUID) {
         guard let index = entries.firstIndex(where: { $0.id == id }) else { return }
-        entries[index].isDesktopPinned = entries[index].isDesktopPinned != true
+        if entries[index].isDesktopPinned == true {
+            entries[index].isDesktopPinned = false
+            entries[index].desktopPinnedOrder = nil
+        } else {
+            let nextOrder = (entries.compactMap(\.desktopPinnedOrder).max() ?? -1) + 1
+            entries[index].isDesktopPinned = true
+            entries[index].desktopPinnedOrder = nextOrder
+        }
         entries[index].updatedAt = .now
+        _ = normalizeDesktopPinnedOrders()
         persist()
     }
 
@@ -320,6 +332,13 @@ public final class ClipboardHistoryStore: ObservableObject {
     public func imageURL(for entry: ClipboardEntry) -> URL? { repository.imageURL(for: entry) }
 
     public func clearError() { lastError = nil }
+
+    /// Search/category results are presentation caches, not user data. Drop them
+    /// when the clipboard panel closes so a large history does not keep several
+    /// full filtered arrays alive while the app is idle.
+    public func releaseTransientCaches() {
+        orderedMemo.removeAll(keepingCapacity: false)
+    }
 
     /// Preview/self-check only: swap the in-memory list without touching the
     /// persisted history, so UI stress flows can run against dense fake data.
@@ -374,7 +393,7 @@ public final class ClipboardHistoryStore: ObservableObject {
         let removed = entries.filter { $0.matches(key: key, customCategories: customs) }
         entries.removeAll { $0.matches(key: key, customCategories: customs) }
         for entry in removed { removeImageIfNeeded(entry) }
-        normalizePinnedOrders()
+        normalizePinOrders()
     }
 
     private func trimToLimit() {
@@ -385,12 +404,29 @@ public final class ClipboardHistoryStore: ObservableObject {
         for entry in removed { removeImageIfNeeded(entry) }
     }
 
-    private func normalizePinnedOrders() {
+    private func normalizePinOrders() {
         let pinnedIDs = ClipboardHistoryPolicy.pinnedEntries(entries).map(\.id)
         for (order, id) in pinnedIDs.enumerated() {
             guard let index = entries.firstIndex(where: { $0.id == id }) else { continue }
             entries[index].pinnedOrder = order
         }
+        _ = normalizeDesktopPinnedOrders()
+    }
+
+    /// Assigns stable order to snapshots created before desktop pin order was
+    /// persisted, and compacts gaps after an unpin/delete. `updatedAt` is the
+    /// best available approximation of first-pin time for legacy snapshots.
+    @discardableResult
+    private func normalizeDesktopPinnedOrders() -> Bool {
+        let pinnedIDs = ClipboardHistoryPolicy.desktopPinnedEntries(entries).map(\.id)
+        var changed = false
+        for (order, id) in pinnedIDs.enumerated() {
+            guard let index = entries.firstIndex(where: { $0.id == id }),
+                  entries[index].desktopPinnedOrder != order else { continue }
+            entries[index].desktopPinnedOrder = order
+            changed = true
+        }
+        return changed
     }
 
     private func removeImageIfNeeded(_ entry: ClipboardEntry) {

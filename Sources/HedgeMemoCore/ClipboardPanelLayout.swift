@@ -164,3 +164,29 @@ public enum ClipboardPanelLayout {
         return min(max(preferred, minimum), maximum)
     }
 }
+
+/// Incremental rendering policy for the two expensive clipboard surfaces.
+/// Text/link rows stay fully enumerated because they are cheap; code rows incur
+/// syntax highlighting and image cells may schedule a decode, so those lists
+/// grow in bounded pages as their current tail becomes visible.
+public enum ClipboardPanelPagination {
+    public static let codePageSize = 60
+    public static let imagePageSize = 48
+
+    public static func pageSize(for key: ClipboardCategoryKey?) -> Int? {
+        switch key {
+        case .builtin(.code): codePageSize
+        case .builtin(.image), .builtin(.screenshot): imagePageSize
+        default: nil
+        }
+    }
+
+    public static func initialLimit(for key: ClipboardCategoryKey?) -> Int {
+        pageSize(for: key) ?? Int.max
+    }
+
+    public static func nextLimit(current: Int, total: Int, key: ClipboardCategoryKey?) -> Int {
+        guard let pageSize = pageSize(for: key) else { return total }
+        return min(total, max(current, 0) + pageSize)
+    }
+}

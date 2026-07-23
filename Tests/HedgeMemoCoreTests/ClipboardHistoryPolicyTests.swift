@@ -28,6 +28,45 @@ final class ClipboardHistoryPolicyTests: XCTestCase {
         )
     }
 
+    func testDesktopPinnedEntriesStartAtTenthAndKeepFirstPinOrder() {
+        let ordinary = (0..<12).map { index in
+            Fixture.text("普通\(index)", hash: "r\(index)", at: TimeInterval(index))
+        }
+        let firstDesktop = ClipboardEntry(
+            kind: .text,
+            text: "先固定",
+            contentHash: "desktop-first",
+            createdAt: Date(timeIntervalSinceReferenceDate: 100),
+            isDesktopPinned: true,
+            desktopPinnedOrder: 0
+        )
+        let secondDesktop = ClipboardEntry(
+            kind: .text,
+            text: "后固定",
+            contentHash: "desktop-second",
+            createdAt: Date(timeIntervalSinceReferenceDate: 200),
+            isDesktopPinned: true,
+            desktopPinnedOrder: 1
+        )
+
+        let ordered = ClipboardHistoryPolicy.ordered(ordinary + [secondDesktop, firstDesktop])
+        XCTAssertEqual(ordered[9].id, firstDesktop.id)
+        XCTAssertEqual(ordered[10].id, secondDesktop.id)
+        XCTAssertEqual(Set(ordered.prefix(9).map(\.id)), Set(ordinary.sorted { $0.createdAt > $1.createdAt }.prefix(9).map(\.id)))
+    }
+
+    func testDesktopPinnedSectionDoesNotCreateBlankRows() {
+        let one = Fixture.text("普通", hash: "regular", at: 1)
+        let desktop = ClipboardEntry(
+            kind: .text,
+            text: "桌面",
+            contentHash: "desktop",
+            isDesktopPinned: true,
+            desktopPinnedOrder: 0
+        )
+        XCTAssertEqual(ClipboardHistoryPolicy.ordered([desktop, one]).map(\.id), [one.id, desktop.id])
+    }
+
     func testQuickEntryMapsOneBasedOntoPinnedOrder() {
         let ordered = ClipboardHistoryPolicy.ordered(mixedOrder)
         XCTAssertEqual(ClipboardHistoryPolicy.quickEntry(in: ordered, number: 1)?.id, pinnedFirst.id)
@@ -58,6 +97,23 @@ final class ClipboardHistoryPolicyTests: XCTestCase {
         let entries = (0..<12).map { Fixture.text("t\($0)", hash: "t\($0)", at: TimeInterval($0)) }
         let trimmed = Set(ClipboardHistoryPolicy.idsToTrim(from: entries, maxEntries: 10))
         XCTAssertEqual(trimmed, [entries[0].id, entries[1].id])
+    }
+
+    func testTrimProtectsBothKindsOfPins() {
+        let clipboardPin = Fixture.text("剪切板固定", hash: "pin", at: 0, pinned: true, pinnedOrder: 0)
+        let desktopPin = ClipboardEntry(
+            kind: .text,
+            text: "桌面固定",
+            contentHash: "desktop",
+            createdAt: Date(timeIntervalSinceReferenceDate: 1),
+            isDesktopPinned: true,
+            desktopPinnedOrder: 0
+        )
+        let ordinary = (0..<10).map { Fixture.text("t\($0)", hash: "t\($0)", at: TimeInterval($0 + 2)) }
+        let trimmed = Set(ClipboardHistoryPolicy.idsToTrim(from: [clipboardPin, desktopPin] + ordinary, maxEntries: 10))
+        XCTAssertFalse(trimmed.contains(clipboardPin.id))
+        XCTAssertFalse(trimmed.contains(desktopPin.id))
+        XCTAssertEqual(trimmed.count, 2)
     }
 
     // MARK: - Category filtering

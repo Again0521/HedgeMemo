@@ -260,14 +260,97 @@ public enum ClipboardCodeDetector {
         guard text.count >= 6 else { return false }
         guard !isLikelyLink(text) else { return false }
         guard cjkRatio(text) <= 0.3 else { return false }
+        // A technical work log, README or issue description can contain many
+        // identifiers, parentheses and even short statements without itself
+        // being source code. Judge long multi-line input by line composition
+        // before allowing one embedded snippet to dominate the whole paste.
+        if looksLikeLongFormDocument(text) { return false }
+        let prose = looksLikeProse(text)
+        let structureStrength = hardStructureStrength(text)
+        if prose, structureStrength < 2 { return false }
         // Unambiguous structure (braces, terminators, comments, operators, high
         // symbol density) is code regardless of any incidental English words.
-        if hasHardCodeStructure(text) { return score(text) >= 3 }
+        if structureStrength > 0 { return score(text) >= 3 }
         // Without that structure, a keyword or a stray parenthesis is not enough
         // on its own: long English prose borrows words like "return", "public"
         // and "where". If the text reads as sentences, treat it as prose.
-        if looksLikeProse(text) { return false }
+        if prose { return false }
         return score(text) >= 3
+    }
+
+    /// Long natural-language documents often discuss code and quote a few code
+    /// fragments. Similar clipboard managers bias ambiguous mixed content toward
+    /// text because that avoids applying syntax color to an entire email/README;
+    /// only a code-dominant line mix crosses back into the code bucket.
+    private static func looksLikeLongFormDocument(_ text: String) -> Bool {
+        guard text.count >= 240 else { return false }
+        let lines = text.components(separatedBy: .newlines)
+            .map { $0.trimmingCharacters(in: .whitespaces) }
+            .filter { !$0.isEmpty }
+        guard lines.count >= 6 else { return false }
+
+        var proseLines = 0
+        var codeLines = 0
+        var documentMarkers = 0
+        var insideFence = false
+
+        for line in lines {
+            if line.hasPrefix("```") || line.hasPrefix("~~~") {
+                insideFence.toggle()
+                documentMarkers += 1
+                continue
+            }
+            if insideFence {
+                codeLines += 1
+                continue
+            }
+            if isDocumentMarker(line) { documentMarkers += 1 }
+            if isStrongCodeLine(line) { codeLines += 1 }
+            else if isNaturalLanguageLine(line) { proseLines += 1 }
+        }
+
+        guard proseLines >= 4 else { return false }
+        if documentMarkers >= 2, proseLines >= codeLines { return true }
+        return proseLines >= codeLines * 2 + 2
+    }
+
+    private static func isDocumentMarker(_ line: String) -> Bool {
+        if line.hasPrefix("# ") || line.hasPrefix("## ") || line.hasPrefix("### ") { return true }
+        if line.hasPrefix("- ") || line.hasPrefix("* ") || line.hasPrefix("> ") { return true }
+        return line.range(of: "^[0-9]+[.)]\\s+", options: .regularExpression) != nil
+    }
+
+    private static func isNaturalLanguageLine(_ rawLine: String) -> Bool {
+        let line = rawLine.replacingOccurrences(
+            of: "^(#{1,6}|[-*>]|[0-9]+[.)])\\s+",
+            with: "",
+            options: .regularExpression
+        )
+        if line.count >= 12, cjkRatio(line) > 0.2 { return true }
+        let words = line.lowercased().split { !$0.isLetter }.map(String.init)
+        guard words.count >= 5 else { return false }
+        let functionWordCount = words.reduce(into: 0) { count, word in
+            if proseWords.contains(word) { count += 1 }
+        }
+        return functionWordCount >= 2
+            || line.hasSuffix(".")
+            || line.hasSuffix("?")
+            || line.hasSuffix("!")
+            || line.hasSuffix("。")
+    }
+
+    /// Deliberately stricter than the final score: this decides whether a line
+    /// in a mixed document is source, so API names in prose do not count.
+    private static func isStrongCodeLine(_ line: String) -> Bool {
+        let lowered = line.lowercased()
+        if line.hasPrefix("//") || line.hasPrefix("/*") || line.hasPrefix("#!") { return true }
+        if line.hasSuffix(";") || line.hasSuffix("{") || line.hasSuffix("}") || line.hasSuffix("):") { return true }
+        if operators.contains(where: { line.contains($0) }) { return true }
+        if line.range(of: "^[A-Za-z_$][A-Za-z0-9_.$\\[\\]-]*\\s*[:+*/%&|?-]?=", options: .regularExpression) != nil {
+            return true
+        }
+        if line.range(of: "^\"[^\"]+\"\\s*:\\s*", options: .regularExpression) != nil { return true }
+        return keywords.contains(where: { lowered.hasPrefix($0) })
     }
 
     /// Whether the text reads as natural-language prose rather than code.
@@ -291,16 +374,19 @@ public enum ClipboardCodeDetector {
     /// terminators/braces, code operators, comments, a brace pair, or a high
     /// symbol density. Deliberately omits weaker signals that do appear in prose
     /// — a `word(` call (English writes "item(s)", "file(s)") and `[...]` pairs.
-    private static func hasHardCodeStructure(_ text: String) -> Bool {
+    private static func hardStructureStrength(_ text: String) -> Int {
         let lines = text.components(separatedBy: .newlines)
+        var strength = 0
         if lines.contains(where: { line in
             let trimmed = line.trimmingCharacters(in: .whitespaces)
             return trimmed.hasSuffix(";") || trimmed.hasSuffix("{") || trimmed.hasSuffix("}") || trimmed.hasSuffix("):")
-        }) { return true }
-        if operators.contains(where: { text.contains($0) }) { return true }
-        if text.contains("//") || text.contains("/*") || text.contains("*/") || text.contains("#!") { return true }
-        if text.contains("{") && text.contains("}") { return true }
-        return symbolRatio(text) > 0.15
+        }) { strength += 1 }
+        if operators.contains(where: { text.contains($0) }) { strength += 1 }
+        if text.contains("//") || text.contains("/*") || text.contains("*/") || text.contains("#!") { strength += 1 }
+        if text.contains("{") && text.contains("}") { strength += 1 }
+        if lines.contains(where: isStrongCodeLine) { strength += 1 }
+        if symbolRatio(text) > 0.15 { strength += 1 }
+        return strength
     }
 
     private static func score(_ text: String) -> Int {
@@ -579,6 +665,10 @@ public struct ClipboardEntry: Codable, Hashable, Identifiable, Sendable {
     /// Independent from clipboard ordering/quick-slot pinning. Optional keeps
     /// snapshots written by older versions source-compatible when decoded.
     public var isDesktopPinned: Bool?
+    /// Stable first-pin order for the temporary desktop-pinned section in the
+    /// clipboard panel. Optional preserves snapshots written before that section
+    /// existed; the store migrates missing values on load.
+    public var desktopPinnedOrder: Int?
     public var origin: ClipboardEntryOrigin?
 
     public init(
@@ -595,6 +685,7 @@ public struct ClipboardEntry: Codable, Hashable, Identifiable, Sendable {
         isPinned: Bool = false,
         pinnedOrder: Int? = nil,
         isDesktopPinned: Bool? = false,
+        desktopPinnedOrder: Int? = nil,
         origin: ClipboardEntryOrigin? = nil
     ) {
         self.id = id
@@ -610,6 +701,7 @@ public struct ClipboardEntry: Codable, Hashable, Identifiable, Sendable {
         self.isPinned = isPinned
         self.pinnedOrder = pinnedOrder
         self.isDesktopPinned = isDesktopPinned
+        self.desktopPinnedOrder = desktopPinnedOrder
         self.origin = origin
     }
 
@@ -693,6 +785,13 @@ public struct ClipboardHistorySnapshot: Codable, Sendable {
 }
 
 public enum ClipboardHistoryPolicy {
+    /// Desktop notes occupy a stable section beginning at the tenth visible
+    /// position. The first nine regular/list-pinned results keep their familiar
+    /// command-number slots; desktop-pinned items are then ordered first-pinned
+    /// first. When fewer than nine other entries exist, no fake blank rows are
+    /// introduced and the section follows the available entries immediately.
+    public static let desktopPinnedInsertionIndex = 9
+
     public static func ordered(
         _ entries: [ClipboardEntry],
         query: String = "",
@@ -700,8 +799,12 @@ public enum ClipboardHistoryPolicy {
         customCategories: [CustomClipboardCategory] = []
     ) -> [ClipboardEntry] {
         let matcher = PercentFuzzyMatcher(query: query)
-        return entries
-            .filter { $0.matches(matcher: matcher) && $0.matches(key: key, customCategories: customCategories) }
+        let filtered = entries.filter {
+            $0.matches(matcher: matcher) && $0.matches(key: key, customCategories: customCategories)
+        }
+        let desktopPinned = desktopPinnedEntries(filtered)
+        let ordinary = filtered
+            .filter { $0.isDesktopPinned != true }
             .sorted { lhs, rhs in
                 if lhs.isPinned != rhs.isPinned { return lhs.isPinned && !rhs.isPinned }
                 if lhs.isPinned {
@@ -709,10 +812,27 @@ public enum ClipboardHistoryPolicy {
                 }
                 return lhs.createdAt > rhs.createdAt
             }
+        let insertion = min(desktopPinnedInsertionIndex, ordinary.count)
+        return Array(ordinary[..<insertion]) + desktopPinned + Array(ordinary[insertion...])
     }
 
     public static func pinnedEntries(_ entries: [ClipboardEntry]) -> [ClipboardEntry] {
-        ordered(entries).filter(\.isPinned)
+        entries.filter(\.isPinned).sorted { lhs, rhs in
+            let left = lhs.pinnedOrder ?? Int.max
+            let right = rhs.pinnedOrder ?? Int.max
+            if left != right { return left < right }
+            return lhs.createdAt < rhs.createdAt
+        }
+    }
+
+    public static func desktopPinnedEntries(_ entries: [ClipboardEntry]) -> [ClipboardEntry] {
+        entries.filter { $0.isDesktopPinned == true }.sorted { lhs, rhs in
+            let left = lhs.desktopPinnedOrder ?? Int.max
+            let right = rhs.desktopPinnedOrder ?? Int.max
+            if left != right { return left < right }
+            if lhs.updatedAt != rhs.updatedAt { return lhs.updatedAt < rhs.updatedAt }
+            return lhs.createdAt < rhs.createdAt
+        }
     }
 
     public static func quickEntry(in entries: [ClipboardEntry], number: Int) -> ClipboardEntry? {
@@ -729,9 +849,14 @@ public enum ClipboardHistoryPolicy {
     public static func idsToTrim(from entries: [ClipboardEntry], maxEntries: Int) -> [UUID] {
         let maxEntries = max(10, maxEntries)
         guard entries.count > maxEntries else { return [] }
-        let orderedEntries = ordered(entries)
-        let overflow = orderedEntries.suffix(entries.count - maxEntries)
-        return overflow.map(\.id)
+        // Both pin modes are user promises, so automatic history trimming must
+        // never silently delete either kind. If protected entries alone exceed
+        // the configured limit, retain them and trim every ordinary entry.
+        let removable = entries
+            .filter { !$0.isPinned && $0.isDesktopPinned != true }
+            .sorted { $0.createdAt < $1.createdAt }
+        let overflow = min(entries.count - maxEntries, removable.count)
+        return removable.prefix(overflow).map(\.id)
     }
 }
 

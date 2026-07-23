@@ -63,6 +63,49 @@ final class ClipboardContentClassificationTests: XCTestCase {
         ))
     }
 
+    func testLongTechnicalWorkLogWithEmbeddedCodeTermsIsNotCode() {
+        // Representative of the attached execution log: it contains API names,
+        // Markdown, arrows, command names and statement-like snippets, but the
+        // dominant structure is a natural-language report rather than source.
+        let workLog = """
+        I'll work through these four tasks. Let me start by examining the relevant code for each.
+
+        Let me check for existing crash reports to diagnose task 3 (the settings crash).
+        There's a crash report. Let me examine it.
+        A definitive crash. It's an uncaught ObjC exception during makeKeyAndOrderFront and a remote-view path.
+        The crash is from an older Applications build. Let me inspect the generated Info.plist.
+
+        ## 1. Animated preview collapse after saving an edit
+        Replaced the abrupt disappearance with a fade and scale-out that plays while the panel is still expanded.
+
+        ## 2. Resource-usage optimization
+        - Background: the always-on pasteboard poll now sets `timer.tolerance = 0.25` for coalesced wakeups.
+        - Foreground: `PanelMaterialHost` no longer creates a throwaway visual effect view on every body pass.
+        - Verification: clean build, tests, layout self-check and whitebox all pass.
+
+        One note on scope: the plist fix lives in build_and_run.sh. If you distribute through another path, add the same required key there.
+        """
+        XCTAssertFalse(ClipboardCodeDetector.isCode(workLog))
+        XCTAssertEqual(Fixture.text(workLog, hash: "work-log").contentCategory, .text)
+    }
+
+    func testLongSourceWithCommentsRemainsCode() {
+        let source = """
+        // Build a stable result for the current user.
+        // The comments intentionally contain ordinary English sentences.
+        struct ResultBuilder {
+            let values: [Int]
+
+            func total() -> Int {
+                values.reduce(0) { partial, value in
+                    partial + value
+                }
+            }
+        }
+        """
+        XCTAssertTrue(ClipboardCodeDetector.isCode(source))
+    }
+
     func testCodeWithEnglishWordsButRealStructureIsStillCode() {
         // English words appear, but the structural markers are unmistakable.
         XCTAssertTrue(ClipboardCodeDetector.isCode("if (user.isActive) { return user.name; }"))

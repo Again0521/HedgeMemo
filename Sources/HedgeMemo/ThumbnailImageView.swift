@@ -19,6 +19,9 @@ final class ImageThumbnailCache: @unchecked Sendable {
     static let shared = ImageThumbnailCache()
 
     private let cache = NSCache<NSString, NSImage>()
+    private let lifecycleLock = NSLock()
+    private var idlePurgeWork: DispatchWorkItem?
+    private var lifecycleGeneration: UInt = 0
     /// A small shared queue prevents a newly opened page from starting one
     /// full image decode per visible cell at once. Two workers keep scrolling
     /// responsive without competing with SwiftUI/AppKit for every CPU core.
@@ -39,6 +42,50 @@ final class ImageThumbnailCache: @unchecked Sendable {
 
     func store(_ thumbnail: DecodedThumbnail, for key: NSString) {
         cache.setObject(thumbnail.image, forKey: key, cost: max(1, thumbnail.decodedByteCost))
+    }
+
+    /// A recently closed panel is likely to be reopened, so keep warm thumbnails
+    /// briefly. If HedgeMemo stays silent, release both decoded images and queued
+    /// off-screen work; original files remain untouched on disk.
+    func beginInteractiveUse() {
+        lifecycleLock.withLock {
+            lifecycleGeneration &+= 1
+            idlePurgeWork?.cancel()
+            idlePurgeWork = nil
+        }
+    }
+
+    func scheduleIdlePurge(after delay: TimeInterval = 30) {
+        let ticket = lifecycleLock.withLock { () -> UInt in
+            lifecycleGeneration &+= 1
+            idlePurgeWork?.cancel()
+            idlePurgeWork = nil
+            return lifecycleGeneration
+        }
+        let work = DispatchWorkItem { [weak self] in
+            guard let self, self.isCurrentLifecycle(ticket) else { return }
+            self.decodeQueue.cancelAllOperations()
+            self.cache.removeAllObjects()
+            // A decode already running when cancellation arrives can still store
+            // its result afterwards. Purge again behind the queue's running work,
+            // but only if no panel has reopened in the meantime.
+            self.decodeQueue.addBarrierBlock { [weak self] in
+                guard let self, self.isCurrentLifecycle(ticket) else { return }
+                self.cache.removeAllObjects()
+            }
+            self.lifecycleLock.withLock {
+                if self.lifecycleGeneration == ticket { self.idlePurgeWork = nil }
+            }
+        }
+        lifecycleLock.withLock {
+            if lifecycleGeneration == ticket { idlePurgeWork = work }
+            else { work.cancel() }
+        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: work)
+    }
+
+    private func isCurrentLifecycle(_ ticket: UInt) -> Bool {
+        lifecycleLock.withLock { lifecycleGeneration == ticket }
     }
 
     /// Path + requested size + content identity. Clipboard and meme models
@@ -100,6 +147,15 @@ final class ImageThumbnailCache: @unchecked Sendable {
             let pixels = image.representations.first.map { $0.pixelsWide * $0.pixelsHigh } ?? 1
             return DecodedThumbnail(image: image, decodedByteCost: max(1, pixels * 4))
         }
+    }
+}
+
+private extension NSLock {
+    @discardableResult
+    func withLock<T>(_ body: () throws -> T) rethrows -> T {
+        lock()
+        defer { unlock() }
+        return try body()
     }
 }
 
