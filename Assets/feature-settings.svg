@@ -1,0 +1,92 @@
+<svg viewBox="0 0 1240 740" xmlns="http://www.w3.org/2000/svg" font-family="-apple-system, 'PingFang SC', 'Helvetica Neue', Helvetica, Arial, sans-serif">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1240" y2="740" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#F7F3EC"/>
+      <stop offset="1" stop-color="#EFE7D8"/>
+    </linearGradient>
+    <filter id="card" x="-20%" y="-20%" width="140%" height="140%">
+      <feDropShadow dx="0" dy="16" stdDeviation="26" flood-color="#3A2A1A" flood-opacity="0.15"/>
+    </filter>
+    <filter id="soft" x="-40%" y="-40%" width="180%" height="180%"><feGaussianBlur stdDeviation="40"/></filter>
+  </defs>
+
+  <rect width="1240" height="740" rx="30" fill="url(#bg)"/>
+  <circle cx="1110" cy="120" r="150" fill="#FF6B57" opacity="0.09" filter="url(#soft)"/>
+  <circle cx="130" cy="640" r="160" fill="#FFFCF6" opacity="0.7" filter="url(#soft)"/>
+
+  <!-- window -->
+  <g filter="url(#card)"><rect x="200" y="80" width="840" height="580" rx="22" fill="#FCFAF5"/></g>
+  <!-- sidebar -->
+  <path d="M200 102 a22 22 0 0 1 22 -22 L200 80 Z" fill="#F2EDE3"/>
+  <path d="M200 102 L200 638 a22 22 0 0 0 22 22 L420 660 L420 80 L222 80 a22 22 0 0 0 -22 22 Z" fill="#F2EDE3"/>
+  <!-- traffic lights -->
+  <circle cx="234" cy="106" r="7" fill="#FF6159"/><circle cx="256" cy="106" r="7" fill="#FFBD2E"/><circle cx="278" cy="106" r="7" fill="#28C840"/>
+
+  <!-- nav items -->
+  <g font-size="17" fill="#5B5E66">
+    <!-- clipboard -->
+    <g stroke="#7A7D85" stroke-width="1.8" fill="none" stroke-linejoin="round"><rect x="240" y="160" width="18" height="22" rx="4"/><rect x="245" y="156" width="8" height="7" rx="2"/></g>
+    <text x="274" y="177">剪贴板</text>
+    <!-- screenshot -->
+    <g stroke="#7A7D85" stroke-width="1.8" fill="none" stroke-linejoin="round" transform="translate(0,52)"><path d="M240 164 l0 16 l18 0 M246 158 l0 16 l18 0"/></g>
+    <text x="274" y="229">截图</text>
+    <!-- stickers -->
+    <g stroke="#7A7D85" stroke-width="1.8" fill="none" transform="translate(0,104)"><circle cx="249" cy="170" r="11"/><circle cx="245" cy="167" r="1.4" fill="#7A7D85"/><circle cx="253" cy="167" r="1.4" fill="#7A7D85"/><path d="M245 173 q4 4 8 0" stroke-linecap="round"/></g>
+    <text x="274" y="281">表情包</text>
+    <!-- general active -->
+    <rect x="228" y="308" width="164" height="44" rx="12" fill="#FF6B57"/>
+    <g stroke="#FFFFFF" stroke-width="1.8" fill="none" transform="translate(0,156)"><circle cx="249" cy="174" r="6"/><path d="M249 164 l0 4 M249 180 l0 4 M239 174 l4 0 M255 174 l4 0 M242 167 l3 3 M256 178 l-3 -3 M242 181 l3 -3 M256 170 l-3 3" stroke-linecap="round"/></g>
+    <text x="274" y="335" fill="#FFFFFF" font-weight="600">通用</text>
+  </g>
+
+  <!-- content -->
+  <text x="452" y="132" font-size="24" font-weight="700" fill="#24262B">通用</text>
+
+  <!-- group 1: shortcuts -->
+  <rect x="452" y="152" width="556" height="176" rx="14" fill="#FFFFFF" stroke="#EFE9DD" stroke-width="1.5"/>
+  <g font-size="17" fill="#24262B">
+    <text x="476" y="192">剪贴板历史</text>
+    <text x="476" y="250">按当前模式截图</text>
+    <text x="476" y="308">表情包面板</text>
+  </g>
+  <line x1="476" y1="210" x2="984" y2="210" stroke="#F1ECE1" stroke-width="1.5"/>
+  <line x1="476" y1="268" x2="984" y2="268" stroke="#F1ECE1" stroke-width="1.5"/>
+  <!-- keycaps helper -->
+  <g font-size="16" fill="#5B5E66" text-anchor="middle">
+    <g><rect x="856" y="170" width="34" height="30" rx="7" fill="#F4F0E8" stroke="#E3DCCE" stroke-width="1.2"/><text x="873" y="191">⇧</text>
+       <rect x="896" y="170" width="34" height="30" rx="7" fill="#F4F0E8" stroke="#E3DCCE" stroke-width="1.2"/><text x="913" y="191">⌘</text>
+       <rect x="936" y="170" width="34" height="30" rx="7" fill="#F4F0E8" stroke="#E3DCCE" stroke-width="1.2"/><text x="953" y="191">V</text></g>
+    <g><rect x="856" y="228" width="34" height="30" rx="7" fill="#F4F0E8" stroke="#E3DCCE" stroke-width="1.2"/><text x="873" y="249">⇧</text>
+       <rect x="896" y="228" width="34" height="30" rx="7" fill="#F4F0E8" stroke="#E3DCCE" stroke-width="1.2"/><text x="913" y="249">⌘</text>
+       <rect x="936" y="228" width="34" height="30" rx="7" fill="#F4F0E8" stroke="#E3DCCE" stroke-width="1.2"/><text x="953" y="249">P</text></g>
+    <g><rect x="856" y="286" width="34" height="30" rx="7" fill="#F4F0E8" stroke="#E3DCCE" stroke-width="1.2"/><text x="873" y="307">⇧</text>
+       <rect x="896" y="286" width="34" height="30" rx="7" fill="#F4F0E8" stroke="#E3DCCE" stroke-width="1.2"/><text x="913" y="307">⌘</text>
+       <rect x="936" y="286" width="34" height="30" rx="7" fill="#F4F0E8" stroke="#E3DCCE" stroke-width="1.2"/><text x="953" y="307">E</text></g>
+  </g>
+
+  <!-- group 2: appearance -->
+  <rect x="452" y="348" width="556" height="118" rx="14" fill="#FFFFFF" stroke="#EFE9DD" stroke-width="1.5"/>
+  <text x="476" y="388" font-size="17" fill="#24262B">面板背景不透明度</text>
+  <line x1="810" y1="382" x2="960" y2="382" stroke="#E3DCCE" stroke-width="4" stroke-linecap="round"/>
+  <line x1="810" y1="382" x2="870" y2="382" stroke="#FF6B57" stroke-width="4" stroke-linecap="round"/>
+  <circle cx="870" cy="382" r="10" fill="#FFFFFF" stroke="#E3DCCE" stroke-width="1.5"/>
+  <text x="984" y="388" font-size="16" fill="#8C8F97" text-anchor="end">40%</text>
+  <line x1="476" y1="408" x2="984" y2="408" stroke="#F1ECE1" stroke-width="1.5"/>
+  <text x="476" y="446" font-size="17" fill="#24262B">代码配色</text>
+  <rect x="876" y="426" width="108" height="32" rx="9" fill="#F4F0E8" stroke="#E3DCCE" stroke-width="1.2"/>
+  <text x="894" y="447" font-size="16" fill="#5B5E66">Xcode</text>
+  <path d="M960 438 l6 6 l6 -6" fill="none" stroke="#8C8F97" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/>
+
+  <!-- group 3: general toggles -->
+  <rect x="452" y="486" width="556" height="118" rx="14" fill="#FFFFFF" stroke="#EFE9DD" stroke-width="1.5"/>
+  <text x="476" y="526" font-size="17" fill="#24262B">随登录自动启动</text>
+  <rect x="936" y="512" width="48" height="28" rx="14" fill="#FF6B57"/><circle cx="970" cy="526" r="11" fill="#FFFFFF"/>
+  <line x1="476" y1="546" x2="984" y2="546" stroke="#F1ECE1" stroke-width="1.5"/>
+  <text x="476" y="584" font-size="17" fill="#24262B">复制后自动粘贴</text>
+  <rect x="936" y="570" width="48" height="28" rx="14" fill="#DED8CB"/><circle cx="950" cy="584" r="11" fill="#FFFFFF"/>
+
+  <!-- footer -->
+  <rect x="452" y="626" width="120" height="34" rx="10" fill="#FF6B57"/>
+  <text x="512" y="648" font-size="15" font-weight="600" fill="#FFFFFF" text-anchor="middle">检查更新</text>
+  <text x="592" y="648" font-size="15" fill="#A7A9B0">当前版本 1.1.7 · 已是最新</text>
+</svg>
