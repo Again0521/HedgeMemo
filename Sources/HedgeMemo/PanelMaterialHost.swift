@@ -50,7 +50,7 @@ enum PanelMaterialHost {
         AnyView(
             ZStack {
                 if usesWindowMaterial {
-                    SystemGlassSurface()
+                    AdjustablePanelBackground()
                 }
                 content
             }
@@ -74,8 +74,33 @@ struct SystemGlassCard<Content: View>: View {
 
     var body: some View {
         content
-            .background(SystemGlassSurface())
+            .background(AdjustablePanelBackground())
             .clipShape(RoundedRectangle(cornerRadius: cornerRadius, style: .continuous))
+    }
+}
+
+private struct AdjustablePanelBackground: View {
+    @AppStorage(AppPreferences.interfaceOpacityKey)
+    private var interfaceOpacity = AppPreferences.defaultInterfaceOpacity
+
+    private var level: Double {
+        AppPreferences.clampedInterfaceOpacity(interfaceOpacity)
+    }
+
+    var body: some View {
+        Group {
+            if level >= 0.999 {
+                // At 100%, remove the glass compositor instead of merely
+                // covering it: this setting explicitly disables transparency.
+                Color(nsColor: .windowBackgroundColor)
+            } else {
+                ZStack {
+                    SystemGlassSurface()
+                    Color(nsColor: .windowBackgroundColor)
+                        .opacity(AppPreferences.opaqueBackingAlpha(for: level))
+                }
+            }
+        }
     }
 }
 

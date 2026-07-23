@@ -95,6 +95,8 @@ struct SettingsPanelView: View {
     @State private var customDraft: CustomCategoryDraft?
     @StateObject private var launchAtLogin = LaunchAtLoginController()
     @AppStorage(AppPreferences.showsScrollIndicatorsKey) private var showsScrollIndicators = true
+    @AppStorage(AppPreferences.interfaceOpacityKey)
+    private var interfaceOpacity = AppPreferences.defaultInterfaceOpacity
 
     var body: some View {
         ScrollView {
@@ -180,14 +182,53 @@ struct SettingsPanelView: View {
     private var appearanceSection: some View {
         SettingsSection(
             title: "外观",
-            footer: "关闭后仍可正常滚动，只隐藏剪切板、表情包和其他界面的滚动条。"
+            footer: "0% 保留清晰的系统玻璃效果，100% 完全关闭透明效果；菜单栏弹窗不受影响。"
         ) {
+            SettingsFormRow("软件不透明度") {
+                VStack(alignment: .trailing, spacing: 5) {
+                    HStack(spacing: 10) {
+                        Text("\(interfaceOpacityPercent)%")
+                            .monospacedDigit()
+                        Button("恢复默认") {
+                            interfaceOpacity = AppPreferences.defaultInterfaceOpacity
+                        }
+                        .disabled(
+                            abs(interfaceOpacity - AppPreferences.defaultInterfaceOpacity)
+                                < 0.005
+                        )
+                    }
+                    Slider(
+                        value: interfaceOpacityPercentBinding,
+                        in: 0...100,
+                        step: 1
+                    )
+                    .accessibilityLabel("软件不透明度")
+                    .accessibilityValue("\(interfaceOpacityPercent)%")
+                    .accessibilityHint("调节菜单栏弹窗以外面板的不透明度")
+                }
+            }
+            SettingsDivider()
             SettingsFormRow("显示滚动条") {
                 Toggle("显示滚动条", isOn: $showsScrollIndicators)
                     .labelsHidden()
                     .accessibilityHint("控制 HedgeMemo 所有可滚动内容的滚动条显示")
             }
         }
+    }
+
+    private var interfaceOpacityPercent: Int {
+        Int((AppPreferences.clampedInterfaceOpacity(interfaceOpacity) * 100).rounded())
+    }
+
+    private var interfaceOpacityPercentBinding: Binding<Double> {
+        Binding(
+            get: {
+                AppPreferences.clampedInterfaceOpacity(interfaceOpacity) * 100
+            },
+            set: {
+                interfaceOpacity = AppPreferences.clampedInterfaceOpacity($0 / 100)
+            }
+        )
     }
 
     private var categorySection: some View {
