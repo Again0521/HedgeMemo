@@ -9,3 +9,5 @@ Sources/.DS_Store
 .DS_Store
 .DS_Store
 *.md
+!README.md
+!readme_en.md
