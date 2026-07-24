@@ -10,7 +10,7 @@
 
 `macOS 14+` &nbsp;·&nbsp; `Stored locally` &nbsp;·&nbsp; `Menu bar app` &nbsp;·&nbsp; `Free`
 
-[**Download the Latest Version**](https://github.com/Again0521/HedgeMemo/releases) &nbsp;·&nbsp; [Share Feedback](https://github.com/Again0521/HedgeMemo/issues) &nbsp;·&nbsp; [View the Full Introduction](Assets/HedgeMemo-introduction_en.svg)
+[**Download the Latest Version**](https://github.com/Again0521/HedgeMemo/releases) &nbsp;·&nbsp; [Share Feedback](https://github.com/Again0521/HedgeMemo/issues) &nbsp;·&nbsp; [View the Full Introduction](Assets/HedgeMemo-introduction_en.png)
 
 </div>
 
