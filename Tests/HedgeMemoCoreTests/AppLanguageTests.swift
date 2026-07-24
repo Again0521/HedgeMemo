@@ -45,6 +45,18 @@ final class AppLanguageTests: XCTestCase {
         XCTAssertEqual(L10n.format("已选项目格式", 3, language: .english), "3 selected")
     }
 
+    /// Simplified-Chinese *labels* are self-keyed, so a failed bundle lookup
+    /// still returns readable text and hides breakage. Only a *format* key
+    /// reveals whether the zh-Hans table actually loaded — SwiftPM lowercases
+    /// the built `.lproj` folder ("zh-Hans" -> "zh-hans") and the case-sensitive
+    /// resource lookup used to miss it, leaking raw keys like "使用次数格式".
+    func testSimplifiedChineseFormatKeysResolve() {
+        XCTAssertEqual(L10n.format("使用次数格式", 0, language: .simplifiedChinese), "0 次")
+        XCTAssertEqual(L10n.format("已选项目格式", 3, language: .simplifiedChinese), "已选 3 项")
+        XCTAssertEqual(L10n.format("保留条数格式", 200, language: .simplifiedChinese), "200 条")
+        XCTAssertEqual(L10n.format("使用次数格式", 3, language: .english), "3 times")
+    }
+
     func testSelectingANewLanguagePersistsAndNotifies() throws {
         let suiteName = "AppLanguageSelectionTests-\(UUID().uuidString)"
         let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))

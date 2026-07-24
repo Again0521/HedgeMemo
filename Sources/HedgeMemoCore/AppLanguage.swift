@@ -63,11 +63,29 @@ public enum AppLanguage: String, CaseIterable, Identifiable, Sendable {
 
 public enum L10n {
     public static func text(_ key: String, language: AppLanguage = .current) -> String {
-        guard let path = Bundle.module.path(forResource: language.rawValue, ofType: "lproj"),
-              let bundle = Bundle(path: path) else {
+        guard let bundle = localizationBundle(for: language) else {
             return key
         }
         return bundle.localizedString(forKey: key, value: key, table: nil)
+    }
+
+    /// SwiftPM's resource processing canonicalizes `.lproj` directory names by
+    /// lowercasing the region/script subtag — the source `zh-Hans.lproj` ships
+    /// as `zh-hans.lproj` in the built bundle. `Bundle.path(forResource:ofType:)`
+    /// matches case-sensitively, so a `"zh-Hans"` lookup misses the built folder
+    /// and every zh-Hans key falls back to itself (Chinese labels still look
+    /// right because they are self-keyed, but format keys like "使用次数格式"
+    /// leak). Try the declared name first, then the lowercased form, so the
+    /// lookup succeeds against both the source and the processed bundle.
+    private static func localizationBundle(for language: AppLanguage) -> Bundle? {
+        var seen = Set<String>()
+        for name in [language.rawValue, language.rawValue.lowercased()] where seen.insert(name).inserted {
+            if let path = Bundle.module.path(forResource: name, ofType: "lproj"),
+               let bundle = Bundle(path: path) {
+                return bundle
+            }
+        }
+        return nil
     }
 
     public static func format(
