@@ -8,7 +8,7 @@
 
 `macOS 14+` &nbsp;·&nbsp; `内容本地存储` &nbsp;·&nbsp; `菜单栏常驻` &nbsp;·&nbsp; `免费`
 
-[**下载最新版本**](https://github.com/Again0521/HedgeMemo/releases) &nbsp;·&nbsp; [反馈问题或建议](https://github.com/Again0521/HedgeMemo/issues) &nbsp;·&nbsp; [完整介绍长图](Assets/HedgeMemo-介绍长图.png)
+[**下载最新版本**](https://github.com/Again0521/HedgeMemo/releases) &nbsp;·&nbsp; [反馈问题或建议](https://github.com/Again0521/HedgeMemo/issues) &nbsp;·&nbsp; [完整介绍长图](Assets/HedgeMemo-介绍长图.svg)
 
 </div>
 
