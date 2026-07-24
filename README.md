@@ -1,6 +1,6 @@
 <div align="center">
 
-[简体中文](README.md) | [English](README_en.md)
+[简体中文](README.md) | [English](readme_en.md)
 
 <img src="Assets/AppIcon.svg" width="120" alt="HedgeMemo" />
 
