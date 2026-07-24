@@ -1,4 +1,5 @@
 import AppKit
+import HedgeMemoCore
 import SwiftUI
 
 @MainActor
@@ -191,17 +192,17 @@ private struct ScreenshotEditorPanelView: View {
 
     private var closeButton: some View {
         Button(action: onCancel) {
-            Label("截屏", systemImage: "xmark.circle.fill")
+            Label(L10n.text("截屏"), systemImage: "xmark.circle.fill")
         }
         .buttonStyle(.plain)
         .keyboardShortcut(.cancelAction)
-        .help("取消截屏")
+        .help(L10n.text("取消截屏"))
         .contentShape(Rectangle())
     }
 
     private var markupTools: some View {
         HStack(spacing: 12) {
-            Picker("工具", selection: $mode) {
+            Picker(L10n.text("工具"), selection: $mode) {
                 ForEach(ScreenshotEditorMode.allCases, id: \.self) { mode in
                     Image(systemName: mode.systemImage)
                         .help(mode.title)
@@ -229,7 +230,7 @@ private struct ScreenshotEditorPanelView: View {
                     .foregroundStyle(.secondary)
                 Slider(value: $lineWidth, in: 1...24)
                     .frame(width: 108)
-                    .accessibilityLabel("粗细")
+                    .accessibilityLabel(L10n.text("粗细"))
                 Text(lineWidth, format: .number.precision(.fractionLength(1)))
                     .monospacedDigit()
                     .foregroundStyle(.secondary)
@@ -246,7 +247,7 @@ private struct ScreenshotEditorPanelView: View {
                 } label: {
                     Image(systemName: "minus.magnifyingglass")
                 }
-                .help("缩小")
+                .help(L10n.text("缩小"))
                 Button {
                     zoomScale = 1
                 } label: {
@@ -254,13 +255,13 @@ private struct ScreenshotEditorPanelView: View {
                         .monospacedDigit()
                         .frame(minWidth: 38)
                 }
-                .help("还原为适合窗口")
+                .help(L10n.text("还原为适合窗口"))
                 Button {
                     zoomScale = min(4, zoomScale + 0.1)
                 } label: {
                     Image(systemName: "plus.magnifyingglass")
                 }
-                .help("放大")
+                .help(L10n.text("放大"))
             }
             .buttonStyle(.borderless)
         }
@@ -274,7 +275,7 @@ private struct ScreenshotEditorPanelView: View {
             } label: {
                 Image(systemName: "arrow.uturn.backward")
             }
-            .help("撤销")
+            .help(L10n.text("撤销"))
             .disabled(!canvas.canUndo)
             .keyboardShortcut("z", modifiers: .command)
 
@@ -283,21 +284,21 @@ private struct ScreenshotEditorPanelView: View {
             } label: {
                 Image(systemName: "arrow.uturn.forward")
             }
-            .help("重做")
+            .help(L10n.text("重做"))
             .disabled(!canvas.canRedo)
             .keyboardShortcut("y", modifiers: .command)
 
             Button(role: .destructive, action: onCancel) {
                 Image(systemName: "trash")
             }
-            .help("删除截图")
+            .help(L10n.text("删除截图"))
 
             Button(action: share) {
                 Image(systemName: "square.and.arrow.up")
             }
-            .help("共享")
+            .help(L10n.text("共享"))
 
-            Button("完成") {
+            Button(L10n.text("完成")) {
                 finishEditing()
             }
             .keyboardShortcut(.defaultAction)
@@ -432,12 +433,12 @@ private enum ScreenshotEditorMode: CaseIterable {
 
     var title: String {
         switch self {
-        case .crop: "裁剪"
-        case .pen: "画笔"
-        case .highlight: "高亮"
-        case .arrow: "箭头"
-        case .rectangle: "矩形"
-        case .text: "文字"
+        case .crop: L10n.text("裁剪")
+        case .pen: L10n.text("画笔")
+        case .highlight: L10n.text("高亮")
+        case .arrow: L10n.text("箭头")
+        case .rectangle: L10n.text("矩形")
+        case .text: L10n.text("文字")
         }
     }
 
@@ -937,11 +938,11 @@ private final class ScreenshotCanvasView: NSView {
 
     private func promptForText(at point: CGPoint, color: RGBAColor) {
         let alert = NSAlert()
-        alert.messageText = "添加文字"
-        alert.addButton(withTitle: "添加")
-        alert.addButton(withTitle: "取消")
+        alert.messageText = L10n.text("添加文字")
+        alert.addButton(withTitle: L10n.text("添加"))
+        alert.addButton(withTitle: L10n.text("取消"))
         let field = NSTextField(frame: NSRect(x: 0, y: 0, width: 240, height: 24))
-        field.placeholderString = "输入标注文字"
+        field.placeholderString = L10n.text("输入标注文字")
         alert.accessoryView = field
         alert.window.initialFirstResponder = field
         guard alert.runModal() == .alertFirstButtonReturn else { return }

@@ -134,11 +134,11 @@ public enum ClipboardContentCategory: String, Codable, CaseIterable, Sendable {
 
     public var displayName: String {
         switch self {
-        case .text: "文本"
-        case .code: "代码"
-        case .link: "链接"
-        case .image: "图片"
-        case .screenshot: "截图"
+        case .text: L10n.text("文本")
+        case .code: L10n.text("代码")
+        case .link: L10n.text("链接")
+        case .image: L10n.text("图片")
+        case .screenshot: L10n.text("截图")
         }
     }
 
@@ -438,9 +438,9 @@ public enum ClipboardItemSize: String, Codable, CaseIterable, Sendable {
 
     public var displayName: String {
         switch self {
-        case .compact: "紧凑"
-        case .regular: "标准"
-        case .large: "大"
+        case .compact: L10n.text("紧凑")
+        case .regular: L10n.text("标准")
+        case .large: L10n.text("大")
         }
     }
 }
@@ -501,7 +501,7 @@ public enum HotKeyPolicy {
     }
 
     public static func label(_ hotKey: HotKeyDefinition?) -> String {
-        guard let hotKey, hotKey.isUsable else { return "未设置" }
+        guard let hotKey, hotKey.isUsable else { return L10n.text("未设置") }
         return hotKey.displayName
     }
 }
@@ -515,19 +515,19 @@ public enum CodeHighlightTheme: String, Codable, CaseIterable, Sendable {
 
     public var displayName: String {
         switch self {
-        case .system: "系统彩色"
-        case .xcodeLight: "Xcode 浅色"
-        case .solarizedLight: "Solarized 浅色"
-        case .githubLight: "GitHub 浅色"
+        case .system: L10n.text("系统彩色")
+        case .xcodeLight: L10n.text("Xcode 浅色")
+        case .solarizedLight: L10n.text("Solarized 浅色")
+        case .githubLight: L10n.text("GitHub 浅色")
         }
     }
 
     public var accessibilityDescription: String {
         switch self {
-        case .system: "使用 macOS 自适应的蓝绿紫语法颜色"
-        case .xcodeLight: "使用接近 Xcode 的高对比浅色配色"
-        case .solarizedLight: "使用低对比、护眼的 Solarized 浅色配色"
-        case .githubLight: "使用 GitHub 风格的清晰浅色配色"
+        case .system: L10n.text("使用 macOS 自适应的蓝绿紫语法颜色")
+        case .xcodeLight: L10n.text("使用接近 Xcode 的高对比浅色配色")
+        case .solarizedLight: L10n.text("使用低对比、护眼的 Solarized 浅色配色")
+        case .githubLight: L10n.text("使用 GitHub 风格的清晰浅色配色")
         }
     }
 }
@@ -712,9 +712,9 @@ public struct ClipboardEntry: Codable, Hashable, Identifiable, Sendable {
         switch kind {
         case .text:
             let cleaned = (text ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
-            return cleaned.isEmpty ? "空白文字" : cleaned
+            return cleaned.isEmpty ? L10n.text("空白文字") : cleaned
         case .image:
-            return text?.isEmpty == false ? text! : "图片"
+            return text?.isEmpty == false ? text! : L10n.text("图片")
         }
     }
 
@@ -845,10 +845,6 @@ public enum ClipboardHistoryPolicy {
         return pinned[number - 1]
     }
 
-    public static func shouldMergeWithLatest(latest: ClipboardEntry?, contentHash: String) -> Bool {
-        latest?.contentHash == contentHash
-    }
-
     public static func idsToTrim(from entries: [ClipboardEntry], maxEntries: Int) -> [UUID] {
         let maxEntries = max(10, maxEntries)
         guard entries.count > maxEntries else { return [] }
@@ -869,8 +865,8 @@ public enum ScreenshotMode: String, Codable, CaseIterable, Sendable {
 
     public var displayName: String {
         switch self {
-        case .manualSelection: "手动框选"
-        case .smartWindow: "智能窗口"
+        case .manualSelection: L10n.text("手动框选")
+        case .smartWindow: L10n.text("智能窗口")
         }
     }
 }

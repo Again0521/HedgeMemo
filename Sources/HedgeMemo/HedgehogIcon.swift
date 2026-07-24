@@ -1,4 +1,5 @@
 import AppKit
+import HedgeMemoCore
 import SwiftUI
 
 enum HedgehogIcon {
@@ -36,7 +37,7 @@ enum HedgehogIcon {
         // up-arrow shape (plus the tooltip) still signals an available update.
         let composed = NSImage(size: size, flipped: false) { rect in
             baseStatusImage.draw(in: rect)
-            guard let arrow = NSImage(systemSymbolName: "arrow.up", accessibilityDescription: "有新版本")?
+            guard let arrow = NSImage(systemSymbolName: "arrow.up", accessibilityDescription: L10n.text("有新版本"))?
                 .withSymbolConfiguration(.init(pointSize: 7, weight: .heavy)) else { return true }
             let arrowSize = NSSize(width: 7, height: 7)
             let arrowRect = NSRect(

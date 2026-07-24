@@ -107,7 +107,7 @@ public final class MemeStore: ObservableObject {
             memes.append(MemeItem(
                 fileName: tempStored.fileName,
                 contentHash: tempStored.contentHash,
-                note: (displayNote?.isEmpty == false ? displayNote! : (generatedNote.isEmpty ? "未命名" : generatedNote)),
+                note: (displayNote?.isEmpty == false ? displayNote! : (generatedNote.isEmpty ? L10n.text("未命名") : generatedNote)),
                 ocrText: ocrText,
                 categoryID: targetCategory,
                 sortOrder: nextOrder
@@ -123,7 +123,7 @@ public final class MemeStore: ObservableObject {
     public func updateNote(id: UUID, note: String) {
         guard let index = memes.firstIndex(where: { $0.id == id }) else { return }
         let cleaned = note.trimmingCharacters(in: .whitespacesAndNewlines)
-        memes[index].note = cleaned.isEmpty ? (memes[index].ocrText.isEmpty ? "未命名" : memes[index].ocrText) : cleaned
+        memes[index].note = cleaned.isEmpty ? (memes[index].ocrText.isEmpty ? L10n.text("未命名") : memes[index].ocrText) : cleaned
         memes[index].updatedAt = .now
         persist()
     }

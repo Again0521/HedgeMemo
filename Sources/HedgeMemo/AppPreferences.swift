@@ -1,4 +1,6 @@
 import Foundation
+import HedgeMemoCore
+import SwiftUI
 
 /// UserDefaults keys shared by independent app windows and panels.
 /// Keeping the key in one place prevents a settings toggle from silently
@@ -20,5 +22,29 @@ enum AppPreferences {
     static func opaqueBackingAlpha(for value: Double) -> Double {
         let level = clampedInterfaceOpacity(value)
         return minimumOpaqueBacking + (1 - minimumOpaqueBacking) * level
+    }
+}
+
+/// Keeps every hosted panel in sync with the language selected in Settings.
+/// AppKit owns most HedgeMemo windows, so the locale is injected at the common
+/// SwiftUI hosting boundary instead of relying on a single app scene.
+struct LanguageSurface<Content: View>: View {
+    @AppStorage(AppLanguage.preferenceKey)
+    private var languageRawValue = AppLanguage.current.rawValue
+
+    @ViewBuilder let content: Content
+
+    init(@ViewBuilder content: () -> Content) {
+        self.content = content()
+    }
+
+    private var language: AppLanguage {
+        AppLanguage(rawValue: languageRawValue) ?? .english
+    }
+
+    var body: some View {
+        content
+            .environment(\.locale, language.locale)
+            .id(language.rawValue)
     }
 }

@@ -794,18 +794,18 @@ private enum ClipboardShortcutHint {
     /// (images have no editable text body), so it is omitted for images rather
     /// than shown as a dead shortcut.
     static func text(kind: ClipboardEntryKind, isPinned: Bool, isDesktopPinned: Bool) -> String {
-        let pin = isPinned ? "取消置顶" : "置顶"
-        let desktop = isDesktopPinned ? "取消固定" : "固定桌面"
+        let pin = L10n.text(isPinned ? "取消置顶" : "置顶")
+        let desktop = L10n.text(isDesktopPinned ? "取消固定" : "固定桌面")
         var segments = [String]()
-        if kind == .text { segments.append("编辑：⌘E") }
-        segments.append("删除：⌫")
+        if kind == .text { segments.append(L10n.text("编辑：⌘E")) }
+        segments.append(L10n.text("删除：⌫"))
         segments.append("\(pin)：⌘P")
         segments.append("\(desktop)：⌥P")
         return segments.joined(separator: " ｜ ")
     }
 
     /// Shown instead of the normal hint line while editing.
-    static let editing = "按 ⌘S 保存并退出"
+    static var editing: String { L10n.text("按 ⌘S 保存并退出") }
 
     /// The widest variant (a text entry, both toggles in their longer "cancel"
     /// wording); the card minimum width is sized to this so the hint never
@@ -833,9 +833,9 @@ private struct ClipboardDetailCard: View {
             Divider()
             VStack(alignment: .leading, spacing: 3) {
                 sourceRow
-                detailRow("收录时间", entry.createdAt.formatted(date: .abbreviated, time: .shortened))
-                detailRow("上次使用", entry.lastUsedAt?.formatted(date: .abbreviated, time: .shortened) ?? "还未使用")
-                detailRow("使用次数", "\(entry.useCount ?? 0) 次")
+                detailRow(L10n.text("收录时间"), entry.createdAt.formatted(date: .abbreviated, time: .shortened))
+                detailRow(L10n.text("上次使用"), entry.lastUsedAt?.formatted(date: .abbreviated, time: .shortened) ?? L10n.text("还未使用"))
+                detailRow(L10n.text("使用次数"), L10n.format("使用次数格式", entry.useCount ?? 0))
             }
             Divider()
             // Shortcut hints share one line in a "动作：按键" format, the actions
@@ -951,7 +951,7 @@ private struct ClipboardDetailCard: View {
 
     private var sourceRow: some View {
         HStack(alignment: .firstTextBaseline, spacing: 6) {
-            Text("来源")
+            Text(L10n.text("来源"))
                 .foregroundStyle(.secondary)
             Spacer(minLength: 4)
             SourceApplicationLabel(name: entry.sourceApp)
@@ -975,7 +975,7 @@ private struct SourceApplicationLabel: View {
                     .interpolation(.high)
                     .frame(width: 12, height: 12)
             }
-            Text(name ?? "未知")
+            Text(name ?? L10n.text("未知"))
                 .multilineTextAlignment(.trailing)
         }
     }
@@ -1036,7 +1036,7 @@ private enum ClipboardDetailLayout {
     /// without cramping this footer.
     private static var metadataMinimumWidth: CGFloat {
         let font = NSFont.systemFont(ofSize: 11)
-        let widestLabel = "收录时间"
+        let widestLabel = L10n.text("收录时间")
         // Measure a value produced by the same formatter the rows use rather
         // than hard-coding, so the floor tracks the user's locale and clock.
         let sampleValue = Date(timeIntervalSince1970: 1_703_772_480)
@@ -1351,7 +1351,7 @@ struct ClipboardHistoryPanelView: View {
 
     private var listContent: some View {
         VStack(spacing: ClipboardPanelLayout.sectionSpacing) {
-            PanelSearchField(placeholder: "搜索剪贴板", text: $query)
+            PanelSearchField(placeholder: L10n.text("搜索剪贴板"), text: $query)
                 .frame(height: ClipboardPanelLayout.headerHeight)
             categoryBar
                 .frame(height: ClipboardPanelLayout.segmentedHeight)
@@ -1441,14 +1441,14 @@ struct ClipboardHistoryPanelView: View {
         switch activeKey {
         case .builtin(let category):
             switch category {
-            case .image: "没有图片记录"
-            case .screenshot: "没有截图记录"
-            case .text: "没有文本记录"
-            case .code: "没有代码记录"
-            case .link: "没有链接记录"
+            case .image: L10n.text("没有图片记录")
+            case .screenshot: L10n.text("没有截图记录")
+            case .text: L10n.text("没有文本记录")
+            case .code: L10n.text("没有代码记录")
+            case .link: L10n.text("没有链接记录")
             }
         case .custom:
-            "没有匹配的记录"
+            L10n.text("没有匹配的记录")
         }
     }
 
@@ -1510,7 +1510,7 @@ struct ClipboardHistoryPanelView: View {
     private func title(for key: ClipboardCategoryKey) -> String {
         switch key {
         case .builtin(let category): category.displayName
-        case .custom(let id): store.settings.customCategory(id: id)?.name ?? "自定义"
+        case .custom(let id): store.settings.customCategory(id: id)?.name ?? L10n.text("自定义")
         }
     }
 
@@ -1611,16 +1611,16 @@ struct ClipboardHistoryPanelView: View {
             Button {
                 onAddToMemes(entry)
             } label: {
-                Label("添加到表情包", systemImage: "photo.badge.plus")
+                Label(L10n.text("添加到表情包"), systemImage: "photo.badge.plus")
             }
             Divider()
         }
         if entry.kind == .text {
-            Button("编辑") { beginEditing(entry) }
+            Button(L10n.text("编辑")) { beginEditing(entry) }
         }
-        Button(entry.isPinned ? "取消置顶" : "置顶") { store.togglePinned(id: entry.id) }
-        Button(entry.isDesktopPinned == true ? "取消桌面固定" : "固定到桌面") { onTogglePin(entry) }
-        Button("删除", role: .destructive) { delete(entry) }
+        Button(L10n.text(entry.isPinned ? "取消置顶" : "置顶")) { store.togglePinned(id: entry.id) }
+        Button(L10n.text(entry.isDesktopPinned == true ? "取消桌面固定" : "固定到桌面")) { onTogglePin(entry) }
+        Button(L10n.text("删除"), role: .destructive) { delete(entry) }
     }
 
     private func validateSelection() {
@@ -1879,7 +1879,7 @@ private struct TextEntryRow: View, Equatable {
     /// `lineLimit(1)` can show, so the rendering is unchanged.
     private var previewLine: String {
         guard entry.kind == .text, let text = entry.text else { return entry.previewText }
-        guard let start = text.firstIndex(where: { !$0.isWhitespace }) else { return "空白文字" }
+        guard let start = text.firstIndex(where: { !$0.isWhitespace }) else { return L10n.text("空白文字") }
         return String(text[start...].prefix(300)).replacingOccurrences(of: "\n", with: " ")
     }
 
@@ -1900,7 +1900,7 @@ private struct TextEntryRow: View, Equatable {
                 }
                 .buttonStyle(.plain)
                 .foregroundStyle(.white)
-                .help(entry.isPinned ? "取消剪切板内固定" : "固定到剪切板")
+                .help(L10n.text(entry.isPinned ? "取消剪切板内固定" : "固定到剪切板"))
                 ClipboardPinButton(entry: entry, isSelected: true, action: onTogglePin)
             } else {
                 // Unselected: the desktop-pin badge leads and the copy shortcut
@@ -1970,7 +1970,7 @@ private struct CodeEntryRow: View, Equatable {
                 }
                 .buttonStyle(.plain)
                 .foregroundStyle(.white)
-                .help(entry.isPinned ? "取消剪切板内固定" : "固定到剪切板")
+                .help(L10n.text(entry.isPinned ? "取消剪切板内固定" : "固定到剪切板"))
                 ClipboardPinButton(entry: entry, isSelected: true, action: onTogglePin)
             } else {
                 // Unselected: desktop-pin badge leads, ⌘-number trails.
@@ -2043,7 +2043,7 @@ private struct ImageEntryCell: View, Equatable {
                     .buttonStyle(.plain)
                     .foregroundStyle(.white)
                     .background(Circle().fill(.black.opacity(0.4)))
-                    .help(entry.isPinned ? "取消剪切板内固定" : "固定到剪切板")
+                    .help(L10n.text(entry.isPinned ? "取消剪切板内固定" : "固定到剪切板"))
                     ClipboardPinButton(entry: entry, isSelected: true, action: onTogglePin)
                         .background(Circle().fill(.black.opacity(0.4)))
                 } else {
@@ -2090,8 +2090,8 @@ private struct ClipboardPinButton: View {
         }
         .buttonStyle(.plain)
         .foregroundStyle(isSelected ? Color.white : Color.secondary)
-        .help(entry.isDesktopPinned == true ? "取消桌面固定" : "固定到桌面")
-        .accessibilityLabel(entry.isDesktopPinned == true ? "取消桌面固定" : "固定到桌面")
+        .help(L10n.text(entry.isDesktopPinned == true ? "取消桌面固定" : "固定到桌面"))
+        .accessibilityLabel(L10n.text(entry.isDesktopPinned == true ? "取消桌面固定" : "固定到桌面"))
     }
 }
 

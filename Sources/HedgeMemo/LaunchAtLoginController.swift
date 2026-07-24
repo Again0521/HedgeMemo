@@ -1,4 +1,5 @@
 import Foundation
+import HedgeMemoCore
 import ServiceManagement
 
 /// Small wrapper around the system-managed login-item service. Keeping the
@@ -20,13 +21,13 @@ final class LaunchAtLoginController: ObservableObject {
             statusMessage = nil
         case .requiresApproval:
             isEnabled = true
-            statusMessage = "登录项等待系统设置批准"
+            statusMessage = L10n.text("登录项等待系统设置批准")
         case .notRegistered, .notFound:
             isEnabled = false
             statusMessage = nil
         @unknown default:
             isEnabled = false
-            statusMessage = "无法读取登录项状态"
+            statusMessage = L10n.text("无法读取登录项状态")
         }
     }
 
@@ -40,7 +41,7 @@ final class LaunchAtLoginController: ObservableObject {
             refresh()
         } catch {
             refresh()
-            statusMessage = "无法更新登录项：\(error.localizedDescription)"
+            statusMessage = L10n.format("无法更新登录项格式", error.localizedDescription)
         }
     }
 }

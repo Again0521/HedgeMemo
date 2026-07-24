@@ -230,12 +230,12 @@ private struct PinnedClipboardNoteView: View {
         .background(
             Group {
                 if model.isEditing {
-                    Button("保存", action: saveEditing)
+                    Button(L10n.text("保存"), action: saveEditing)
                         .keyboardShortcut("s", modifiers: .command)
-                    Button("取消", action: cancelEditing)
+                    Button(L10n.text("取消"), action: cancelEditing)
                         .keyboardShortcut(.cancelAction)
                 } else if entry.kind == .text {
-                    Button("编辑", action: beginEditing)
+                    Button(L10n.text("编辑"), action: beginEditing)
                         .keyboardShortcut("e", modifiers: .command)
                 }
             }
@@ -252,7 +252,7 @@ private struct PinnedClipboardNoteView: View {
         HStack(spacing: 8) {
             Image(systemName: entry.contentCategory.systemImage)
                 .foregroundStyle(.secondary)
-            Text(entry.sourceApp ?? "剪贴板便签")
+            Text(entry.sourceApp ?? L10n.text("剪贴板便签"))
                 .font(.system(size: 11, weight: .medium))
                 .lineLimit(1)
                 .foregroundStyle(.secondary)
@@ -268,8 +268,8 @@ private struct PinnedClipboardNoteView: View {
                 }
                 .buttonStyle(.plain)
                 .foregroundStyle(model.isEditing ? Color.accentColor : Color.secondary)
-                .help(model.isEditing ? "完成编辑" : "编辑")
-                .accessibilityLabel(model.isEditing ? "完成编辑" : "编辑")
+                .help(L10n.text(model.isEditing ? "完成编辑" : "编辑"))
+                .accessibilityLabel(L10n.text(model.isEditing ? "完成编辑" : "编辑"))
             }
             Button(action: onToggleAlwaysOnTop) {
                 Image(systemName: model.isAlwaysOnTop ? "rectangle.fill.on.rectangle.fill" : "rectangle.on.rectangle")
@@ -277,8 +277,8 @@ private struct PinnedClipboardNoteView: View {
             }
             .buttonStyle(.plain)
             .foregroundStyle(model.isAlwaysOnTop ? Color.accentColor : Color.secondary)
-            .help(model.isAlwaysOnTop ? "取消保持最前" : "保持最前")
-            .accessibilityLabel(model.isAlwaysOnTop ? "取消保持最前" : "保持最前")
+            .help(L10n.text(model.isAlwaysOnTop ? "取消保持最前" : "保持最前"))
+            .accessibilityLabel(L10n.text(model.isAlwaysOnTop ? "取消保持最前" : "保持最前"))
 
             Button(action: onUnpin) {
                 Image(systemName: "xmark")
@@ -286,8 +286,8 @@ private struct PinnedClipboardNoteView: View {
             }
             .buttonStyle(.plain)
             .foregroundStyle(.secondary)
-            .help("取消固定")
-            .accessibilityLabel("取消固定")
+            .help(L10n.text("取消固定"))
+            .accessibilityLabel(L10n.text("取消固定"))
         }
         .padding(.horizontal, 12)
         .frame(height: PinnedClipboardWindowLayout.headerHeight)

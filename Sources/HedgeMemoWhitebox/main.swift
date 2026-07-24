@@ -66,7 +66,6 @@ let clipboardOrdered = ClipboardHistoryPolicy.ordered([regularOlder, pinnedLater
 expect(clipboardOrdered.map(\.id) == [pinnedFirst.id, pinnedLater.id, regularNewer.id, regularOlder.id], "clipboard entries must sort pinned first, then newest")
 expect(ClipboardHistoryPolicy.quickEntry(in: clipboardOrdered, number: 2)?.id == pinnedLater.id, "quick number mapping must follow pinned order")
 expect(ClipboardHistoryPolicy.quickEntry(in: clipboardOrdered, number: 9) == nil, "quick number mapping must ignore empty slots")
-expect(ClipboardHistoryPolicy.shouldMergeWithLatest(latest: regularNewer, contentHash: "r2"), "consecutive duplicate clipboard entries must merge")
 expect(ClipboardHistoryPolicy.idsToTrim(from: clipboardOrdered, maxEntries: 3).isEmpty, "clipboard history keeps a minimum practical limit")
 expect(ClipboardEntry(kind: .text, text: "发票报销", contentHash: "q").matches(query: "报销"), "clipboard text must be searchable")
 let desktopPinned = ClipboardEntry(
@@ -112,7 +111,7 @@ expect(customClipboardHotKey.isUsable, "custom hotkey with a modifier must be us
 expect(customClipboardHotKey.displayName == "Command + Option + V", "custom hotkey display must include modifiers and key")
 expect(HotKeyPolicy.conflicts(customClipboardHotKey, customClipboardHotKey), "identical hotkeys must conflict")
 expect(!HotKeyPolicy.conflicts(customClipboardHotKey, .defaultScreenshot), "different hotkeys must not conflict")
-expect(HotKeyPolicy.label(nil) == "未设置", "missing hotkey must have a stable label")
+expect(HotKeyPolicy.label(nil) == L10n.text("未设置"), "missing hotkey must have a stable label")
 
 let swiftSnippet = """
 func greet(name: String) -> String {
@@ -273,6 +272,11 @@ await MainActor.run {
     let reloadedClipboardStore = ClipboardHistoryStore(repository: ClipboardHistoryRepository(rootURL: tempRoot))
     expect(reloadedClipboardStore.entries.first?.isPinned == true, "clipboard pin state must persist")
     expect(reloadedClipboardStore.entries.first?.isDesktopPinned == true, "desktop note state must persist independently")
+    expect(reloadedClipboardStore.addText("重复项目"), "seed a clipboard item for global deduplication")
+    let repeatedID = reloadedClipboardStore.orderedEntries().first!.id
+    expect(reloadedClipboardStore.addText("中间项目"), "seed a different item between duplicate captures")
+    expect(!reloadedClipboardStore.addText("重复项目"), "a non-consecutive duplicate must reuse its existing item")
+    expect(reloadedClipboardStore.orderedEntries().first?.id == repeatedID, "reused clipboard content must move forward without becoming pinned")
 
     let suiteName = "hedgememo-whitebox-screenshot"
     let defaults = UserDefaults(suiteName: suiteName)!

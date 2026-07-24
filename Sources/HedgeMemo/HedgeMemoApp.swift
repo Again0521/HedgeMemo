@@ -8,6 +8,7 @@ final class HedgeMemoAppDelegate: NSObject, NSApplicationDelegate {
     private var statusItemController: StatusItemController?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
+        AppLanguage.bootstrap()
         NSApp.setActivationPolicy(.accessory)
         let services = AppServices()
         services.start()

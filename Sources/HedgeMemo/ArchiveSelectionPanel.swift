@@ -75,14 +75,14 @@ enum ArchiveExportSelectionPanel {
         let categories = memeStore.categories
         let clipboardKeys = clipboardStore.settings.orderedCategoryKeys
         let session = ArchiveSelectionSession(
-            title: "选择导出内容",
+            title: L10n.text("选择导出内容"),
             size: ArchiveSelectionMetrics.size(rowCount: categories.count + clipboardKeys.count + 1)
         )
         var result: ArchiveExportSelection?
         let root = ArchiveSelectionView(
-            title: "选择导出内容",
-            subtitle: "按分类打包成一个 HedgeMemo ZIP 文件。",
-            confirmationTitle: "导出 ZIP",
+            title: L10n.text("选择导出内容"),
+            subtitle: L10n.text("按分类打包成一个 HedgeMemo ZIP 文件。"),
+            confirmationTitle: L10n.text("导出 ZIP"),
             memeCategories: categories,
             clipboardKeys: clipboardKeys,
             customCategories: clipboardStore.settings.customCategories ?? [],
@@ -113,16 +113,16 @@ enum ArchiveImportSelectionPanel {
         let clipboardKeys = archiveClipboardKeys(in: clipboardSnapshot)
         let customs = clipboardSnapshot?.settings.customCategories ?? []
         let session = ArchiveSelectionSession(
-            title: "选择导入内容",
+            title: L10n.text("选择导入内容"),
             size: ArchiveSelectionMetrics.size(
                 rowCount: memeCategories.count + clipboardKeys.count + (uncategorizedMemes ? 1 : 0)
             )
         )
         var result: ArchiveImportSelection?
         let root = ArchiveSelectionView(
-            title: "选择导入内容",
-            subtitle: "已识别压缩包内的分类；只会导入勾选的内容。",
-            confirmationTitle: "导入所选内容",
+            title: L10n.text("选择导入内容"),
+            subtitle: L10n.text("已识别压缩包内的分类；只会导入勾选的内容。"),
+            confirmationTitle: L10n.text("导入所选内容"),
             memeCategories: memeCategories,
             clipboardKeys: clipboardKeys,
             customCategories: customs,
@@ -224,15 +224,15 @@ private struct ArchiveSelectionView: View {
             .padding(.bottom, 14)
 
             if memeCategories.isEmpty && clipboardKeys.isEmpty && !includeUncategorizedMemes {
-                ContentUnavailableView("压缩包中没有可导入的分类", systemImage: "archivebox")
+                ContentUnavailableView(L10n.text("压缩包中没有可导入的分类"), systemImage: "archivebox")
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
             } else {
                 ScrollView {
                     VStack(alignment: .leading, spacing: 16) {
                         if !memeCategories.isEmpty || includeUncategorizedMemes {
-                            selectionSection(title: "表情包", systemImage: "face.smiling") {
+                            selectionSection(title: L10n.text("表情包"), systemImage: "face.smiling") {
                                 if includeUncategorizedMemes {
-                                    Toggle("未分类", isOn: $includeUncategorizedMemes)
+                                    Toggle(L10n.text("未分类"), isOn: $includeUncategorizedMemes)
                                 }
                                 ForEach(memeCategories) { category in
                                     Toggle(category.name, isOn: binding(for: category.id, in: $memeCategoryIDs))
@@ -240,7 +240,7 @@ private struct ArchiveSelectionView: View {
                             }
                         }
                         if !clipboardKeys.isEmpty {
-                            selectionSection(title: "剪贴板", systemImage: "clipboard") {
+                            selectionSection(title: L10n.text("剪贴板"), systemImage: "clipboard") {
                                 ForEach(clipboardKeys, id: \.storageValue) { key in
                                     Toggle(clipboardTitle(for: key), isOn: binding(for: key.storageValue, in: $clipboardCategoryKeys))
                                 }
@@ -255,11 +255,11 @@ private struct ArchiveSelectionView: View {
 
             Divider()
             HStack(spacing: 10) {
-                Text(selection.includesAnything ? "可随时从设置或菜单栏继续操作" : "至少选择一个分类")
+                Text(L10n.text(selection.includesAnything ? "可随时从设置或菜单栏继续操作" : "至少选择一个分类"))
                     .font(.caption)
                     .foregroundStyle(.secondary)
                 Spacer(minLength: 12)
-                Button("取消", action: onCancel)
+                Button(L10n.text("取消"), action: onCancel)
                     .keyboardShortcut(.cancelAction)
                 Button(confirmationTitle) { onConfirm(selection) }
                     .keyboardShortcut(.defaultAction)
@@ -293,7 +293,7 @@ private struct ArchiveSelectionView: View {
     private func clipboardTitle(for key: ClipboardCategoryKey) -> String {
         switch key {
         case .builtin(let category): category.displayName
-        case .custom(let id): customCategories.first(where: { $0.id == id })?.name ?? "自定义分类"
+        case .custom(let id): customCategories.first(where: { $0.id == id })?.name ?? L10n.text("自定义分类")
         }
     }
 

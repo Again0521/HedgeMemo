@@ -63,12 +63,31 @@ final class StatusItemController: NSObject {
                 guard let self, let button = self.statusItem.button else { return }
                 button.image = HedgehogIcon.statusImage(hasUpdate: showsBadge)
                 if showsBadge, let release = self.services.updateCheckStore.availableRelease {
-                    button.toolTip = "HedgeMemo，有新版本 v\(release.version.displayString)"
+                    button.toolTip = L10n.format("菜单栏新版本提示格式", release.version.displayString)
                 } else {
                     button.toolTip = "HedgeMemo"
                 }
             }
             .store(in: &cancellables)
+
+        NotificationCenter.default.publisher(for: AppLanguage.didChangeNotification)
+            .sink { [weak self] _ in self?.refreshLocalizedStatusItem() }
+            .store(in: &cancellables)
+    }
+
+    private func refreshLocalizedStatusItem() {
+        guard let button = statusItem.button else { return }
+        if services.updateCheckStore.showsUpdateBadge,
+           let release = services.updateCheckStore.availableRelease {
+            button.toolTip = L10n.format("菜单栏新版本提示格式", release.version.displayString)
+        } else {
+            button.toolTip = "HedgeMemo"
+        }
+        // Recreate lazily so a visible popover is never mutated underneath
+        // AppKit's presentation transaction.
+        if !popover.isShown {
+            popover.contentViewController = nil
+        }
     }
 
     private func configurePopover() {
@@ -86,10 +105,14 @@ final class StatusItemController: NSObject {
     private func installMemeContent() {
         guard popover.contentViewController == nil else { return }
         // NSPopover already renders with native vibrancy chrome.
-        popover.contentViewController = NSHostingController(rootView: MemePanelView(
-            store: services.memeStore,
-            onDismiss: { [weak self] in self?.popover.performClose(nil) }
-        ))
+        popover.contentViewController = NSHostingController(
+            rootView: LanguageSurface {
+                MemePanelView(
+                    store: services.memeStore,
+                    onDismiss: { [weak self] in self?.popover.performClose(nil) }
+                )
+            }
+        )
     }
 
     @objc private func handleClick() {
@@ -273,26 +296,26 @@ final class StatusItemController: NSObject {
     private func buildMenu() -> NSMenu {
         let menu = NSMenu()
 
-        menu.addItem(actionItem("导入 ZIP…", #selector(importArchive)))
-        menu.addItem(actionItem("导出 ZIP…", #selector(exportArchive)))
+        menu.addItem(actionItem(L10n.text("导入 ZIP…"), #selector(importArchive)))
+        menu.addItem(actionItem(L10n.text("导出 ZIP…"), #selector(exportArchive)))
         menu.addItem(.separator())
 
-        let screenshot = NSMenuItem(title: "截图", action: nil, keyEquivalent: "")
+        let screenshot = NSMenuItem(title: L10n.text("截图"), action: nil, keyEquivalent: "")
         let screenshotMenu = NSMenu()
-        screenshotMenu.addItem(actionItem("按当前模式截图", #selector(screenshotDefault)))
+        screenshotMenu.addItem(actionItem(L10n.text("按当前模式截图"), #selector(screenshotDefault)))
         screenshotMenu.addItem(.separator())
-        screenshotMenu.addItem(actionItem("手动框选", #selector(screenshotManual)))
-        screenshotMenu.addItem(actionItem("智能窗口", #selector(screenshotSmart)))
+        screenshotMenu.addItem(actionItem(L10n.text("手动框选"), #selector(screenshotManual)))
+        screenshotMenu.addItem(actionItem(L10n.text("智能窗口"), #selector(screenshotSmart)))
         screenshot.submenu = screenshotMenu
         menu.addItem(screenshot)
         menu.addItem(.separator())
 
-        menu.addItem(actionItem("清除剪贴板…", #selector(clearClipboardHistory)))
+        menu.addItem(actionItem(L10n.text("清除剪贴板…"), #selector(clearClipboardHistory)))
         menu.addItem(.separator())
 
-        menu.addItem(actionItem("设置…", #selector(openSettings)))
+        menu.addItem(actionItem(L10n.text("设置…"), #selector(openSettings)))
         menu.addItem(.separator())
-        menu.addItem(actionItem("退出 HedgeMemo", #selector(quit)))
+        menu.addItem(actionItem(L10n.text("退出 HedgeMemo"), #selector(quit)))
         return menu
     }
 

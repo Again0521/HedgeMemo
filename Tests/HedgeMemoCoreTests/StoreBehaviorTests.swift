@@ -175,6 +175,79 @@ final class StoreBehaviorTests: XCTestCase {
         XCTAssertEqual(store.entries.count, 1)
     }
 
+    func testNonConsecutiveDuplicateTextMovesExistingEntryForward() {
+        let store = makeClipboardStore()
+        XCTAssertTrue(store.addText("第一条"))
+        let originalID = store.entries.first!.id
+        XCTAssertTrue(store.addText("第二条"))
+
+        XCTAssertFalse(store.addText("第一条"), "an existing item is promoted instead of inserted")
+
+        XCTAssertEqual(store.entries.count, 2)
+        XCTAssertEqual(store.orderedEntries().map(\.text), ["第一条", "第二条"])
+        XCTAssertEqual(store.orderedEntries().first?.id, originalID, "promotion keeps the original item")
+        XCTAssertFalse(store.orderedEntries().first?.isPinned == true, "recency promotion is not pinning")
+    }
+
+    func testReCopyingPinnedContentPreservesExplicitPinState() {
+        let store = makeClipboardStore()
+        XCTAssertTrue(store.addText("固定内容"))
+        let id = store.entries.first!.id
+        store.togglePinned(id: id)
+        XCTAssertTrue(store.addText("普通内容"))
+
+        XCTAssertFalse(store.addText("固定内容"))
+
+        XCTAssertEqual(store.entries.count, 2)
+        XCTAssertEqual(store.entries.first(where: { $0.id == id })?.isPinned, true)
+    }
+
+    func testNonConsecutiveDuplicateImageReusesTheStoredFile() throws {
+        let root = tempRoot("image-dedup")
+        let repository = ClipboardHistoryRepository(rootURL: root)
+        let store = ClipboardHistoryStore(repository: repository)
+        let first = ImageAssetData(data: Fixture.solidImage(0.2, size: 8).pngData!, fileExtension: "png")
+        let second = ImageAssetData(data: Fixture.solidImage(0.8, size: 8).pngData!, fileExtension: "png")
+        XCTAssertTrue(store.addImageData(first))
+        let originalID = store.entries.first!.id
+        let originalFileName = store.entries.first!.imageFileName
+        XCTAssertTrue(store.addImageData(second))
+
+        XCTAssertFalse(store.addImageData(first))
+
+        XCTAssertEqual(store.entries.count, 2)
+        XCTAssertEqual(store.orderedEntries().first?.id, originalID)
+        XCTAssertEqual(store.orderedEntries().first?.imageFileName, originalFileName)
+        let files = try FileManager.default.contentsOfDirectory(atPath: repository.imagesURL.path)
+        XCTAssertEqual(files.count, 2, "duplicate capture must not write a third image file")
+    }
+
+    func testLoadingLegacySnapshotCollapsesDuplicatesAndMergesPins() throws {
+        let root = tempRoot("legacy-dedup")
+        let repository = ClipboardHistoryRepository(rootURL: root)
+        let older = ClipboardEntry(
+            kind: .text,
+            text: "重复",
+            contentHash: "same",
+            createdAt: Date(timeIntervalSinceReferenceDate: 1),
+            isPinned: true,
+            pinnedOrder: 0
+        )
+        let newer = ClipboardEntry(
+            kind: .text,
+            text: "重复",
+            contentHash: "same",
+            createdAt: Date(timeIntervalSinceReferenceDate: 2)
+        )
+        try repository.save(ClipboardHistorySnapshot(entries: [older, newer]))
+
+        let store = ClipboardHistoryStore(repository: repository)
+
+        XCTAssertEqual(store.entries.count, 1)
+        XCTAssertEqual(store.entries.first?.id, newer.id, "the newest record remains canonical")
+        XCTAssertEqual(store.entries.first?.isPinned, true, "explicit state from duplicates is preserved")
+    }
+
     func testPinAndDesktopPinAreIndependentAndPersist() {
         let root = tempRoot("clip-persist")
         let store = ClipboardHistoryStore(repository: ClipboardHistoryRepository(rootURL: root))

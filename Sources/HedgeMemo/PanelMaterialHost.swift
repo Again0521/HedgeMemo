@@ -48,13 +48,15 @@ enum PanelMaterialHost {
 
     private static func rootView(for content: AnyView, usesWindowMaterial: Bool) -> AnyView {
         AnyView(
-            ZStack {
-                if usesWindowMaterial {
-                    AdjustablePanelBackground()
+            LanguageSurface {
+                ZStack {
+                    if usesWindowMaterial {
+                        AdjustablePanelBackground()
+                    }
+                    content
                 }
-                content
+                .ignoresSafeArea()
             }
-            .ignoresSafeArea()
         )
     }
 }

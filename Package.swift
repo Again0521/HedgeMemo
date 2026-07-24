@@ -3,6 +3,7 @@ import PackageDescription
 
 let package = Package(
     name: "HedgeMemo",
+    defaultLocalization: "en",
     platforms: [.macOS(.v14)],
     products: [
         .library(name: "HedgeMemoCore", targets: ["HedgeMemoCore"]),
@@ -10,7 +11,10 @@ let package = Package(
         .executable(name: "HedgeMemoWhitebox", targets: ["HedgeMemoWhitebox"]),
     ],
     targets: [
-        .target(name: "HedgeMemoCore"),
+        .target(
+            name: "HedgeMemoCore",
+            resources: [.process("Localization")]
+        ),
         .executableTarget(
             name: "HedgeMemo",
             dependencies: ["HedgeMemoCore"],

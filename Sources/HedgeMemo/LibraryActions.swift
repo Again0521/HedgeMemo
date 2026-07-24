@@ -11,7 +11,7 @@ enum LibraryActions {
         panel.allowedContentTypes = [.zip]
         panel.canChooseDirectories = false
         panel.canChooseFiles = true
-        panel.prompt = "选择 ZIP"
+        panel.prompt = L10n.text("选择 ZIP")
         guard panel.runModal() == .OK, let url = panel.url else { return }
         do {
             let extracted = try MemeArchiveService.extract(from: url)
@@ -30,8 +30,8 @@ enum LibraryActions {
         } catch {
             memeStore.report(error)
             let alert = NSAlert(error: error)
-            alert.messageText = "无法识别导入的 ZIP"
-            alert.informativeText = "请选择由 HedgeMemo 导出的压缩包。"
+            alert.messageText = L10n.text("无法识别导入的 ZIP")
+            alert.informativeText = L10n.text("请选择由 HedgeMemo 导出的压缩包。")
             alert.runModal()
         }
     }

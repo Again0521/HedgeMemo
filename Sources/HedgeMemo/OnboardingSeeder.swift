@@ -19,11 +19,11 @@ enum OnboardingSeeder {
     /// Guidance shown in the clipboard on first run — friendly, plain-spoken,
     /// and safe to delete. Index 0 lands at the top of the list.
     private static let guidanceLines = [
-        "复制过的文字与图片都会出现在这里，需要的时候回来拿就好。",
-        "按 ⌘P 可以置顶到桌面，⌥P可以在剪切板内置顶",
-        "鼠标停在一条上就能看到全部内容；常用的可以置顶，或钉到桌面当便签。",
-        "这几条只是带你熟悉一下，看完随手删掉就行，之后不会再出现。",
-	"任何问题与需求欢迎加群反馈：977808370",
+        L10n.text("复制过的文字与图片都会出现在这里，需要的时候回来拿就好。"),
+        L10n.text("按 ⌘P 可以置顶到桌面，⌥P可以在剪切板内置顶"),
+        L10n.text("鼠标停在一条上就能看到全部内容；常用的可以置顶，或钉到桌面当便签。"),
+        L10n.text("这几条只是带你熟悉一下，看完随手删掉就行，之后不会再出现。"),
+        L10n.text("任何问题与需求欢迎加群反馈：977808370"),
     ]
 
     static func seedIfFreshInstall(

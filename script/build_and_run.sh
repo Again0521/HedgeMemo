@@ -39,13 +39,21 @@ cd "$ROOT_DIR"
 # may resolve those paths while validating/symbolicating each newly signed app,
 # which produces a fresh Documents-folder prompt after every rebuild.
 swift build -c release --product "$APP_NAME"
-BUILD_BINARY="$(swift build -c release --show-bin-path)/$APP_NAME"
+BUILD_DIR="$(swift build -c release --show-bin-path)"
+BUILD_BINARY="$BUILD_DIR/$APP_NAME"
+LOCALIZATION_BUNDLE="$BUILD_DIR/HedgeMemo_HedgeMemoCore.bundle"
 
 rm -rf "$APP_BUNDLE"
 mkdir -p "$APP_MACOS" "$APP_RESOURCES"
 cp -X "$BUILD_BINARY" "$APP_BINARY"
 chmod +x "$APP_BINARY"
 strip -x "$APP_BINARY"
+
+if [[ ! -d "$LOCALIZATION_BUNDLE" ]]; then
+  echo "Missing localization bundle at $LOCALIZATION_BUNDLE" >&2
+  exit 1
+fi
+/usr/bin/ditto --noextattr --noqtn "$LOCALIZATION_BUNDLE" "$APP_RESOURCES/$(basename "$LOCALIZATION_BUNDLE")"
 
 cp -X "$ROOT_DIR/Sources/HedgeMemo/Resources/Hedgehog.png" "$APP_RESOURCES/Hedgehog.png"
 cp -X "$ROOT_DIR/Sources/HedgeMemo/Resources/Hedgehog.svg" "$APP_RESOURCES/Hedgehog.svg"
@@ -76,7 +84,12 @@ cat >"$INFO_PLIST" <<PLIST
 <key>CFBundleName</key><string>$APP_NAME</string>
 <key>CFBundlePackageType</key><string>APPL</string>
 <key>CFBundleInfoDictionaryVersion</key><string>6.0</string>
-<key>CFBundleDevelopmentRegion</key><string>zh_CN</string>
+<key>CFBundleDevelopmentRegion</key><string>en</string>
+<key>CFBundleLocalizations</key>
+<array>
+<string>en</string>
+<string>zh-Hans</string>
+</array>
 <key>CFBundleIconFile</key><string>AppIcon</string>
 <key>CFBundleShortVersionString</key><string>1.1.7</string>
 <key>CFBundleVersion</key><string>1.1.7</string>

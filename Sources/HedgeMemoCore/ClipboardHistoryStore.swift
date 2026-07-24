@@ -56,7 +56,8 @@ public final class ClipboardHistoryStore: ObservableObject {
             settings = ClipboardHistorySettings()
             lastError = error.localizedDescription
         }
-        if normalizeDesktopPinnedOrders() { persist() }
+        let removedDuplicates = collapsePersistedDuplicates()
+        if removedDuplicates || normalizeDesktopPinnedOrders() { persist() }
     }
 
     public func startMonitoring() {
@@ -158,9 +159,12 @@ public final class ClipboardHistoryStore: ObservableObject {
         let cleaned = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !cleaned.isEmpty else { return false }
         let hash = Data(cleaned.utf8).clipboardContentHash
-        guard !ClipboardHistoryPolicy.shouldMergeWithLatest(latest: orderedEntries().first, contentHash: hash) else { return false }
         let entry = ClipboardEntry(kind: .text, text: text, contentHash: hash, sourceApp: sourceApp)
         guard shouldRecord(entry) else { return false }
+        if promoteExistingEntry(contentHash: hash, sourceApp: sourceApp) {
+            persist()
+            return false
+        }
         entries.append(entry)
         trimToLimit()
         persist()
@@ -195,11 +199,11 @@ public final class ClipboardHistoryStore: ObservableObject {
                 origin: origin
             )
             guard shouldRecord(candidate) else { return false }
-            let stored = try repository.saveImageData(payload.data, fileExtension: payload.fileExtension)
-            guard !ClipboardHistoryPolicy.shouldMergeWithLatest(latest: orderedEntries().first, contentHash: stored.contentHash) else {
-                try repository.removeImage(named: stored.fileName)
+            if promoteExistingEntry(contentHash: candidate.contentHash, sourceApp: sourceApp) {
+                persist()
                 return false
             }
+            let stored = try repository.saveImageData(payload.data, fileExtension: payload.fileExtension)
             entries.append(ClipboardEntry(
                 kind: .image,
                 text: note,
@@ -292,6 +296,7 @@ public final class ClipboardHistoryStore: ObservableObject {
     public func addSeedEntries(_ seedEntries: [ClipboardEntry]) {
         guard !seedEntries.isEmpty else { return }
         entries.append(contentsOf: seedEntries)
+        _ = collapsePersistedDuplicates()
         trimToLimit()
         persist()
     }
@@ -361,6 +366,7 @@ public final class ClipboardHistoryStore: ObservableObject {
         entries[index].text = text
         entries[index].contentHash = Data(text.utf8).clipboardContentHash
         entries[index].updatedAt = .now
+        _ = collapsePersistedDuplicates()
         persist()
     }
 
@@ -389,6 +395,68 @@ public final class ClipboardHistoryStore: ObservableObject {
         entries[index].lastUsedAt = .now
         entries[index].useCount = (entries[index].useCount ?? 0) + 1
         persist()
+    }
+
+    /// Re-copying content already held by HedgeMemo is a recency update, not a
+    /// new history item. Explicit pin states remain intact; ordinary items move
+    /// forward through the same creation-time ordering as a newly captured item.
+    @discardableResult
+    private func promoteExistingEntry(
+        contentHash: String,
+        sourceApp: String?,
+        now: Date = .now
+    ) -> Bool {
+        let matches = entries.filter { $0.contentHash == contentHash }
+        guard !matches.isEmpty else { return false }
+        var merged = mergedEntry(from: matches)
+        merged.createdAt = now
+        merged.updatedAt = now
+        if let sourceApp { merged.sourceApp = sourceApp }
+        replaceEntries(matching: contentHash, with: merged)
+        normalizePinOrders()
+        _ = normalizeDesktopPinnedOrders()
+        return true
+    }
+
+    /// Older snapshots can already contain non-consecutive duplicates. Collapse
+    /// them once on load (and after edit/seed paths) without changing recency.
+    @discardableResult
+    private func collapsePersistedDuplicates() -> Bool {
+        let duplicateHashes = Dictionary(grouping: entries, by: \.contentHash)
+            .filter { $0.value.count > 1 }
+        guard !duplicateHashes.isEmpty else { return false }
+        for (hash, matches) in duplicateHashes {
+            replaceEntries(matching: hash, with: mergedEntry(from: matches))
+        }
+        normalizePinOrders()
+        _ = normalizeDesktopPinnedOrders()
+        return true
+    }
+
+    private func mergedEntry(from matches: [ClipboardEntry]) -> ClipboardEntry {
+        precondition(!matches.isEmpty)
+        var merged = matches.max { $0.createdAt < $1.createdAt }!
+        let pinned = matches.filter(\.isPinned)
+        let desktopPinned = matches.filter { $0.isDesktopPinned == true }
+        merged.isPinned = !pinned.isEmpty
+        merged.pinnedOrder = pinned.compactMap(\.pinnedOrder).min()
+        merged.isDesktopPinned = !desktopPinned.isEmpty
+        merged.desktopPinnedOrder = desktopPinned.compactMap(\.desktopPinnedOrder).min()
+        merged.lastUsedAt = matches.compactMap(\.lastUsedAt).max()
+        let totalUseCount = matches.compactMap(\.useCount).reduce(0, +)
+        merged.useCount = totalUseCount == 0 ? nil : totalUseCount
+        return merged
+    }
+
+    private func replaceEntries(matching contentHash: String, with merged: ClipboardEntry) {
+        let removed = entries.filter { $0.contentHash == contentHash && $0.id != merged.id }
+        for entry in removed where entry.kind == .image {
+            guard let fileName = entry.imageFileName,
+                  fileName != merged.imageFileName else { continue }
+            try? repository.removeImage(named: fileName)
+        }
+        entries.removeAll { $0.contentHash == contentHash }
+        entries.append(merged)
     }
 
     @discardableResult

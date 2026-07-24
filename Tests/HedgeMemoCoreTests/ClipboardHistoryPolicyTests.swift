@@ -80,12 +80,6 @@ final class ClipboardHistoryPolicyTests: XCTestCase {
         XCTAssertNil(ClipboardHistoryPolicy.quickEntry(in: ordered, number: 10))
     }
 
-    func testConsecutiveDuplicatesMerge() {
-        XCTAssertTrue(ClipboardHistoryPolicy.shouldMergeWithLatest(latest: regularNewer, contentHash: "r2"))
-        XCTAssertFalse(ClipboardHistoryPolicy.shouldMergeWithLatest(latest: regularNewer, contentHash: "other"))
-        XCTAssertFalse(ClipboardHistoryPolicy.shouldMergeWithLatest(latest: nil, contentHash: "r2"))
-    }
-
     func testTrimKeepsAPracticalMinimum() {
         // Even a tiny configured maximum never trims below ten entries.
         let few = (0..<5).map { Fixture.text("t\($0)", hash: "t\($0)", at: TimeInterval($0)) }

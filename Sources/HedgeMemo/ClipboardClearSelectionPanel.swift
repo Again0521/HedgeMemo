@@ -42,7 +42,7 @@ private final class ClipboardClearSelectionSession: NSObject, NSWindowDelegate {
             defer: false
         )
         super.init()
-        panel.title = "清除剪贴板"
+        panel.title = L10n.text("清除剪贴板")
         panel.titleVisibility = .hidden
         panel.titlebarAppearsTransparent = true
         panel.titlebarSeparatorStyle = .none
@@ -110,8 +110,8 @@ private struct ClipboardClearSelectionView: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
             VStack(alignment: .leading, spacing: 4) {
-                Text("清除剪贴板").font(.headline)
-                Text("选择需要清除的分类。分类设置本身不会被删除。")
+                Text(L10n.text("清除剪贴板")).font(.headline)
+                Text(L10n.text("选择需要清除的分类。分类设置本身不会被删除。"))
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
@@ -140,13 +140,13 @@ private struct ClipboardClearSelectionView: View {
 
             Divider()
             HStack(spacing: 10) {
-                Text(selectedKeys.isEmpty ? "至少选择一个分类" : "将清除 \(removalCount) 条记录")
+                Text(selectedKeys.isEmpty ? L10n.text("至少选择一个分类") : L10n.format("清除记录数格式", removalCount))
                     .font(.caption)
                     .foregroundStyle(.secondary)
                 Spacer(minLength: 12)
-                Button("取消", action: onCancel)
+                Button(L10n.text("取消"), action: onCancel)
                     .keyboardShortcut(.cancelAction)
-                Button("清除所选分类", role: .destructive) { onConfirm(selectedKeys) }
+                Button(L10n.text("清除所选分类"), role: .destructive) { onConfirm(selectedKeys) }
                     .keyboardShortcut(.defaultAction)
                     .disabled(selectedKeys.isEmpty || removalCount == 0)
             }
@@ -169,7 +169,7 @@ private struct ClipboardClearSelectionView: View {
     private func title(for key: ClipboardCategoryKey) -> String {
         switch key {
         case .builtin(let category): category.displayName
-        case .custom(let id): store.settings.customCategory(id: id)?.name ?? "自定义分类"
+        case .custom(let id): store.settings.customCategory(id: id)?.name ?? L10n.text("自定义分类")
         }
     }
 

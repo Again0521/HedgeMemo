@@ -47,7 +47,9 @@ struct MemeTileView: View, Equatable {
     let onDragEnded: () -> Void
 
     private var hasNote: Bool {
-        !meme.note.isEmpty && meme.note != "未命名"
+        !meme.note.isEmpty
+            && meme.note != "未命名"
+            && meme.note != L10n.text("未命名", language: .english)
     }
 
     var body: some View {
@@ -77,21 +79,21 @@ struct MemeTileView: View, Equatable {
                 .onEnded { _ in onDragEnded() }
         )
         .contextMenu { contextMenu }
-        .help(isManaging ? "点击选择；拖动缩略图排序" : (hasNote ? "\(meme.note) · 拖动排序" : "点击复制；拖动排序"))
+        .help(isManaging ? L10n.text("点击选择；拖动缩略图排序") : (hasNote ? L10n.format("备注拖动排序格式", meme.note) : L10n.text("点击复制；拖动排序")))
     }
 
     @ViewBuilder
     private var contextMenu: some View {
-        Button("复制") { onCopy() }
-        Button("修改备注") { onEditNote() }
-        Menu("移动到") {
-            Button("未分类") { onMove(nil) }
+        Button(L10n.text("复制")) { onCopy() }
+        Button(L10n.text("修改备注")) { onEditNote() }
+        Menu(L10n.text("移动到")) {
+            Button(L10n.text("未分类")) { onMove(nil) }
             ForEach(categories) { category in
                 Button(category.name) { onMove(category.id) }
             }
         }
         Divider()
-        Button("删除", role: .destructive) { onDelete() }
+        Button(L10n.text("删除"), role: .destructive) { onDelete() }
     }
 }
 

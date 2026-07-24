@@ -219,19 +219,19 @@ final class AppServices: ObservableObject {
 
     private func updateHotKeyWarning(_ kind: HotKeyKind, status: OSStatus) {
         let prefix = switch kind {
-        case .clipboard: "剪贴板快捷键"
-        case .screenshot: "截图快捷键"
-        case .memePanel: "表情包面板快捷键"
+        case .clipboard: L10n.text("剪贴板快捷键")
+        case .screenshot: L10n.text("截图快捷键")
+        case .memePanel: L10n.text("表情包面板快捷键")
         }
         let message: String?
         if status == noErr {
             message = nil
         } else if status == OSStatus(eventHotKeyExistsErr) {
-            message = "\(prefix) 已被占用，请换一个。"
+            message = L10n.format("快捷键已占用格式", prefix)
         } else if status == OSStatus(eventHotKeyInvalidErr) {
-            message = "\(prefix) 无效，请重新录制。"
+            message = L10n.format("快捷键无效格式", prefix)
         } else {
-            message = "\(prefix) 注册失败，请换一个。"
+            message = L10n.format("快捷键注册失败格式", prefix)
         }
         hotKeyWarnings.removeAll { $0.hasPrefix(prefix) }
         if let message { hotKeyWarnings.append(message) }

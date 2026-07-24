@@ -10,8 +10,8 @@ public enum OfflineOCRError: LocalizedError {
 
     public var errorDescription: String? {
         switch self {
-        case .engineUnavailable: "离线 OCR 引擎未安装。"
-        case .recognitionFailed: "无法识别图片中的文字。"
+        case .engineUnavailable: L10n.text("离线 OCR 引擎未安装。")
+        case .recognitionFailed: L10n.text("无法识别图片中的文字。")
         }
     }
 }

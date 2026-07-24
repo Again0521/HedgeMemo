@@ -113,7 +113,7 @@ struct MemePanelView: View {
             .frame(height: gridHeight)
             .overlay {
                 if visibleMemes.isEmpty {
-                    ContentUnavailableView("还没有表情包", systemImage: "photo.on.rectangle.angled")
+                    ContentUnavailableView(L10n.text("还没有表情包"), systemImage: "photo.on.rectangle.angled")
                         // The import tile remains actionable even in a new,
                         // empty category; this placeholder is informational.
                         .allowsHitTesting(false)
@@ -128,10 +128,10 @@ struct MemePanelView: View {
         .sheet(item: $editingMeme) { meme in
             NoteEditorSheet(meme: meme) { store.updateNote(id: meme.id, note: $0) }
         }
-        .alert("操作失败", isPresented: $showsError) {
-            Button("好") { store.clearError() }
+        .alert(L10n.text("操作失败"), isPresented: $showsError) {
+            Button(L10n.text("好")) { store.clearError() }
         } message: {
-            Text(store.lastError ?? "未知错误")
+            Text(store.lastError ?? L10n.text("未知错误"))
         }
         .onChange(of: store.lastError) { _, error in
             showsError = error != nil
@@ -156,17 +156,17 @@ struct MemePanelView: View {
 
     private var header: some View {
         HStack(spacing: 8) {
-            PanelSearchField(placeholder: "搜索备注或文字", text: $query)
+            PanelSearchField(placeholder: L10n.text("搜索备注或文字"), text: $query)
             HoverIconButton(
                 systemImage: isManaging ? "checkmark.circle.fill" : "checklist",
                 tint: isManaging ? .accentColor : .primary,
-                help: isManaging ? "完成管理" : "批量管理",
+                help: L10n.text(isManaging ? "完成管理" : "批量管理"),
                 action: toggleManaging
             )
             HoverIconButton(
                 systemImage: store.captureEnabled ? "record.circle.fill" : "record.circle",
                 tint: store.captureEnabled ? .red : .primary,
-                help: store.captureEnabled ? "正在捕获：可收起面板后继续复制图片" : "开始捕获剪贴板图片",
+                help: L10n.text(store.captureEnabled ? "正在捕获：可收起面板后继续复制图片" : "开始捕获剪贴板图片"),
                 action: { store.captureEnabled.toggle() }
             )
         }
@@ -174,16 +174,16 @@ struct MemePanelView: View {
 
     private var managementBar: some View {
         HStack {
-            Text("已选 \(selectedIDs.count) 项")
+            Text(L10n.format("已选项目格式", selectedIDs.count))
                 .font(.caption)
                 .foregroundStyle(.secondary)
             Menu {
-                Button("未分类") { store.move(ids: selectedIDs, to: nil) }
+                Button(L10n.text("未分类")) { store.move(ids: selectedIDs, to: nil) }
                 ForEach(store.categories) { category in
                     Button(category.name) { store.move(ids: selectedIDs, to: category.id) }
                 }
             } label: {
-                Label("移动", systemImage: "folder")
+                Label(L10n.text("移动"), systemImage: "folder")
             }
             .disabled(selectedIDs.isEmpty)
             Spacer()
@@ -191,7 +191,7 @@ struct MemePanelView: View {
                 store.delete(ids: selectedIDs)
                 selectedIDs.removeAll()
             } label: {
-                Label("删除", systemImage: "trash")
+                Label(L10n.text("删除"), systemImage: "trash")
             }
             .disabled(selectedIDs.isEmpty)
         }
@@ -228,13 +228,13 @@ struct MemePanelView: View {
     }
 
     private func beginNewCategory() {
-        presentCategoryEditor(title: "新建分类", initialName: "") { name in
+        presentCategoryEditor(title: L10n.text("新建分类"), initialName: "") { name in
             store.addCategory(name: name)
         }
     }
 
     private func beginRenameCategory(_ category: MemeCategory) {
-        presentCategoryEditor(title: "重命名分类", initialName: category.name) { name in
+        presentCategoryEditor(title: L10n.text("重命名分类"), initialName: category.name) { name in
             store.renameCategory(id: category.id, name: name)
         }
     }
@@ -248,13 +248,13 @@ struct MemePanelView: View {
     private func presentCategoryEditor(title: String, initialName: String, onSave: @escaping (String) -> Void) {
         let alert = NSAlert()
         alert.messageText = title
-        alert.informativeText = "输入分类名称后按 Return 保存。"
+        alert.informativeText = L10n.text("输入分类名称后按 Return 保存。")
         alert.alertStyle = .informational
-        alert.addButton(withTitle: "保存")
-        alert.addButton(withTitle: "取消")
+        alert.addButton(withTitle: L10n.text("保存"))
+        alert.addButton(withTitle: L10n.text("取消"))
 
         let field = NSTextField(string: initialName)
-        field.placeholderString = "分类名称"
+        field.placeholderString = L10n.text("分类名称")
         field.frame = NSRect(x: 0, y: 0, width: 280, height: 24)
         alert.accessoryView = field
         // `NSAlert` otherwise initially focuses its default button. Explicitly
@@ -368,9 +368,9 @@ struct MemePanelView: View {
     /// preserves a stable grid and makes dropping at the row tail predictable.
     private func importImages() {
         let panel = NSOpenPanel()
-        panel.title = "导入表情包"
-        panel.prompt = "导入"
-        panel.message = "可选择图片文件或文件夹；文件夹中的图片会批量导入当前分类。"
+        panel.title = L10n.text("导入表情包")
+        panel.prompt = L10n.text("导入")
+        panel.message = L10n.text("可选择图片文件或文件夹；文件夹中的图片会批量导入当前分类。")
         panel.canChooseFiles = true
         panel.canChooseDirectories = true
         panel.allowsMultipleSelection = true
@@ -409,8 +409,8 @@ private struct MemeImportTile: View {
                 }
         }
         .buttonStyle(.plain)
-        .help("从文件或文件夹批量导入到当前分类")
-        .accessibilityLabel("导入表情包")
+        .help(L10n.text("从文件或文件夹批量导入到当前分类"))
+        .accessibilityLabel(L10n.text("导入表情包"))
     }
 }
 
@@ -452,7 +452,7 @@ private struct CategoryBarView: View {
     var body: some View {
         ScrollView(.horizontal, showsIndicators: false) {
             HStack(spacing: 6) {
-                CategoryChip(title: "全部", isSelected: selectedCategoryID == nil) {
+                CategoryChip(title: L10n.text("全部"), isSelected: selectedCategoryID == nil) {
                     selectedCategoryID = nil
                 }
                 ForEach(categories) { category in
@@ -460,12 +460,12 @@ private struct CategoryBarView: View {
                         selectedCategoryID = category.id
                     }
                     .contextMenu {
-                        Button("重命名") { onRename(category) }
+                        Button(L10n.text("重命名")) { onRename(category) }
                         Divider()
-                        Button("删除分类", role: .destructive) { onDelete(category.id) }
+                        Button(L10n.text("删除分类"), role: .destructive) { onDelete(category.id) }
                     }
                 }
-                HoverIconButton(systemImage: "plus", help: "新建分类", action: onAdd)
+                HoverIconButton(systemImage: "plus", help: L10n.text("新建分类"), action: onAdd)
             }
         }
     }
@@ -540,13 +540,13 @@ private struct NoteEditorSheet: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
-            Text("修改备注").font(.headline)
-            TextField("备注", text: $note, axis: .vertical)
+            Text(L10n.text("修改备注")).font(.headline)
+            TextField(L10n.text("备注"), text: $note, axis: .vertical)
                 .lineLimit(3...6)
             HStack {
                 Spacer()
-                Button("取消") { dismiss() }
-                Button("保存") {
+                Button(L10n.text("取消")) { dismiss() }
+                Button(L10n.text("保存")) {
                     onSave(note)
                     dismiss()
                 }

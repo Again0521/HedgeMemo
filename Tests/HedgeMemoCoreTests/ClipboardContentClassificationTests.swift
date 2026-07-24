@@ -164,10 +164,10 @@ final class ClipboardContentClassificationTests: XCTestCase {
     // MARK: - Preview text
 
     func testPreviewTextFallbacks() {
-        XCTAssertEqual(Fixture.text("   ").previewText, "空白文字")
+        XCTAssertEqual(Fixture.text("   ").previewText, L10n.text("空白文字"))
         XCTAssertEqual(Fixture.text("  hi  ").previewText, "hi")
         let bareImage = ClipboardEntry(kind: .image, imageFileName: "x.png", contentHash: "x")
-        XCTAssertEqual(bareImage.previewText, "图片")
+        XCTAssertEqual(bareImage.previewText, L10n.text("图片"))
     }
 
     // MARK: - Display metadata

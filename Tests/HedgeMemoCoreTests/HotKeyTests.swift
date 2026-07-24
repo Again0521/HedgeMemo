@@ -32,8 +32,8 @@ final class HotKeyTests: XCTestCase {
     }
 
     func testLabelForMissingOrUnusableHotKey() {
-        XCTAssertEqual(HotKeyPolicy.label(nil), "未设置")
-        XCTAssertEqual(HotKeyPolicy.label(HotKeyDefinition(keyCode: 9, key: "V")), "未设置")
+        XCTAssertEqual(HotKeyPolicy.label(nil), L10n.text("未设置"))
+        XCTAssertEqual(HotKeyPolicy.label(HotKeyDefinition(keyCode: 9, key: "V")), L10n.text("未设置"))
         XCTAssertEqual(HotKeyPolicy.label(.defaultClipboard), "Command + Shift + V")
     }
 }

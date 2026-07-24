@@ -13,9 +13,9 @@ final class ScreenshotService: NSObject {
 
         var errorDescription: String? {
             switch self {
-            case .screenRecordingNotAllowed: "需要允许屏幕录制权限后才能截图。"
-            case .noWindowAtPointer: "鼠标下方没有可截取的窗口。"
-            case .captureFailed: "截图失败，请重试。"
+            case .screenRecordingNotAllowed: L10n.text("需要允许屏幕录制权限后才能截图。")
+            case .noWindowAtPointer: L10n.text("鼠标下方没有可截取的窗口。")
+            case .captureFailed: L10n.text("截图失败，请重试。")
             }
         }
     }

@@ -49,7 +49,7 @@ final class SettingsWindowController: NSObject, NSWindowDelegate {
             backing: .buffered,
             defer: false
         )
-        panel.title = "设置"
+        panel.title = L10n.text("设置")
         panel.titleVisibility = .hidden
         panel.titlebarAppearsTransparent = true
         panel.titlebarSeparatorStyle = .none
@@ -97,10 +97,13 @@ struct SettingsPanelView: View {
     @AppStorage(AppPreferences.showsScrollIndicatorsKey) private var showsScrollIndicators = true
     @AppStorage(AppPreferences.interfaceOpacityKey)
     private var interfaceOpacity = AppPreferences.defaultInterfaceOpacity
+    @AppStorage(AppLanguage.preferenceKey)
+    private var languageRawValue = AppLanguage.current.rawValue
 
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 22) {
+                languageSection
                 clipboardSection
                 appearanceSection
                 codeAppearanceSection
@@ -111,7 +114,7 @@ struct SettingsPanelView: View {
                 updateSection
                 authorSection
                 if !hotKeyConflictMessages.isEmpty || !hotKeyWarnings.isEmpty {
-                    SettingsSection(title: "提醒") {
+                    SettingsSection(title: L10n.text("提醒")) {
                     ForEach(hotKeyConflictMessages, id: \.self) { message in
                         Label(message, systemImage: "exclamationmark.triangle")
                             .font(.caption)
@@ -143,23 +146,50 @@ struct SettingsPanelView: View {
         }
     }
 
+    private var languageSection: some View {
+        SettingsSection(title: L10n.text("语言")) {
+            SettingsFormRow(L10n.text("语言")) {
+                Picker(L10n.text("语言"), selection: languageBinding) {
+                    ForEach(AppLanguage.allCases) { language in
+                        Text(language.displayName).tag(language.rawValue)
+                    }
+                }
+                .labelsHidden()
+                .pickerStyle(.menu)
+                .frame(width: 190, alignment: .trailing)
+                .accessibilityLabel(L10n.text("语言"))
+            }
+        }
+    }
+
+    private var languageBinding: Binding<String> {
+        Binding(
+            get: { languageRawValue },
+            set: { rawValue in
+                guard let language = AppLanguage(rawValue: rawValue) else { return }
+                AppLanguage.select(language)
+                languageRawValue = language.rawValue
+            }
+        )
+    }
+
     private var clipboardSection: some View {
-        SettingsSection(title: "剪贴板历史") {
-            SettingsFormRow("最多保存") {
+        SettingsSection(title: L10n.text("剪贴板历史")) {
+            SettingsFormRow(L10n.text("最多保存")) {
                 VStack(alignment: .trailing, spacing: 5) {
-                    Text("\(clipboardStore.settings.maxEntries) 条")
+                    Text(L10n.format("保留条数格式", clipboardStore.settings.maxEntries))
                         .monospacedDigit()
                     Slider(value: maxEntriesStepBinding, in: 0...Double(ClipboardHistorySettings.maxEntryChoices.count - 1), step: 1)
                         .frame(width: SettingsLayout.controlColumnWidth)
-                        .accessibilityLabel("剪贴板最多保存条数")
+                        .accessibilityLabel(L10n.text("剪贴板最多保存条数"))
                 }
             }
             SettingsDivider()
-            SettingsFormRow("保存图片") { Toggle("保存图片", isOn: savesImagesBinding).labelsHidden() }
+            SettingsFormRow(L10n.text("保存图片")) { Toggle(L10n.text("保存图片"), isOn: savesImagesBinding).labelsHidden() }
             SettingsDivider()
-            SettingsFormRow("复制后自动粘贴") { Toggle("复制后自动粘贴", isOn: autoPasteBinding).labelsHidden() }
+            SettingsFormRow(L10n.text("复制后自动粘贴")) { Toggle(L10n.text("复制后自动粘贴"), isOn: autoPasteBinding).labelsHidden() }
             SettingsDivider()
-            SettingsFormRow("剪贴板快捷键") { HotKeyRecorderControl(hotKey: clipboardHotKeyBinding).frame(width: 180, height: 28) }
+            SettingsFormRow(L10n.text("剪贴板快捷键")) { HotKeyRecorderControl(hotKey: clipboardHotKeyBinding).frame(width: 180, height: 28) }
             if clipboardStore.settings.autoPaste {
                 SettingsDivider()
                 SettingsRow { PermissionStatusRow(
@@ -173,7 +203,7 @@ struct SettingsPanelView: View {
                 Button(role: .destructive) {
                     ClipboardClearSelectionPanel.run(store: clipboardStore)
                 } label: {
-                    Label("清除剪贴板历史…", systemImage: "trash")
+                    Label(L10n.text("清除剪贴板历史…"), systemImage: "trash")
                 }
             }
         }
@@ -181,15 +211,15 @@ struct SettingsPanelView: View {
 
     private var appearanceSection: some View {
         SettingsSection(
-            title: "外观",
-            footer: "0% 保留清晰的系统玻璃效果，100% 完全关闭透明效果；菜单栏弹窗不受影响。"
+            title: L10n.text("外观"),
+            footer: L10n.text("0% 保留清晰的系统玻璃效果，100% 完全关闭透明效果；菜单栏弹窗不受影响。")
         ) {
-            SettingsFormRow("软件不透明度") {
+            SettingsFormRow(L10n.text("软件不透明度")) {
                 VStack(alignment: .trailing, spacing: 5) {
                     HStack(spacing: 10) {
                         Text("\(interfaceOpacityPercent)%")
                             .monospacedDigit()
-                        Button("恢复默认") {
+                        Button(L10n.text("恢复默认")) {
                             interfaceOpacity = AppPreferences.defaultInterfaceOpacity
                         }
                         .disabled(
@@ -202,16 +232,16 @@ struct SettingsPanelView: View {
                         in: 0...100,
                         step: 1
                     )
-                    .accessibilityLabel("软件不透明度")
+                    .accessibilityLabel(L10n.text("软件不透明度"))
                     .accessibilityValue("\(interfaceOpacityPercent)%")
-                    .accessibilityHint("调节菜单栏弹窗以外面板的不透明度")
+                    .accessibilityHint(L10n.text("调节菜单栏弹窗以外面板的不透明度"))
                 }
             }
             SettingsDivider()
-            SettingsFormRow("显示滚动条") {
-                Toggle("显示滚动条", isOn: $showsScrollIndicators)
+            SettingsFormRow(L10n.text("显示滚动条")) {
+                Toggle(L10n.text("显示滚动条"), isOn: $showsScrollIndicators)
                     .labelsHidden()
-                    .accessibilityHint("控制 HedgeMemo 所有可滚动内容的滚动条显示")
+                    .accessibilityHint(L10n.text("控制 HedgeMemo 所有可滚动内容的滚动条显示"))
             }
         }
     }
@@ -232,7 +262,7 @@ struct SettingsPanelView: View {
     }
 
     private var categorySection: some View {
-        SettingsSection(title: "剪贴板分类", footer: "自定义分类按正则表达式筛选文本条目。") {
+        SettingsSection(title: L10n.text("剪贴板分类"), footer: L10n.text("自定义分类按正则表达式筛选文本条目。")) {
             let keys = clipboardStore.settings.orderedCategoryKeys
             ForEach(Array(keys.enumerated()), id: \.element.storageValue) { index, key in
                 SettingsRow { categoryRow(key: key, index: index, total: keys.count) }
@@ -243,7 +273,7 @@ struct SettingsPanelView: View {
                 Button {
                     customDraft = CustomCategoryDraft()
                 } label: {
-                    Label("添加自定义分类…", systemImage: "plus")
+                    Label(L10n.text("添加自定义分类…"), systemImage: "plus")
                 }
             }
         }
@@ -254,20 +284,20 @@ struct SettingsPanelView: View {
     /// navigation and an immediate, predictable preview effect.
     private var codeAppearanceSection: some View {
         SettingsSection(
-            title: "代码显示",
-            footer: "配色会立即应用到剪贴板列表、预览和固定到桌面的代码便签。"
+            title: L10n.text("代码显示"),
+            footer: L10n.text("配色会立即应用到剪贴板列表、预览和固定到桌面的代码便签。")
         ) {
-            SettingsFormRow("语法高亮配色") {
-                Picker("语法高亮配色", selection: codeHighlightThemeBinding) {
+            SettingsFormRow(L10n.text("语法高亮配色")) {
+                Picker(L10n.text("语法高亮配色"), selection: codeHighlightThemeBinding) {
                     ForEach(CodeHighlightTheme.allCases, id: \.self) { theme in
-                        Text(theme.displayName).tag(theme)
+                        Text(L10n.text(theme.displayName)).tag(theme)
                     }
                 }
                 .labelsHidden()
                 .pickerStyle(.menu)
                 .frame(width: 190, alignment: .trailing)
-                .accessibilityLabel("语法高亮配色")
-                .accessibilityHint(clipboardStore.settings.resolvedCodeHighlightTheme.accessibilityDescription)
+                .accessibilityLabel(L10n.text("语法高亮配色"))
+                .accessibilityHint(L10n.text(clipboardStore.settings.resolvedCodeHighlightTheme.accessibilityDescription))
             }
         }
     }
@@ -277,10 +307,10 @@ struct SettingsPanelView: View {
         HStack(spacing: 8) {
             switch key {
             case .builtin(let category):
-                Label(category.displayName, systemImage: category.systemImage)
+                Label(L10n.text(category.displayName), systemImage: category.systemImage)
             case .custom(let id):
                 let custom = clipboardStore.settings.customCategory(id: id)
-                Label(custom?.name ?? "自定义", systemImage: "tag")
+                Label(custom?.name ?? L10n.text("自定义"), systemImage: "tag")
                 if let pattern = custom?.pattern {
                     Text(pattern)
                         .font(.system(size: 10, design: .monospaced))
@@ -289,30 +319,30 @@ struct SettingsPanelView: View {
                 }
             }
             Spacer(minLength: 12)
-            Toggle("启用", isOn: Binding(
+            Toggle(L10n.text("启用"), isOn: Binding(
                 get: { clipboardStore.settings.isCategoryEnabled(key) },
                 set: { clipboardStore.setCategory(key, enabled: $0) }
             ))
             .toggleStyle(.switch)
             .controlSize(.small)
             .labelsHidden()
-            .help("关闭会清除该分类现有记录，并停止展示及记录此分类")
+            .help(L10n.text("关闭会清除该分类现有记录，并停止展示及记录此分类"))
             if case .custom(let id) = key {
-                HoverIconButton(systemImage: "pencil", help: "编辑") {
+                HoverIconButton(systemImage: "pencil", help: L10n.text("编辑")) {
                     if let custom = clipboardStore.settings.customCategory(id: id) {
                         customDraft = CustomCategoryDraft(category: custom)
                     }
                 }
-                HoverIconButton(systemImage: "trash", tint: .red, help: "删除") {
+                HoverIconButton(systemImage: "trash", tint: .red, help: L10n.text("删除")) {
                     deleteCustomCategory(id: id)
                 }
             }
-            HoverIconButton(systemImage: "chevron.up", help: "上移") {
+            HoverIconButton(systemImage: "chevron.up", help: L10n.text("上移")) {
                 moveCategory(key, delta: -1)
             }
             .disabled(index == 0)
             .opacity(index == 0 ? 0.3 : 1)
-            HoverIconButton(systemImage: "chevron.down", help: "下移") {
+            HoverIconButton(systemImage: "chevron.down", help: L10n.text("下移")) {
                 moveCategory(key, delta: 1)
             }
             .disabled(index == total - 1)
@@ -347,27 +377,27 @@ struct SettingsPanelView: View {
     }
 
     private var screenshotSection: some View {
-        SettingsSection(title: "截图") {
-            SettingsFormRow("默认模式") { Picker("默认模式", selection: screenshotModeBinding) {
+        SettingsSection(title: L10n.text("截图")) {
+            SettingsFormRow(L10n.text("默认模式")) { Picker(L10n.text("默认模式"), selection: screenshotModeBinding) {
                 ForEach(ScreenshotMode.allCases, id: \.self) { mode in
-                    Text(mode.displayName).tag(mode)
+                    Text(L10n.text(mode.displayName)).tag(mode)
                 }
             }
             .labelsHidden()
             .pickerStyle(.menu)
             .frame(width: 190, alignment: .trailing) }
             SettingsDivider()
-            SettingsFormRow("截图快捷键") { HotKeyRecorderControl(hotKey: screenshotHotKeyBinding).frame(width: 180, height: 28) }
+            SettingsFormRow(L10n.text("截图快捷键")) { HotKeyRecorderControl(hotKey: screenshotHotKeyBinding).frame(width: 180, height: 28) }
             SettingsDivider()
-            SettingsFormRow("记住上次模式") { Toggle("记住上次模式", isOn: remembersScreenshotModeBinding).labelsHidden() }
+            SettingsFormRow(L10n.text("记住上次模式")) { Toggle(L10n.text("记住上次模式"), isOn: remembersScreenshotModeBinding).labelsHidden() }
             SettingsDivider()
-            SettingsFormRow("截图后打开编辑") { Toggle("截图后打开编辑", isOn: opensEditorAfterCaptureBinding).labelsHidden() }
+            SettingsFormRow(L10n.text("截图后打开编辑")) { Toggle(L10n.text("截图后打开编辑"), isOn: opensEditorAfterCaptureBinding).labelsHidden() }
         }
     }
 
     private var memePanelSection: some View {
-        SettingsSection(title: "表情包面板", footer: "按下快捷键后，面板会出现在鼠标附近；复制表情包或点击面板外会自动收起。") {
-            SettingsFormRow("唤醒快捷键") {
+        SettingsSection(title: L10n.text("表情包面板"), footer: L10n.text("按下快捷键后，面板会出现在鼠标附近；复制表情包或点击面板外会自动收起。")) {
+            SettingsFormRow(L10n.text("唤醒快捷键")) {
                 HotKeyRecorderControl(hotKey: memePanelHotKeyBinding)
                     .frame(width: 180, height: 28)
             }
@@ -375,9 +405,9 @@ struct SettingsPanelView: View {
     }
 
     private var startupSection: some View {
-        SettingsSection(title: "启动") {
-            SettingsFormRow("登录时自动启动") {
-                Toggle("登录时自动启动 HedgeMemo", isOn: Binding(
+        SettingsSection(title: L10n.text("启动")) {
+            SettingsFormRow(L10n.text("登录时自动启动")) {
+                Toggle(L10n.text("登录时自动启动 HedgeMemo"), isOn: Binding(
                     get: { launchAtLogin.isEnabled },
                     set: { launchAtLogin.setEnabled($0) }
                 )).labelsHidden()
@@ -394,37 +424,37 @@ struct SettingsPanelView: View {
     }
 
     private var authorSection: some View {
-        SettingsSection(title: "关于作者") {
-            SettingsFormRow("版本") {
+        SettingsSection(title: L10n.text("关于作者")) {
+            SettingsFormRow(L10n.text("版本")) {
                 Text(AppVersion.display)
                     .monospacedDigit()
                     .foregroundStyle(.secondary)
             }
             SettingsDivider()
-            SettingsFormRow("作者") { Text("ZonnL") }
+            SettingsFormRow(L10n.text("作者")) { Text("ZonnL") }
             SettingsDivider()
-            SettingsFormRow("邮箱") { Link("zonn.l@foxmail.com", destination: URL(string: "mailto:zonn.l@foxmail.com")!) }
+            SettingsFormRow(L10n.text("邮箱")) { Link("zonn.l@foxmail.com", destination: URL(string: "mailto:zonn.l@foxmail.com")!) }
             SettingsDivider()
             SettingsFormRow("GitHub") { Link("Again0521/hedgememo", destination: URL(string: "https://github.com/Again0521/hedgememo")!) }
         }
     }
 
     private var updateSection: some View {
-        SettingsSection(title: "软件更新") {
-            SettingsFormRow("当前版本") {
+        SettingsSection(title: L10n.text("软件更新")) {
+            SettingsFormRow(L10n.text("当前版本")) {
                 Text(AppVersion.display)
                     .monospacedDigit()
                     .foregroundStyle(.secondary)
             }
             SettingsDivider()
             if let release = updateCheckStore.availableRelease {
-                SettingsFormRow("发现新版本") {
+                SettingsFormRow(L10n.text("发现新版本")) {
                     Link(destination: release.pageURL) {
                         Text("v\(release.version.displayString)")
                             .monospacedDigit()
                     }
-                    .help("打开 \(release.title) 下载页面")
-                    .accessibilityHint("在浏览器中打开新版本下载页面")
+                    .help(L10n.format("打开版本下载页面格式", release.title))
+                    .accessibilityHint(L10n.text("在浏览器中打开新版本下载页面"))
                 }
                 SettingsDivider()
             }
@@ -445,7 +475,7 @@ struct SettingsPanelView: View {
                                 .controlSize(.small)
                                 .frame(minWidth: 72)
                         } else {
-                            Label("检查更新", systemImage: "arrow.clockwise")
+                            Label(L10n.text("检查更新"), systemImage: "arrow.clockwise")
                         }
                     }
                     .disabled(updateCheckStore.isChecking)
@@ -456,16 +486,16 @@ struct SettingsPanelView: View {
     }
 
     private var updateStatusText: String {
-        if updateCheckStore.isChecking { return "正在检查更新…" }
+        if updateCheckStore.isChecking { return L10n.text("正在检查更新…") }
         switch updateCheckStore.result {
         case .idle:
-            return "每日首次启动时自动检查一次"
+            return L10n.text("每日首次启动时自动检查一次")
         case .upToDate:
-            return "当前已是最新版本。"
+            return L10n.text("当前已是最新版本。")
         case .updateAvailable:
-            return "发现新版本，点击版本号前往下载。"
+            return L10n.text("发现新版本，点击版本号前往下载。")
         case .failed:
-            return "暂时无法检查更新，请稍后重试。"
+            return L10n.text("暂时无法检查更新，请稍后重试。")
         }
     }
 
@@ -558,15 +588,15 @@ struct SettingsPanelView: View {
 
     private var hotKeyConflictMessages: [String] {
         let hotKeys = [
-            ("剪贴板", clipboardStore.settings.hotKey ?? .defaultClipboard),
-            ("截图", screenshotSettingsStore.settings.hotKey ?? .defaultScreenshot),
-            ("表情包面板", memePanelSettingsStore.settings.hotKey),
+            (L10n.text("剪贴板"), clipboardStore.settings.hotKey ?? .defaultClipboard),
+            (L10n.text("截图"), screenshotSettingsStore.settings.hotKey ?? .defaultScreenshot),
+            (L10n.text("表情包面板"), memePanelSettingsStore.settings.hotKey),
         ]
         var messages = [String]()
         for index in hotKeys.indices {
             for other in hotKeys.dropFirst(index + 1) {
                 if HotKeyPolicy.conflicts(hotKeys[index].1, other.1) {
-                    messages.append("\(hotKeys[index].0)和\(other.0)快捷键不能相同")
+                    messages.append(L10n.format("快捷键冲突格式", hotKeys[index].0, other.0))
                 }
             }
         }
@@ -707,20 +737,20 @@ private struct CustomCategoryEditorSheet: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
-            Text(draft.isNew ? "新建自定义分类" : "编辑自定义分类")
+            Text(L10n.text(draft.isNew ? "新建自定义分类" : "编辑自定义分类"))
                 .font(.headline)
-            TextField("分类名称", text: $draft.name)
-            TextField("正则表达式，例如 ^\\d{6}$", text: $draft.pattern)
+            TextField(L10n.text("分类名称"), text: $draft.name)
+            TextField(L10n.text("正则表达式，例如 ^\\d{6}$"), text: $draft.pattern)
                 .font(.system(size: 12, design: .monospaced))
             if !draft.pattern.isEmpty && !isPatternValid {
-                Label("正则表达式无效", systemImage: "exclamationmark.triangle")
+                Label(L10n.text("正则表达式无效"), systemImage: "exclamationmark.triangle")
                     .font(.caption)
                     .foregroundStyle(.orange)
             }
             HStack {
                 Spacer()
-                Button("取消") { dismiss() }
-                Button("保存") {
+                Button(L10n.text("取消")) { dismiss() }
+                Button(L10n.text("保存")) {
                     onSave(category)
                     dismiss()
                 }
@@ -740,15 +770,15 @@ private struct PermissionStatusRow: View {
 
     var body: some View {
         HStack(spacing: 8) {
-            Label(isTrusted ? "已允许自动粘贴" : "需要允许辅助功能权限", systemImage: isTrusted ? "checkmark.circle" : "lock")
+            Label(L10n.text(isTrusted ? "已允许自动粘贴" : "需要允许辅助功能权限"), systemImage: isTrusted ? "checkmark.circle" : "lock")
                 .font(.caption)
                 .foregroundStyle(isTrusted ? Color.secondary : Color.orange)
             Spacer()
             if isTrusted {
-                Button("刷新", action: onRefresh)
+                Button(L10n.text("刷新"), action: onRefresh)
                     .font(.caption)
             } else {
-                Button("去允许", action: onRequest)
+                Button(L10n.text("去允许"), action: onRequest)
                     .font(.caption)
             }
         }
@@ -793,7 +823,7 @@ private struct HotKeyRecorderButton: NSViewRepresentable {
     }
 
     func updateNSView(_ button: HotKeyRecorderNSButton, context: Context) {
-        button.title = isRecording ? "按下快捷键..." : HotKeyPolicy.label(hotKey)
+        button.title = isRecording ? L10n.text("按下快捷键...") : HotKeyPolicy.label(hotKey)
         button.isRecording = isRecording
         button.onRecordingChange = { isRecording = $0 }
         button.onHotKey = { hotKey = $0 }

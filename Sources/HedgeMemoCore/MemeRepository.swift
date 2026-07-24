@@ -8,8 +8,8 @@ public enum MemeRepositoryError: LocalizedError {
 
     public var errorDescription: String? {
         switch self {
-        case .cannotEncodeImage: "无法将图片编码为 PNG。"
-        case .invalidArchive: "压缩包内容不完整或格式不正确。"
+        case .cannotEncodeImage: L10n.text("无法将图片编码为 PNG。")
+        case .invalidArchive: L10n.text("压缩包内容不完整或格式不正确。")
         }
     }
 }
