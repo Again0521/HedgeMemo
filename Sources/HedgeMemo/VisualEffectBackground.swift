@@ -9,7 +9,6 @@ import SwiftUI
 enum NativePanelMetrics {
     static let cornerRadius: CGFloat = 12
     static let compactCornerRadius: CGFloat = 8
-    static let rowHeight: CGFloat = 32
     static let controlHeight: CGFloat = 28
     static let horizontalPadding: CGFloat = 12
 }
@@ -49,23 +48,6 @@ struct AnimatedImageFileView: NSViewRepresentable {
         }
 
         override func hitTest(_ point: NSPoint) -> NSView? { nil }
-    }
-}
-
-extension NSImage {
-    /// Stretchable rounded-corner mask. Behind-window blur is shaped by the
-    /// window server, so rounding must go through `NSVisualEffectView.maskImage`;
-    /// a CALayer cornerRadius clips the tint but leaves the backdrop square.
-    static func cornerMask(radius: CGFloat) -> NSImage {
-        let edge = radius * 2 + 1
-        let image = NSImage(size: NSSize(width: edge, height: edge), flipped: false) { rect in
-            NSColor.black.setFill()
-            NSBezierPath(roundedRect: rect, xRadius: radius, yRadius: radius).fill()
-            return true
-        }
-        image.capInsets = NSEdgeInsets(top: radius, left: radius, bottom: radius, right: radius)
-        image.resizingMode = .stretch
-        return image
     }
 }
 

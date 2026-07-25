@@ -3,7 +3,7 @@ import Foundation
 import HedgeMemoCore
 
 enum AppVersion {
-    static let display = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "1.1.7"
+    static let display = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "1.2.0"
 }
 
 struct AvailableAppRelease: Equatable, Sendable {
@@ -27,6 +27,14 @@ final class UpdateCheckStore: ObservableObject {
     @Published private(set) var result: UpdateCheckResult = .idle
     @Published private(set) var isChecking = false
     @Published private(set) var showsUpdateBadge = false
+
+    /// Whether a newer release exists at all. Deliberately *not*
+    /// `showsUpdateBadge`: that one is the menu-bar attention badge and is
+    /// cleared as soon as Settings is opened, so a red dot bound to it would
+    /// disappear the moment the user went looking for the update. This stays
+    /// true until the user is actually running the newer version, which is what
+    /// the "设置…" menu item and the 通用 tab dot should point at.
+    var hasAvailableUpdate: Bool { availableRelease != nil }
 
     /// GitHub's web latest-release redirect is intentionally used instead of
     /// the anonymous REST endpoint. The latter shares a 60-request/hour quota

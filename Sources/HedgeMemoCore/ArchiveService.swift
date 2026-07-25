@@ -92,6 +92,7 @@ public enum MemeArchiveService {
         try fm.createDirectory(at: extraction, withIntermediateDirectories: true)
         do {
             try run("/usr/bin/unzip", ["-qq", archiveURL.path, "-d", extraction.path])
+            try enforceExtractedSizeLimit(at: extraction)
             let manifestURL = extraction.appendingPathComponent("manifest.json")
             let data = try Data(contentsOf: manifestURL)
             let decoder = JSONDecoder()
@@ -105,6 +106,41 @@ public enum MemeArchiveService {
     }
 
     public static func removeExtraction(_ directory: URL) { try? FileManager.default.removeItem(at: directory) }
+
+    /// Total bytes an imported archive may expand to. Meme/clipboard archives
+    /// are images and a manifest — comfortably under this — so a payload past it
+    /// is treated as a decompression bomb rather than extracted into temp space.
+    private static let maxExtractedByteCount: Int64 = 2_000_000_000  // 2 GB
+
+    private static func enforceExtractedSizeLimit(at directory: URL) throws {
+        let fm = FileManager.default
+        guard let enumerator = fm.enumerator(
+            at: directory,
+            includingPropertiesForKeys: [.fileSizeKey, .isRegularFileKey]
+        ) else { return }
+        var total: Int64 = 0
+        for case let url as URL in enumerator {
+            let values = try? url.resourceValues(forKeys: [.fileSizeKey, .isRegularFileKey])
+            guard values?.isRegularFile == true, let size = values?.fileSize else { continue }
+            total += Int64(size)
+            if total > maxExtractedByteCount { throw MemeRepositoryError.invalidArchive }
+        }
+    }
+
+    /// Resolves a file named in a manifest against the extracted images
+    /// directory, rejecting anything that could escape it. A crafted archive
+    /// otherwise names `../../…` in its manifest to read files outside the
+    /// sandboxed extraction directory during import.
+    public static func safeContainedURL(base: URL, fileName: String) -> URL? {
+        guard !fileName.isEmpty,
+              !fileName.hasPrefix("."),
+              !fileName.contains("/"),
+              !fileName.contains("\\") else { return nil }
+        let url = base.appendingPathComponent(fileName).standardizedFileURL
+        let root = base.standardizedFileURL.path
+        guard url.path == root + "/" + fileName || url.path.hasPrefix(root + "/") else { return nil }
+        return url
+    }
 
     private static func run(_ executable: String, _ arguments: [String], currentDirectory: URL? = nil) throws {
         let process = Process()

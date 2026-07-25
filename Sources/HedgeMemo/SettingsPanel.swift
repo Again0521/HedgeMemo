@@ -3,10 +3,46 @@ import HedgeMemoCore
 import SwiftUI
 
 private enum SettingsLayout {
-    static let panelWidth: CGFloat = 504
+    static let panelWidth: CGFloat = 720
+    static let panelHeight: CGFloat = 620
+    static let sidebarWidth: CGFloat = 184
     static let horizontalInset: CGFloat = 24
     static let labelColumnWidth: CGFloat = 142
     static let controlColumnWidth: CGFloat = 232
+    /// Clears the transparent title bar so the floating sidebar and the content
+    /// header both begin below the traffic lights.
+    static let titleBarInset: CGFloat = 36
+    static let sidebarCornerRadius: CGFloat = 12
+}
+
+/// Top-level settings destinations. Each of the app's three features owns its
+/// own pane, with shared preferences collected under "通用", so a setting is
+/// found where its feature lives instead of in one long scroll.
+enum SettingsTab: String, CaseIterable, Identifiable {
+    case clipboard
+    case screenshot
+    case memePanel
+    case general
+
+    var id: String { rawValue }
+
+    var title: String {
+        switch self {
+        case .clipboard: L10n.text("剪贴板")
+        case .screenshot: L10n.text("截图")
+        case .memePanel: L10n.text("表情包")
+        case .general: L10n.text("通用")
+        }
+    }
+
+    var systemImage: String {
+        switch self {
+        case .clipboard: "doc.on.clipboard"
+        case .screenshot: "crop"
+        case .memePanel: "face.smiling"
+        case .general: "gearshape"
+        }
+    }
 }
 
 /// Hosts the settings UI in a standalone translucent panel, opened from the status bar menu.
@@ -44,7 +80,12 @@ final class SettingsWindowController: NSObject, NSWindowDelegate {
         // A plain titled window keeps the system's rounded corners, shadow and
         // a real title bar; translucency comes from the vibrancy background inside.
         let panel = NSPanel(
-            contentRect: NSRect(x: 0, y: 0, width: SettingsLayout.panelWidth, height: 740),
+            contentRect: NSRect(
+                x: 0,
+                y: 0,
+                width: SettingsLayout.panelWidth,
+                height: SettingsLayout.panelHeight
+            ),
             styleMask: [.titled, .closable, .fullSizeContentView],
             backing: .buffered,
             defer: false
@@ -93,6 +134,7 @@ struct SettingsPanelView: View {
     let hotKeyWarnings: [String]
     @State private var accessibilityTrusted = AXIsProcessTrusted()
     @State private var customDraft: CustomCategoryDraft?
+    @State private var selectedTab: SettingsTab = .clipboard
     @StateObject private var launchAtLogin = LaunchAtLoginController()
     @AppStorage(AppPreferences.showsScrollIndicatorsKey) private var showsScrollIndicators = true
     @AppStorage(AppPreferences.interfaceOpacityKey)
@@ -101,48 +143,127 @@ struct SettingsPanelView: View {
     private var languageRawValue = AppLanguage.current.rawValue
 
     var body: some View {
-        ScrollView {
-            VStack(alignment: .leading, spacing: 22) {
-                languageSection
-                clipboardSection
-                appearanceSection
-                codeAppearanceSection
-                categorySection
-                screenshotSection
-                memePanelSection
-                startupSection
-                updateSection
-                authorSection
-                if !hotKeyConflictMessages.isEmpty || !hotKeyWarnings.isEmpty {
-                    SettingsSection(title: L10n.text("提醒")) {
-                    ForEach(hotKeyConflictMessages, id: \.self) { message in
-                        Label(message, systemImage: "exclamationmark.triangle")
-                            .font(.caption)
-                            .foregroundStyle(.orange)
-                    }
-                    ForEach(hotKeyWarnings, id: \.self) { warning in
-                        Label(warning, systemImage: "exclamationmark.triangle")
-                            .font(.caption)
-                            .foregroundStyle(.orange)
-                    }
-                }
-                }
-            }
-            .padding(.horizontal, SettingsLayout.horizontalInset)
-            .padding(.bottom, 24)
+        HStack(spacing: 0) {
+            sidebar
+            detail
         }
-        .scrollIndicators(.hidden)
         // Keep settings at macOS's compact inspector density while retaining
         // standard controls and their native focus/selection behavior.
         .controlSize(.small)
-        .padding(.top, 32)
-        .frame(width: SettingsLayout.panelWidth, height: 740)
+        .frame(width: SettingsLayout.panelWidth, height: SettingsLayout.panelHeight)
         .onAppear {
             refreshAccessibilityTrust()
             launchAtLogin.refresh()
         }
         .sheet(item: $customDraft) { draft in
             CustomCategoryEditorSheet(draft: draft) { saveCustomCategory($0) }
+        }
+    }
+
+    /// The feature switcher is its own surface floating over the window's
+    /// material — deliberately the *same* native glass sample (SystemGlassCard),
+    /// not a tinted or opaque sidebar, so the panel still reads as one material
+    /// with a raised layer rather than two different products.
+    private var sidebar: some View {
+        // The card hugs its rows instead of stretching: a switcher with four
+        // destinations should not paint an empty column down to the window
+        // bottom. `frame(maxHeight:alignment:)` on the *outer* column is what
+        // keeps the hugged card pinned under the title bar.
+        SystemGlassCard(cornerRadius: SettingsLayout.sidebarCornerRadius) {
+            VStack(alignment: .leading, spacing: 2) {
+                ForEach(SettingsTab.allCases) { tab in
+                    SettingsTabRow(
+                        tab: tab,
+                        isSelected: selectedTab == tab,
+                        // 软件更新 lives under 通用, so that is where the dot
+                        // points the user when a newer version exists.
+                        showsUpdateDot: tab == .general && updateCheckStore.hasAvailableUpdate
+                    ) {
+                        selectedTab = tab
+                    }
+                }
+            }
+            .padding(8)
+            .frame(width: SettingsLayout.sidebarWidth, alignment: .leading)
+        }
+        .overlay(
+            RoundedRectangle(cornerRadius: SettingsLayout.sidebarCornerRadius, style: .continuous)
+                .strokeBorder(.separator.opacity(0.55), lineWidth: 1)
+        )
+        .padding(.leading, 12)
+        .padding(.trailing, 8)
+        .padding(.top, SettingsLayout.titleBarInset)
+        .frame(maxHeight: .infinity, alignment: .top)
+    }
+
+    private var detail: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            Text(selectedTab.title)
+                .font(.system(size: 20, weight: .bold))
+                .padding(.horizontal, SettingsLayout.horizontalInset)
+                .padding(.bottom, 14)
+            ScrollView {
+                VStack(alignment: .leading, spacing: 22) {
+                    switch selectedTab {
+                    case .clipboard: clipboardTab
+                    case .screenshot: screenshotTab
+                    case .memePanel: memePanelTab
+                    case .general: generalTab
+                    }
+                }
+                .padding(.horizontal, SettingsLayout.horizontalInset)
+                .padding(.bottom, 24)
+            }
+            .scrollIndicators(showsScrollIndicators ? .automatic : .hidden)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(.top, SettingsLayout.titleBarInset)
+    }
+
+    @ViewBuilder
+    private var clipboardTab: some View {
+        clipboardSection
+        codeAppearanceSection
+        categorySection
+    }
+
+    @ViewBuilder
+    private var screenshotTab: some View {
+        screenshotSection
+    }
+
+    @ViewBuilder
+    private var memePanelTab: some View {
+        memePanelSection
+    }
+
+    @ViewBuilder
+    private var generalTab: some View {
+        languageSection
+        appearanceSection
+        startupSection
+        updateSection
+        authorSection
+        remindersSection
+    }
+
+    /// Shortcut conflicts span several features, so they stay in one shared
+    /// place rather than being repeated in each feature's pane.
+    @ViewBuilder
+    private var remindersSection: some View {
+        if !hotKeyConflictMessages.isEmpty || !hotKeyWarnings.isEmpty {
+            SettingsSection(title: L10n.text("提醒")) {
+                ForEach(hotKeyConflictMessages, id: \.self) { message in
+                    Label(message, systemImage: "exclamationmark.triangle")
+                        .font(.caption)
+                        .foregroundStyle(.orange)
+                }
+                ForEach(hotKeyWarnings, id: \.self) { warning in
+                    Label(warning, systemImage: "exclamationmark.triangle")
+                        .font(.caption)
+                        .foregroundStyle(.orange)
+                }
+            }
         }
     }
 
@@ -499,13 +620,6 @@ struct SettingsPanelView: View {
         }
     }
 
-    private var maxEntriesBinding: Binding<Int> {
-        Binding(
-            get: { clipboardStore.settings.maxEntries },
-            set: { clipboardStore.settings.maxEntries = $0 }
-        )
-    }
-
     /// Slider positions are deliberately discrete: the product limit is a
     /// documented total cap rather than an arbitrary number field.
     private var maxEntriesStepBinding: Binding<Double> {
@@ -610,6 +724,58 @@ struct SettingsPanelView: View {
     private func requestAccessibilityTrust() {
         let options = ["AXTrustedCheckOptionPrompt": true] as CFDictionary
         accessibilityTrusted = AXIsProcessTrustedWithOptions(options)
+    }
+}
+
+/// One destination in the floating sidebar. Selection uses the system accent
+/// color and hover uses a semantic material state, matching `CategoryChip` in
+/// the other panels — no custom fills that would fight the glass surface.
+private struct SettingsTabRow: View {
+    let tab: SettingsTab
+    let isSelected: Bool
+    var showsUpdateDot = false
+    let action: () -> Void
+    @State private var isHovering = false
+
+    var body: some View {
+        Button(action: action) {
+            HStack(spacing: 9) {
+                Image(systemName: tab.systemImage)
+                    .font(.system(size: 13, weight: .medium))
+                    .frame(width: 18)
+                Text(tab.title)
+                    .font(.system(size: 13, weight: isSelected ? .semibold : .regular))
+                    .lineLimit(1)
+                Spacer(minLength: 4)
+                if showsUpdateDot {
+                    Circle()
+                        .fill(Color.red)
+                        // On the accent-filled selected row a plain red dot
+                        // muddies into the fill, so give it a matching rim.
+                        .overlay(Circle().strokeBorder(isSelected ? Color.white.opacity(0.9) : .clear, lineWidth: 1))
+                        .frame(width: 7, height: 7)
+                        .accessibilityLabel(L10n.text("有新版本"))
+                }
+            }
+            .foregroundStyle(isSelected ? Color.white : Color.primary)
+            .padding(.horizontal, 10)
+            .frame(height: 32)
+            .background(
+                RoundedRectangle(cornerRadius: 8, style: .continuous)
+                    .fill(backgroundStyle)
+            )
+            .contentShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+        }
+        .buttonStyle(.plain)
+        .onHover { isHovering = $0 }
+        .accessibilityLabel(tab.title)
+        .accessibilityAddTraits(isSelected ? [.isSelected] : [])
+    }
+
+    private var backgroundStyle: AnyShapeStyle {
+        if isSelected { return AnyShapeStyle(Color.accentColor) }
+        if isHovering { return AnyShapeStyle(.quaternary) }
+        return AnyShapeStyle(Color.clear)
     }
 }
 
@@ -781,21 +947,6 @@ private struct PermissionStatusRow: View {
                 Button(L10n.text("去允许"), action: onRequest)
                     .font(.caption)
             }
-        }
-    }
-}
-
-private struct HotKeyRecorderRow: View {
-    let title: String
-    @Binding var hotKey: HotKeyDefinition
-    @State private var isRecording = false
-
-    var body: some View {
-        HStack(spacing: 8) {
-            Text(title)
-            Spacer()
-            HotKeyRecorderButton(hotKey: $hotKey, isRecording: $isRecording)
-                .frame(width: 160, height: 28)
         }
     }
 }

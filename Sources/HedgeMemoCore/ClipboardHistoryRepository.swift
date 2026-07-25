@@ -50,12 +50,6 @@ public final class ClipboardHistoryRepository: @unchecked Sendable {
     }
 
     @discardableResult
-    public func saveImage(_ image: NSImage, named id: UUID = UUID()) throws -> StoredImage {
-        guard let data = image.pngData else { throw MemeRepositoryError.cannotEncodeImage }
-        return try saveImageData(data, named: id)
-    }
-
-    @discardableResult
     public func saveImageData(
         _ data: Data,
         named id: UUID = UUID(),

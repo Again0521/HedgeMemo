@@ -35,9 +35,15 @@ public struct BundledTesseractOCRService: OfflineOCRProviding {
             process.arguments = [imageURL.path, "stdout", "-l", languages]
             process.standardOutput = output
             try process.run()
+            // Drain the pipe *before* waiting for exit. Recognized text can
+            // exceed the OS pipe buffer (~64 KB); if the parent waited on exit
+            // first, the child would block writing into a full pipe while the
+            // parent blocked on exit — a deadlock. Reading to EOF returns only
+            // once the child has closed its end, i.e. finished writing.
+            let data = output.fileHandleForReading.readDataToEndOfFile()
             process.waitUntilExit()
             guard process.terminationStatus == 0 else { throw OfflineOCRError.recognitionFailed }
-            return String(decoding: output.fileHandleForReading.readDataToEndOfFile(), as: UTF8.self)
+            return String(decoding: data, as: UTF8.self)
                 .trimmingCharacters(in: .whitespacesAndNewlines)
         }.value
     }

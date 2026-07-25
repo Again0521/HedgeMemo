@@ -62,7 +62,21 @@ enum CodeHighlighter {
         return cache
     }()
 
+    /// Above this length the seven regex passes (and the per-match
+    /// `AttributedString` index conversions, which are the real cost) stop being
+    /// affordable inside a SwiftUI body on the main thread — a multi-megabyte
+    /// paste would freeze the panel while it renders. Such a snippet is far past
+    /// what any preview or note actually shows, so it falls back to plain text
+    /// instead. Checked before the cache key is built, so an oversized string is
+    /// never copied into a key or retained by the cache either.
+    static let maxHighlightLength = 20_000
+
     static func highlight(_ code: String, theme: CodeHighlightTheme = .system) -> AttributedString {
+        guard code.utf16.count <= maxHighlightLength else {
+            var plain = AttributedString(code)
+            plain.foregroundColor = Palette(theme: theme).plain
+            return plain
+        }
         let key = "\(theme.rawValue)\u{1}\(code)" as NSString
         if let cached = highlightCache.object(forKey: key) { return cached.value }
         let result = computeHighlight(code, theme: theme)
@@ -96,6 +110,15 @@ enum CodeHighlighter {
         let text = storage.string
         let full = NSRange(location: 0, length: (text as NSString).length)
         let palette = NSPalette(theme: theme)
+        // This runs on every keystroke. Past the highlight budget, keep the
+        // editor responsive by styling the run plainly instead of re-scanning a
+        // huge buffer between characters.
+        guard full.length <= maxHighlightLength else {
+            storage.beginEditing()
+            storage.setAttributes([.font: baseFont, .foregroundColor: palette.plain], range: full)
+            storage.endEditing()
+            return
+        }
         storage.beginEditing()
         storage.setAttributes([.font: baseFont, .foregroundColor: palette.plain], range: full)
         applyNS(typePattern, to: storage, in: text, range: full, color: palette.type)

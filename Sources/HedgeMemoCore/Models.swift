@@ -175,13 +175,36 @@ public struct CustomClipboardCategory: Codable, Equatable, Hashable, Identifiabl
     }
 
     public var isPatternValid: Bool {
-        !pattern.isEmpty && (try? NSRegularExpression(pattern: pattern)) != nil
+        !pattern.isEmpty && Self.compiledRegex(for: pattern) != nil
     }
 
     public func matches(_ text: String) -> Bool {
-        guard let regex = try? NSRegularExpression(pattern: pattern) else { return false }
-        let range = NSRange(text.startIndex..., in: text)
-        return regex.firstMatch(in: text, range: range) != nil
+        guard let regex = Self.compiledRegex(for: pattern) else { return false }
+        // `matches(_:)` runs once per entry per filter pass against a
+        // user-authored pattern. Bounding the scanned length keeps a
+        // catastrophically-backtracking pattern from freezing the main thread on
+        // a large clipboard item; a category rule that needs to see past this
+        // prefix is vanishingly rare.
+        let scanned = text.count > Self.maxMatchLength ? String(text.prefix(Self.maxMatchLength)) : text
+        let range = NSRange(scanned.startIndex..., in: scanned)
+        return regex.firstMatch(in: scanned, range: range) != nil
+    }
+
+    private static let maxMatchLength = 10_000
+
+    /// Compiling an `NSRegularExpression` is not free, and the old code rebuilt
+    /// one on every `matches`/`isPatternValid` call — i.e. once per entry per
+    /// filter pass. Cache by pattern string so each distinct pattern compiles
+    /// once. NSCache is thread-safe.
+    nonisolated(unsafe) private static let regexCache = NSCache<NSString, NSRegularExpression>()
+
+    private static func compiledRegex(for pattern: String) -> NSRegularExpression? {
+        guard !pattern.isEmpty else { return nil }
+        let key = pattern as NSString
+        if let cached = regexCache.object(forKey: key) { return cached }
+        guard let regex = try? NSRegularExpression(pattern: pattern) else { return nil }
+        regexCache.setObject(regex, forKey: key)
+        return regex
     }
 }
 
@@ -480,8 +503,11 @@ public struct HotKeyDefinition: Codable, Equatable, Hashable, Sendable {
     public static let defaultMemePanel = HotKeyDefinition(keyCode: 14, key: "E", command: true, shift: true)
     public static let legacyScreenshot = HotKeyDefinition(keyCode: 23, key: "5", control: true, shift: true)
 
+    /// A global hot key needs at least one of Command/Option/Control. Shift
+    /// alone is rejected: a Shift-only global shortcut would fire while the user
+    /// is simply typing capital letters.
     public var isUsable: Bool {
-        keyCode > 0 && !key.isEmpty && (command || option || control || shift)
+        keyCode > 0 && !key.isEmpty && (command || option || control)
     }
 
     public var displayName: String {

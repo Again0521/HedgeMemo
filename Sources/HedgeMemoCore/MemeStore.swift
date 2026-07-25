@@ -227,8 +227,8 @@ public final class MemeStore: ObservableObject {
             }
         }
         for meme in memeSnapshot.memes {
-            let url = imagesURL.appendingPathComponent(meme.fileName)
-            guard let payload = ImageAssetData(fileURL: url) else { continue }
+            guard let url = MemeArchiveService.safeContainedURL(base: imagesURL, fileName: meme.fileName),
+                  let payload = ImageAssetData(fileURL: url) else { continue }
             _ = addImageData(
                 payload,
                 categoryID: meme.categoryID.flatMap { categoryMap[$0] },

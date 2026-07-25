@@ -13,13 +13,14 @@ final class PinnedClipboardWindowsController {
     private var windows: [UUID: PinnedClipboardWindow] = [:]
     private var entriesObserver: AnyCancellable?
     private var settingsObserver: AnyCancellable?
+    private var synchronizationTask: Task<Void, Never>?
 
     init(store: ClipboardHistoryStore) {
         self.store = store
         entriesObserver = store.$entries
             .dropFirst()
-            .sink { [weak self] entries in
-                self?.synchronize(with: entries)
+            .sink { [weak self] _ in
+                self?.scheduleSynchronization()
             }
 
         settingsObserver = store.$settings
@@ -29,22 +30,17 @@ final class PinnedClipboardWindowsController {
             }
 
         guard !CommandLine.arguments.contains(where: { $0.hasPrefix("--preview-") }) else { return }
-        Task { @MainActor [weak self] in
-            guard let self else { return }
-            self.synchronize(with: self.store.entries)
-        }
+        scheduleSynchronization()
     }
 
     func toggle(_ entry: ClipboardEntry) {
         store.toggleDesktopPinned(id: entry.id)
-        synchronize(with: store.entries)
     }
 
     private func unpin(id: UUID) {
         if store.entries.first(where: { $0.id == id })?.isDesktopPinned == true {
             store.toggleDesktopPinned(id: id)
         }
-        synchronize(with: store.entries)
     }
 
     /// Persists an in-place edit made from a note's own edit mode. The note
@@ -53,6 +49,21 @@ final class PinnedClipboardWindowsController {
     /// for newly-pinned entries, so it does not refresh an already-open one.
     private func saveText(id: UUID, text: String) {
         store.updateText(id: id, text: text)
+    }
+
+    /// `@Published` delivers inside the store mutation. Ordering a new AppKit
+    /// window from that Combine callback can therefore re-enter SwiftUI's
+    /// button transaction and make ViewBridge throw while the window is coming
+    /// on screen. Defer one turn and coalesce repeated mutations so window
+    /// lifecycle work always happens after the originating action completes.
+    private func scheduleSynchronization() {
+        synchronizationTask?.cancel()
+        synchronizationTask = Task { @MainActor [weak self] in
+            await Task.yield()
+            guard !Task.isCancelled, let self else { return }
+            self.synchronizationTask = nil
+            self.synchronize(with: self.store.entries)
+        }
     }
 
     private func synchronize(with entries: [ClipboardEntry]) {

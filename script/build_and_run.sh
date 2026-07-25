@@ -91,8 +91,8 @@ cat >"$INFO_PLIST" <<PLIST
 <string>zh-Hans</string>
 </array>
 <key>CFBundleIconFile</key><string>AppIcon</string>
-<key>CFBundleShortVersionString</key><string>1.1.7</string>
-<key>CFBundleVersion</key><string>1.1.7</string>
+<key>CFBundleShortVersionString</key><string>1.2.0</string>
+<key>CFBundleVersion</key><string>1.2.0</string>
 <key>LSMinimumSystemVersion</key><string>$MIN_SYSTEM_VERSION</string>
 <key>LSUIElement</key><true/>
 <key>NSPrincipalClass</key><string>NSApplication</string>

@@ -63,6 +63,8 @@ public struct ImageAssetData: Sendable {
         switch fileExtension {
         case "gif": NSPasteboard.PasteboardType(UTType.gif.identifier)
         case "jpg", "jpeg": NSPasteboard.PasteboardType(UTType.jpeg.identifier)
+        case "webp": NSPasteboard.PasteboardType(UTType.webP.identifier)
+        case "heic": NSPasteboard.PasteboardType(UTType.heic.identifier)
         case "tif", "tiff": .tiff
         default: .png
         }

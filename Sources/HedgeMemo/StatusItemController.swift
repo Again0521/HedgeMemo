@@ -313,7 +313,13 @@ final class StatusItemController: NSObject {
         menu.addItem(actionItem(L10n.text("清除剪贴板…"), #selector(clearClipboardHistory)))
         menu.addItem(.separator())
 
-        menu.addItem(actionItem(L10n.text("设置…"), #selector(openSettings)))
+        let settingsItem = actionItem(L10n.text("设置…"), #selector(openSettings))
+        // The menu is rebuilt on every right-click, so this reflects the current
+        // update state without needing an observer of its own.
+        if services.updateCheckStore.hasAvailableUpdate {
+            settingsItem.attributedTitle = Self.titleWithUpdateDot(settingsItem.title)
+        }
+        menu.addItem(settingsItem)
         menu.addItem(.separator())
         menu.addItem(actionItem(L10n.text("退出 HedgeMemo"), #selector(quit)))
         return menu
@@ -323,6 +329,24 @@ final class StatusItemController: NSObject {
         let item = NSMenuItem(title: title, action: selector, keyEquivalent: "")
         item.target = self
         return item
+    }
+
+    /// Trailing red dot marking "a newer version exists". Drawn into the title
+    /// rather than via `NSMenuItem.badge`, because the system badge renders in
+    /// its own neutral capsule style and cannot be a red dot.
+    private static func titleWithUpdateDot(_ title: String) -> NSAttributedString {
+        let composed = NSMutableAttributedString(
+            string: title + "  ",
+            attributes: [.font: NSFont.menuFont(ofSize: 0)]
+        )
+        composed.append(NSAttributedString(
+            string: "●",
+            attributes: [
+                .font: NSFont.systemFont(ofSize: 8),
+                .foregroundColor: NSColor.systemRed,
+            ]
+        ))
+        return composed
     }
 
     /// Let the menu tracking loop unwind before opening an app-modal file or

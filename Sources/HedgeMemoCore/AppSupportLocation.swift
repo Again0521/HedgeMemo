@@ -12,7 +12,13 @@ public enum AppSupportLocation {
     /// `…/Application Support/MemeMemo` directory into place so an upgraded
     /// installation keeps its memes, categories and clipboard history.
     public static func defaultRoot(fileManager: FileManager = .default) -> URL {
-        let base = fileManager.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+        // `urls(for:in:)` returns an array, and subscripting it crashed the app
+        // at launch on the rare setup where the domain resolves to nothing.
+        // Fall back to the standard path instead of trapping before any window
+        // has even been created.
+        let base = fileManager.urls(for: .applicationSupportDirectory, in: .userDomainMask).first
+            ?? fileManager.homeDirectoryForCurrentUser
+                .appendingPathComponent("Library/Application Support", isDirectory: true)
         let root = base.appendingPathComponent(directoryName, isDirectory: true)
         let legacy = base.appendingPathComponent(legacyDirectoryName, isDirectory: true)
         if !fileManager.fileExists(atPath: root.path), fileManager.fileExists(atPath: legacy.path) {

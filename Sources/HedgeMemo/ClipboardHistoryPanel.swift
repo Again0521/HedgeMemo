@@ -2113,13 +2113,26 @@ private struct EntryHoverTrackingOverlay: NSViewRepresentable {
 
     func updateNSView(_ nsView: TrackingView, context: Context) {
         nsView.onHover = onHover
-        nsView.refreshHoverState()
+        // `updateNSView` runs inside SwiftUI's render transaction. Calling the
+        // callback synchronously from here mutates `hoveredID` while the view
+        // graph is updating, which can leave both hover and button gestures in
+        // an undefined state. Re-evaluate on the next main-loop turn instead.
+        nsView.scheduleHoverRefresh()
     }
 
     final class TrackingView: NSView {
         var onHover: ((Bool) -> Void)?
         private var trackingArea: NSTrackingArea?
+        private var pendingRefresh: DispatchWorkItem?
         private var isInside = false
+
+        override func viewWillMove(toWindow newWindow: NSWindow?) {
+            if newWindow == nil {
+                pendingRefresh?.cancel()
+                pendingRefresh = nil
+            }
+            super.viewWillMove(toWindow: newWindow)
+        }
 
         override func updateTrackingAreas() {
             super.updateTrackingAreas()
@@ -2133,21 +2146,24 @@ private struct EntryHoverTrackingOverlay: NSViewRepresentable {
             let area = NSTrackingArea(rect: .zero, options: options, owner: self, userInfo: nil)
             addTrackingArea(area)
             trackingArea = area
-            refreshHoverState()
+            // AppKit may request tracking-area updates while SwiftUI is still
+            // installing this representable. Keep that lifecycle callback out
+            // of the active SwiftUI update transaction as well.
+            scheduleHoverRefresh()
         }
 
         override func mouseEntered(with event: NSEvent) {
             // AppKit can synthesize enter/exit pairs while the hosting view
             // changes geometry. Use the actual pointer position instead.
-            refreshHoverState()
+            scheduleHoverRefresh()
         }
 
         override func mouseExited(with event: NSEvent) {
-            refreshHoverState()
+            scheduleHoverRefresh()
         }
 
         override func mouseMoved(with event: NSEvent) {
-            refreshHoverState()
+            scheduleHoverRefresh()
         }
 
         override func hitTest(_ point: NSPoint) -> NSView? {
@@ -2156,7 +2172,22 @@ private struct EntryHoverTrackingOverlay: NSViewRepresentable {
             nil
         }
 
-        func refreshHoverState() {
+        /// Coalesce layout callbacks and high-frequency mouse movement into one
+        /// state evaluation on the next main-loop turn. Besides avoiding
+        /// SwiftUI re-entrancy, this prevents a row rebuild from queuing a
+        /// cascade of stale enter/exit callbacks.
+        func scheduleHoverRefresh() {
+            guard pendingRefresh == nil else { return }
+            let work = DispatchWorkItem { [weak self] in
+                guard let self else { return }
+                self.pendingRefresh = nil
+                self.refreshHoverState()
+            }
+            pendingRefresh = work
+            DispatchQueue.main.async(execute: work)
+        }
+
+        private func refreshHoverState() {
             guard let window else {
                 setHovered(false)
                 return
