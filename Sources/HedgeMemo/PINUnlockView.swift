@@ -164,7 +164,10 @@ struct PINGateView: View {
             }
         }
         .padding(.horizontal, 16)
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        // Height is owned by the caller (the panel reserves a fixed gate
+        // height). Claiming `maxHeight: .infinity` here fought that reservation
+        // and made the card resize twice while it settled.
+        .frame(maxWidth: .infinity)
         .onAppear {
             pinFocused = true
             // Deliberately no automatic Touch ID prompt here. `evaluatePolicy`

@@ -271,3 +271,4 @@
 "为「密码」设置 PIN 码" = "Set a PIN for Passwords";
 "设置 4 位 PIN 码以保护此分类" = "Choose a 4-digit PIN to protect this category";
 "PIN 码需为 4 位数字" = "The PIN must be 4 digits";
+"密码分类始终锁定" = "The Passwords category is always locked";

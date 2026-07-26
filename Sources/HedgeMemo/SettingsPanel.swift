@@ -165,11 +165,9 @@ struct SettingsPanelView: View {
             CustomCategoryEditorSheet(draft: draft) { saveCustomCategory($0) }
         }
         .sheet(isPresented: $isSettingPIN) {
-            PINSetupSheet(lockStore: lockStore) { created in
-                // Creating the first PIN is only useful if the lock also turns
-                // on, so do both in the one gesture.
-                if created, !lockStore.settings.isEnabled { lockStore.settings.isEnabled = true }
-            }
+            // Nothing to enable afterwards: a surface is locked purely by being
+            // selected in the chips below, so creating the PIN is the whole step.
+            PINSetupSheet(lockStore: lockStore) { _ in }
         }
     }
 
@@ -247,13 +245,6 @@ struct SettingsPanelView: View {
             title: L10n.text("安全"),
             footer: L10n.text("开启后，密码管理器等标记为隐私的复制内容会记录到「密码」分类，并加密保存。关闭时（默认）这类内容不会被记录。")
         ) {
-            SettingsFormRow(L10n.text("PIN 码锁定")) {
-                Toggle(L10n.text("PIN 码锁定"), isOn: lockEnabledBinding)
-                    .labelsHidden()
-                    .disabled(!lockStore.hasPIN)
-                    .help(L10n.text(lockStore.hasPIN ? "PIN 码锁定" : "需要先设置 PIN 码"))
-            }
-            SettingsDivider()
             SettingsActionRow {
                 HStack(spacing: 8) {
                     Button(L10n.text(lockStore.hasPIN ? "修改 PIN 码…" : "设置 PIN 码…")) {
@@ -266,59 +257,78 @@ struct SettingsPanelView: View {
                     }
                 }
             }
-            if lockStore.settings.isEnabled {
+            SettingsDivider()
+            // Selecting a chip *is* switching the lock on for that surface —
+            // there is no separate master toggle to contradict it.
+            SettingsRow {
+                VStack(alignment: .leading, spacing: 7) {
+                    Text(L10n.text("需要锁定的分类"))
+                    LockTargetChips(
+                        targets: lockTargets,
+                        isLocked: { lockStore.settings.lockedCategoryKeys.contains($0.storageValue) },
+                        isFixed: { $0.storageValue == ClipboardCategoryKey.builtin(.password).storageValue },
+                        toggle: toggleLockTarget
+                    )
+                }
+                .padding(.vertical, 4)
+            }
+            SettingsDivider()
+            SettingsFormRow(L10n.text("锁定时机")) {
+                Picker(L10n.text("锁定时机"), selection: lockTimingBinding) {
+                    ForEach(AppLockTiming.allCases, id: \.self) { timing in
+                        Text(timing.displayName).tag(timing)
+                    }
+                }
+                .labelsHidden()
+                .pickerStyle(.menu)
+                .frame(width: 190, alignment: .trailing)
+            }
+            if lockStore.settings.timing == .afterIdle {
                 SettingsDivider()
-                SettingsFormRow(L10n.text("锁定时机")) {
-                    Picker(L10n.text("锁定时机"), selection: lockTimingBinding) {
-                        ForEach(AppLockTiming.allCases, id: \.self) { timing in
-                            Text(timing.displayName).tag(timing)
+                SettingsFormRow(L10n.text("闲置时长")) {
+                    Picker(L10n.text("闲置时长"), selection: idleMinutesBinding) {
+                        ForEach(AppLockSettings.idleMinuteChoices, id: \.self) { minutes in
+                            Text(L10n.format("闲置分钟数格式", minutes)).tag(minutes)
                         }
                     }
                     .labelsHidden()
                     .pickerStyle(.menu)
                     .frame(width: 190, alignment: .trailing)
                 }
-                if lockStore.settings.timing == .afterIdle {
-                    SettingsDivider()
-                    SettingsFormRow(L10n.text("闲置时长")) {
-                        Picker(L10n.text("闲置时长"), selection: idleMinutesBinding) {
-                            ForEach(AppLockSettings.idleMinuteChoices, id: \.self) { minutes in
-                                Text(L10n.format("闲置分钟数格式", minutes)).tag(minutes)
-                            }
-                        }
-                        .labelsHidden()
-                        .pickerStyle(.menu)
-                        .frame(width: 190, alignment: .trailing)
-                    }
-                }
-                SettingsDivider()
-                SettingsFormRow(L10n.text("允许触控 ID 解锁")) {
-                    Toggle(L10n.text("允许触控 ID 解锁"), isOn: biometricsBinding)
-                        .labelsHidden()
-                        .disabled(!BiometricAuthenticator.isAvailable)
-                }
-                SettingsDivider()
-                SettingsRow {
-                    VStack(alignment: .leading, spacing: 6) {
-                        Text(L10n.text("需要锁定的分类"))
-                        ForEach(lockableCategoryKeys, id: \.storageValue) { key in
-                            Toggle(categoryDisplayName(key), isOn: lockedCategoryBinding(key))
-                                .toggleStyle(.checkbox)
-                                // 密码 holds nothing but secrets, so its gate is
-                                // not optional and the row is shown fixed on.
-                                .disabled(key == .builtin(.password))
-                        }
-                        Toggle(L10n.text("表情包面板"), isOn: memePanelLockedBinding)
-                            .toggleStyle(.checkbox)
-                    }
-                    .padding(.vertical, 4)
-                }
+            }
+            SettingsDivider()
+            SettingsFormRow(L10n.text("允许触控 ID 解锁")) {
+                Toggle(L10n.text("允许触控 ID 解锁"), isOn: biometricsBinding)
+                    .labelsHidden()
+                    .disabled(!BiometricAuthenticator.isAvailable)
             }
             SettingsDivider()
             SettingsFormRow(L10n.text("记录密码类内容")) {
                 Toggle(L10n.text("记录密码类内容"), isOn: capturesPasswordsBinding)
                     .labelsHidden()
             }
+        }
+    }
+
+    /// Every surface the lock can cover: the clipboard categories plus the meme
+    /// panel, which is not a category but is lockable all the same.
+    private var lockTargets: [LockTarget] {
+        clipboardStore.settings.orderedCategoryKeys.map {
+            LockTarget(storageValue: $0.storageValue, name: categoryDisplayName($0))
+        } + [LockTarget(
+            storageValue: AppLockSettings.memePanelStorageKey,
+            name: L10n.text("表情包面板")
+        )]
+    }
+
+    private func toggleLockTarget(_ target: LockTarget) {
+        // 密码 holds nothing but secrets; its gate is not optional.
+        guard target.storageValue != ClipboardCategoryKey.builtin(.password).storageValue else { return }
+        let locked = lockStore.settings.lockedCategoryKeys.contains(target.storageValue)
+        if target.storageValue == AppLockSettings.memePanelStorageKey {
+            lockStore.settings.setMemePanelLocked(!locked)
+        } else if let key = ClipboardCategoryKey(storageValue: target.storageValue) {
+            lockStore.settings.setCategory(key, locked: !locked)
         }
     }
 
@@ -331,27 +341,6 @@ struct SettingsPanelView: View {
         case .builtin(let category): return category.displayName
         case .custom(let id): return clipboardStore.settings.customCategory(id: id)?.name ?? L10n.text("自定义")
         }
-    }
-
-    private func lockedCategoryBinding(_ key: ClipboardCategoryKey) -> Binding<Bool> {
-        Binding(
-            get: { lockStore.settings.lockedCategoryKeys.contains(key.storageValue) },
-            set: { lockStore.settings.setCategory(key, locked: $0) }
-        )
-    }
-
-    private var memePanelLockedBinding: Binding<Bool> {
-        Binding(
-            get: { lockStore.settings.lockedCategoryKeys.contains(AppLockSettings.memePanelStorageKey) },
-            set: { lockStore.settings.setMemePanelLocked($0) }
-        )
-    }
-
-    private var lockEnabledBinding: Binding<Bool> {
-        Binding(
-            get: { lockStore.settings.isEnabled },
-            set: { lockStore.settings.isEnabled = $0 }
-        )
     }
 
     private var lockTimingBinding: Binding<AppLockTiming> {
@@ -887,6 +876,56 @@ struct SettingsPanelView: View {
     private func requestAccessibilityTrust() {
         let options = ["AXTrustedCheckOptionPrompt": true] as CFDictionary
         accessibilityTrusted = AXIsProcessTrustedWithOptions(options)
+    }
+}
+
+/// A surface the PIN lock can cover. Identified by its storage value so a
+/// clipboard category and the meme panel can share one row of chips.
+struct LockTarget: Identifiable, Hashable {
+    let storageValue: String
+    let name: String
+    var id: String { storageValue }
+}
+
+/// Locked surfaces are picked as a wrapping row of chips rather than a column of
+/// checkboxes: selection *is* the lock, so a filled accent chip reads as "this
+/// one is locked" without a second switch to contradict it.
+private struct LockTargetChips: View {
+    let targets: [LockTarget]
+    let isLocked: (LockTarget) -> Bool
+    let isFixed: (LockTarget) -> Bool
+    let toggle: (LockTarget) -> Void
+
+    private let columns = [GridItem(.adaptive(minimum: 72, maximum: 160), spacing: 6, alignment: .leading)]
+
+    var body: some View {
+        LazyVGrid(columns: columns, alignment: .leading, spacing: 6) {
+            ForEach(targets) { target in
+                let locked = isLocked(target)
+                let fixed = isFixed(target)
+                Button {
+                    toggle(target)
+                } label: {
+                    Text(target.name)
+                        .font(.system(size: 12, weight: locked ? .semibold : .regular))
+                        .foregroundStyle(locked ? Color.white : Color.primary)
+                        .lineLimit(1)
+                        .padding(.horizontal, 10)
+                        .frame(height: 24)
+                        .frame(maxWidth: .infinity)
+                        .background(
+                            Capsule(style: .continuous)
+                                .fill(locked ? AnyShapeStyle(Color.accentColor) : AnyShapeStyle(.quaternary))
+                        )
+                        .contentShape(Capsule(style: .continuous))
+                }
+                .buttonStyle(.plain)
+                // 密码 is always locked, so its chip shows the state but does
+                // not invite a tap that would do nothing.
+                .disabled(fixed)
+                .help(fixed ? L10n.text("密码分类始终锁定") : target.name)
+            }
+        }
     }
 }
 

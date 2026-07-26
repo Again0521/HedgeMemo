@@ -21,9 +21,6 @@ public enum AppLockTiming: String, Codable, CaseIterable, Sendable {
 public struct AppLockSettings: Codable, Equatable, Sendable {
     public static let idleMinuteChoices = [1, 2, 5, 10, 15, 30, 60]
 
-    /// Master switch. With no PIN set this stays false, so the lock can never
-    /// strand the user out of their own history.
-    public var isEnabled: Bool
     public var timing: AppLockTiming
     public var idleMinutes: Int
     /// Storage values of the categories that require unlocking.
@@ -37,14 +34,12 @@ public struct AppLockSettings: Codable, Equatable, Sendable {
     public var capturesPasswords: Bool
 
     public init(
-        isEnabled: Bool = false,
         timing: AppLockTiming = .onPanelClose,
         idleMinutes: Int = 5,
         lockedCategoryKeys: [String]? = nil,
         allowsBiometrics: Bool = true,
         capturesPasswords: Bool = false
     ) {
-        self.isEnabled = isEnabled
         self.timing = timing
         self.idleMinutes = idleMinutes
         self.lockedCategoryKeys = lockedCategoryKeys
@@ -61,8 +56,11 @@ public struct AppLockSettings: Codable, Equatable, Sendable {
         lockedCategoryKeys = lockedCategoryKeys.filter { seen.insert($0).inserted }
     }
 
+    /// There is no separate master switch: a category is locked exactly when
+    /// the user has selected it. One source of truth avoids the state where the
+    /// lock is "off" but categories still look selected.
     public func isCategoryLocked(_ key: ClipboardCategoryKey) -> Bool {
-        isEnabled && lockedCategoryKeys.contains(key.storageValue)
+        lockedCategoryKeys.contains(key.storageValue)
     }
 
     public mutating func setCategory(_ key: ClipboardCategoryKey, locked: Bool) {
@@ -75,7 +73,7 @@ public struct AppLockSettings: Codable, Equatable, Sendable {
     public static let memePanelStorageKey = "panel:meme"
 
     public var locksMemePanel: Bool {
-        isEnabled && lockedCategoryKeys.contains(Self.memePanelStorageKey)
+        lockedCategoryKeys.contains(Self.memePanelStorageKey)
     }
 
     public mutating func setMemePanelLocked(_ locked: Bool) {
@@ -102,7 +100,6 @@ public enum AppLockPolicy {
         lastUsedAt: Date?,
         now: Date
     ) -> Bool {
-        guard settings.isEnabled else { return true }
         guard unlockedAt != nil else { return false }
         switch settings.timing {
         case .onPanelClose:
@@ -118,12 +115,12 @@ public enum AppLockPolicy {
 
     /// Whether closing the clipboard panel should re-lock.
     public static func locksOnPanelClose(_ settings: AppLockSettings) -> Bool {
-        settings.isEnabled && settings.timing == .onPanelClose
+        settings.timing == .onPanelClose
     }
 
     /// Whether the machine going to sleep should re-lock.
     public static func locksOnSleep(_ settings: AppLockSettings) -> Bool {
-        settings.isEnabled && settings.timing != .onPanelClose
+        settings.timing != .onPanelClose
     }
 
     /// A locked category must never leak its rows through search or the quick
@@ -134,7 +131,7 @@ public enum AppLockPolicy {
         customCategories: [CustomClipboardCategory],
         isUnlocked: Bool
     ) -> Bool {
-        guard settings.isEnabled, !isUnlocked else { return false }
+        guard !isUnlocked else { return false }
         return settings.lockedCategoryKeys
             .compactMap(ClipboardCategoryKey.init(storageValue:))
             .contains { entry.matches(key: $0, customCategories: customCategories) }

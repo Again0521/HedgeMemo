@@ -1372,10 +1372,11 @@ struct ClipboardHistoryPanelView: View {
             categoryBar
                 .frame(height: ClipboardPanelLayout.segmentedHeight)
             if isActiveCategoryLocked {
+                // A fixed height: the gate is a panel state, not a list, so
+                // without this the content grows the card and pushes the search
+                // field and category bar off the top of the window.
                 PINGateView(lockStore: lockStore, gate: activeGate, surfaceName: title(for: activeKey))
-                    // A fixed height: the gate is a panel state, not a list, so
-                    // without this the content grows the card and pushes the
-                    // search field and category bar off the top of the window.
+                    .frame(maxWidth: .infinity)
                     .frame(height: ClipboardPanelLayout.lockedStateHeight)
             } else {
             ScrollViewReader { proxy in
@@ -1419,9 +1420,10 @@ struct ClipboardHistoryPanelView: View {
         .onChange(of: query) { _, _ in selectionAndSizeChanged(resetPage: true) }
         .onChange(of: store.settings.lastCategory) { _, _ in selectionAndSizeChanged(resetPage: true) }
         .onChange(of: activeKey.storageValue) { _, _ in selectionAndSizeChanged(resetPage: true) }
-        // Unlocking swaps the gate out for the real list, which is a different
-        // height; without this the panel keeps the gate's size.
-        .onChange(of: isActiveCategoryLocked) { _, _ in selectionAndSizeChanged(resetPage: true) }
+        // Only the *gate* transition needs its own resize. A category switch is
+        // already handled above; reacting to both fired two resizes for one
+        // change, which is what made switching to 密码 flicker and judder.
+        .onChange(of: activeGate) { _, _ in reportContentHeight() }
         .onChange(of: store.entries) { _, _ in selectionAndSizeChanged(resetPage: false) }
         .onChange(of: visibleEntryLimit) { _, _ in
             DispatchQueue.main.async { reportContentHeight() }
@@ -1760,6 +1762,12 @@ struct ClipboardHistoryPanelView: View {
 
     private func handleKey(_ event: NSEvent) -> Bool {
         let flags = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
+
+        // The PIN gate owns the keyboard while it is up. This monitor is
+        // window-wide, so without this every digit, Delete and Return would be
+        // consumed here (⌫ = "delete entry", ⏎ = "copy") and never reach the PIN
+        // field — which is why backspace appeared to do nothing.
+        if isActiveCategoryLocked { return false }
 
         // While editing, only the save/cancel shortcuts are ours to intercept.
         // Everything else — letters, arrows, Delete, Return, ⌘A/C/V/X/Z — must

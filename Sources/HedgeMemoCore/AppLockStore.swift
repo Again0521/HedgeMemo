@@ -10,9 +10,6 @@ public final class AppLockStore: ObservableObject {
             isNormalizingSettings = true
             settings.normalize()
             isNormalizingSettings = false
-            // Losing the PIN, or turning the lock off, must never leave a
-            // half-locked state behind.
-            if !settings.isEnabled { unlockedAt = nil }
             persist()
         }
     }
@@ -38,14 +35,14 @@ public final class AppLockStore: ObservableObject {
         } else {
             settings = AppLockSettings()
         }
-        // A lock with no PIN behind it would strand the user, so refuse to come
-        // up enabled unless a PIN really exists.
-        if settings.isEnabled, !SecretVault.hasPIN {
-            settings.isEnabled = false
-        }
     }
 
-    public var hasPIN: Bool { SecretVault.hasPIN }
+    /// Cached because `gateState` is read from SwiftUI bodies on every render,
+    /// and `SecretVault.hasPIN` is a synchronous Keychain query. Hitting the
+    /// keychain once per body pass stalled the render loop — the flicker and
+    /// judder when switching to the 密码 category. Only this type mutates the
+    /// PIN, so the cache cannot go stale behind our back.
+    @Published public private(set) var hasPIN: Bool = SecretVault.hasPIN
 
     /// What a protected surface should show right now.
     public enum GateState: Equatable, Sendable {
@@ -56,9 +53,7 @@ public final class AppLockStore: ObservableObject {
         case needsUnlock
     }
 
-    /// Whether the current unlock session is still valid. Deliberately
-    /// independent of `settings.isEnabled`, because the 密码 category is gated
-    /// even before the user has switched the lock on for anything else.
+    /// Whether the current unlock session is still valid.
     private var isSessionUnlocked: Bool {
         guard let unlockedAt else { return false }
         switch settings.timing {
@@ -71,10 +66,7 @@ public final class AppLockStore: ObservableObject {
     }
 
     /// True when locked content should be withheld right now.
-    public var isLocked: Bool {
-        guard settings.isEnabled else { return false }
-        return !isSessionUnlocked
-    }
+    public var isLocked: Bool { !isSessionUnlocked }
 
     /// The 密码 category always requires the gate — it holds nothing but
     /// secrets, so protecting it is not something the user has to remember to
@@ -90,7 +82,7 @@ public final class AppLockStore: ObservableObject {
     private func gate(isProtected: Bool) -> GateState {
         guard isProtected else { return .open }
         if isSessionUnlocked { return .open }
-        return SecretVault.hasPIN ? .needsUnlock : .needsSetup
+        return hasPIN ? .needsUnlock : .needsSetup
     }
 
     public func isCategoryLocked(_ key: ClipboardCategoryKey) -> Bool {
@@ -99,18 +91,18 @@ public final class AppLockStore: ObservableObject {
 
     // MARK: - PIN lifecycle
 
-    /// Sets or replaces the PIN. Enabling the lock is left to the caller so the
-    /// settings toggle stays the single place that turns the feature on.
+    /// Sets or replaces the PIN.
     public func setPIN(_ pin: String) throws {
         try SecretVault.setPIN(pin)
+        hasPIN = true
         failedAttempts = 0
     }
 
-    /// Removes the PIN and disables the lock together — one without the other is
-    /// never a valid state.
+    /// Removes the PIN. Protected surfaces fall back to the first-run setup
+    /// gate, so nothing becomes silently readable.
     public func removePIN() throws {
         try SecretVault.removePIN()
-        settings.isEnabled = false
+        hasPIN = false
         unlockedAt = nil
         failedAttempts = 0
     }

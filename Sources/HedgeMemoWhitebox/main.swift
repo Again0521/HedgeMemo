@@ -436,10 +436,10 @@ await MainActor.run {
     )
 
     // Lock policy.
-    var lockSettings = AppLockSettings(isEnabled: true, timing: .afterIdle, idleMinutes: 5)
+    var lockSettings = AppLockSettings(timing: .afterIdle, idleMinutes: 5)
     expect(
         lockSettings.isCategoryLocked(.builtin(.password)),
-        "the password category is locked by default once the lock is on"
+        "the password category is locked by default"
     )
     expect(!lockSettings.isCategoryLocked(.builtin(.text)), "other categories stay unlocked by default")
     let now = Date()
@@ -460,11 +460,11 @@ await MainActor.run {
         !AppLockPolicy.remainsUnlocked(settings: lockSettings, unlockedAt: nil, lastUsedAt: nil, now: now),
         "never unlocked means locked"
     )
-    var disabled = lockSettings
-    disabled.isEnabled = false
+    var unprotected = lockSettings
+    unprotected.setCategory(.builtin(.password), locked: false)
     expect(
-        AppLockPolicy.remainsUnlocked(settings: disabled, unlockedAt: nil, lastUsedAt: nil, now: now),
-        "a disabled lock never withholds content"
+        !unprotected.isCategoryLocked(.builtin(.password)),
+        "deselecting a surface is the only thing that unlocks it — there is no master switch"
     )
     lockSettings.timing = .onPanelClose
     expect(AppLockPolicy.locksOnPanelClose(lockSettings), "panel-close timing re-locks on close")
@@ -496,7 +496,7 @@ await MainActor.run {
         ClipboardCategoryKey(storageValue: AppLockSettings.memePanelStorageKey) == nil,
         "the meme panel key must not parse as a clipboard category"
     )
-    var panelSettings = AppLockSettings(isEnabled: true, lockedCategoryKeys: [])
+    var panelSettings = AppLockSettings(lockedCategoryKeys: [])
     expect(!panelSettings.locksMemePanel, "the meme panel starts unlocked")
     panelSettings.setMemePanelLocked(true)
     expect(panelSettings.locksMemePanel, "the meme panel can be locked")
@@ -509,7 +509,6 @@ await MainActor.run {
 
     // Duplicate lock targets must collapse rather than accumulate.
     var duplicated = AppLockSettings(
-        isEnabled: true,
         lockedCategoryKeys: ["password", "password", AppLockSettings.memePanelStorageKey]
     )
     duplicated.normalize()
