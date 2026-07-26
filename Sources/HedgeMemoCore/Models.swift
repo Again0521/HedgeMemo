@@ -707,6 +707,10 @@ public struct ClipboardEntry: Codable, Hashable, Identifiable, Sendable {
     /// existed; the store migrates missing values on load.
     public var desktopPinnedOrder: Int?
     public var origin: ClipboardEntryOrigin?
+    /// Optional storage value of a user-selected category. Nil keeps automatic
+    /// content/regex classification. A string keeps older snapshots compatible
+    /// and supports both built-in and custom category keys.
+    public var manualCategoryStorageValue: String?
 
     public init(
         id: UUID = UUID(),
@@ -723,7 +727,8 @@ public struct ClipboardEntry: Codable, Hashable, Identifiable, Sendable {
         pinnedOrder: Int? = nil,
         isDesktopPinned: Bool? = false,
         desktopPinnedOrder: Int? = nil,
-        origin: ClipboardEntryOrigin? = nil
+        origin: ClipboardEntryOrigin? = nil,
+        manualCategoryStorageValue: String? = nil
     ) {
         self.id = id
         self.kind = kind
@@ -740,13 +745,38 @@ public struct ClipboardEntry: Codable, Hashable, Identifiable, Sendable {
         self.isDesktopPinned = isDesktopPinned
         self.desktopPinnedOrder = desktopPinnedOrder
         self.origin = origin
+        self.manualCategoryStorageValue = manualCategoryStorageValue
     }
 
-    /// A password entry never renders its own value. Its text is stored
-    /// encrypted, and even once decrypted it is only ever written to the
-    /// pasteboard — the list, the search index and the detail card all see this
-    /// mask instead, so a shoulder-surfer cannot read a secret off the screen.
+    /// Persisted password entries default to a mask. Once the password category
+    /// is unlocked, the panel may create an ephemeral copy whose `text` is
+    /// plaintext for display; the stored model, search index and archive
+    /// snapshot remain encrypted or masked.
     public var isSecret: Bool { origin == .concealedPassword }
+
+    public var manualCategoryKey: ClipboardCategoryKey? {
+        manualCategoryStorageValue.flatMap(ClipboardCategoryKey.init(storageValue:))
+    }
+
+    /// Prevents manual choices that would make a row render with an incompatible
+    /// cell type. Text can move into or out of the password category (the store
+    /// performs the required encryption transition), while images stay within
+    /// image-style categories.
+    public func supportsManualCategory(_ key: ClipboardCategoryKey) -> Bool {
+        switch (kind, key) {
+        case (.text, .builtin(.text)),
+             (.text, .builtin(.code)),
+             (.text, .builtin(.link)),
+             (.text, .builtin(.password)),
+             (.text, .custom):
+            return true
+        case (.image, .builtin(.image)),
+             (.image, .builtin(.screenshot)):
+            return true
+        default:
+            return false
+        }
+    }
 
     public var previewText: String {
         if isSecret { return L10n.text("已隐藏的密码") }
@@ -757,6 +787,16 @@ public struct ClipboardEntry: Codable, Hashable, Identifiable, Sendable {
         case .image:
             return text?.isEmpty == false ? text! : L10n.text("图片")
         }
+    }
+
+    /// Produces a non-persisted value for the unlocked password UI. Passing nil
+    /// deliberately removes ciphertext so a failed decryption renders the
+    /// normal mask instead of exposing the encrypted envelope.
+    public func displayProjection(revealedSecret: String?) -> ClipboardEntry {
+        guard isSecret else { return self }
+        var projection = self
+        projection.text = revealedSecret
+        return projection
     }
 
     /// Code/link detection scans the whole text with several passes, and the
@@ -773,6 +813,7 @@ public struct ClipboardEntry: Codable, Hashable, Identifiable, Sendable {
 
     public var contentCategory: ClipboardContentCategory {
         if origin == .concealedPassword { return .password }
+        if case .builtin(let category) = manualCategoryKey { return category }
         if origin == .hedgeMemoScreenshot { return .screenshot }
         switch kind {
         case .image:
@@ -806,6 +847,9 @@ public struct ClipboardEntry: Codable, Hashable, Identifiable, Sendable {
     }
 
     public func matches(key: ClipboardCategoryKey?, customCategories: [CustomClipboardCategory] = []) -> Bool {
+        if let manualCategoryKey {
+            return key == nil || key == manualCategoryKey
+        }
         switch key {
         case nil:
             return true

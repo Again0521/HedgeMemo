@@ -27,6 +27,8 @@
 "全部" = "All";
 "自定义" = "Custom";
 "自定义分类" = "Custom Category";
+"手动分类" = "Move to Category";
+"自动分类" = "Automatic";
 "未分类" = "Uncategorized";
 "未命名" = "Untitled";
 "未知" = "Unknown";

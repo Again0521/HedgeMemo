@@ -352,6 +352,67 @@ final class StoreBehaviorTests: XCTestCase {
         XCTAssertEqual(reloaded.entries.first?.text, "持久化后的内容")
     }
 
+    func testManualCategoryMovesEntryPersistsAndCanReturnToAutomatic() {
+        let root = tempRoot("clip-manual-category")
+        let repository = ClipboardHistoryRepository(rootURL: root)
+        let store = ClipboardHistoryStore(repository: repository)
+        XCTAssertTrue(store.addText("let value = 1"))
+        let id = store.entries.first!.id
+
+        XCTAssertTrue(store.setManualCategory(id: id, key: .builtin(.text)))
+        XCTAssertTrue(store.orderedEntries(key: .builtin(.code)).isEmpty)
+        XCTAssertEqual(store.orderedEntries(key: .builtin(.text)).map(\.id), [id])
+
+        let reloaded = ClipboardHistoryStore(repository: repository)
+        XCTAssertEqual(reloaded.entries.first?.manualCategoryKey, .builtin(.text))
+        XCTAssertTrue(reloaded.setManualCategory(id: id, key: nil))
+        XCTAssertEqual(reloaded.orderedEntries(key: .builtin(.code)).map(\.id), [id])
+    }
+
+    func testManualCategoryStoreRejectsIncompatibleTarget() {
+        let store = makeClipboardStore()
+        XCTAssertTrue(store.addText("普通文字"))
+        let id = store.entries.first!.id
+
+        XCTAssertFalse(store.setManualCategory(id: id, key: .builtin(.image)))
+        XCTAssertNil(store.entries.first?.manualCategoryKey)
+    }
+
+    func testManualCategoryAppearsAfterTargetResultWasMemoized() {
+        let store = makeClipboardStore()
+        XCTAssertTrue(store.addText("let cached = true\nprint(cached)"))
+        let id = store.entries.first!.id
+        XCTAssertTrue(store.orderedEntries(key: .builtin(.text)).isEmpty)
+
+        XCTAssertTrue(store.setManualCategory(id: id, key: .builtin(.text)))
+
+        XCTAssertEqual(store.orderedEntries(key: .builtin(.text)).map(\.id), [id])
+    }
+
+    func testManualPasswordCategoryEncryptsAtRestAndCanMoveBackToText() throws {
+        let root = tempRoot("clip-manual-password")
+        let repository = ClipboardHistoryRepository(rootURL: root)
+        let store = ClipboardHistoryStore(repository: repository)
+        XCTAssertTrue(store.addText("manual secret"))
+        let id = store.entries.first!.id
+
+        XCTAssertTrue(store.setManualCategory(id: id, key: .builtin(.password)))
+        let protected = try XCTUnwrap(store.entries.first)
+        XCTAssertTrue(protected.isSecret)
+        XCTAssertTrue(SecretVault.isEncrypted(try XCTUnwrap(protected.text)))
+        XCTAssertNotEqual(protected.text, "manual secret")
+        XCTAssertEqual(store.orderedEntries(key: .builtin(.password)).map(\.id), [id])
+        XCTAssertTrue(store.orderedEntries(key: .builtin(.text)).isEmpty)
+
+        let reloaded = ClipboardHistoryStore(repository: repository)
+        XCTAssertTrue(reloaded.setManualCategory(id: id, key: .builtin(.text)))
+        let restored = try XCTUnwrap(reloaded.entries.first)
+        XCTAssertFalse(restored.isSecret)
+        XCTAssertEqual(restored.text, "manual secret")
+        XCTAssertEqual(reloaded.orderedEntries(key: .builtin(.text)).map(\.id), [id])
+        XCTAssertTrue(reloaded.orderedEntries(key: .builtin(.password)).isEmpty)
+    }
+
     func testSeedEntriesAppendInGivenOrderNewestFirst() {
         let store = makeClipboardStore()
         let now = Date()

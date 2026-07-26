@@ -190,6 +190,16 @@ public final class ClipboardHistoryStore: ObservableObject {
         return result
     }
 
+    /// Returns plaintext for an already-authorized UI projection without
+    /// changing the persisted entry. The caller owns the unlock check and must
+    /// discard the result as soon as the protected surface closes or re-locks.
+    public func plaintextForUnlockedDisplay(_ entry: ClipboardEntry) -> String? {
+        guard entry.isSecret, let ciphertext = entry.text else {
+            return nil
+        }
+        return try? SecretVault.decrypt(ciphertext)
+    }
+
     @discardableResult
     public func addText(_ text: String, sourceApp: String? = nil) -> Bool {
         let cleaned = text.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -470,18 +480,74 @@ public final class ClipboardHistoryStore: ObservableObject {
         persist()
     }
 
+    /// Applies or clears a user-selected category. The entry itself remains the
+    /// same persisted item. Moving text into or out of 密码 also converts its
+    /// persisted representation so that category never stores readable text.
+    @discardableResult
+    public func setManualCategory(id: UUID, key: ClipboardCategoryKey?) -> Bool {
+        guard let index = entries.firstIndex(where: { $0.id == id }) else { return false }
+        let original = entries[index]
+        if let key {
+            guard settings.isCategoryEnabled(key), original.supportsManualCategory(key) else {
+                return false
+            }
+            if case .custom(let customID) = key {
+                guard settings.customCategory(id: customID) != nil else { return false }
+            }
+        }
+
+        let movesToPassword = key == .builtin(.password)
+        let changesSecrecy = original.isSecret != movesToPassword && key != nil
+        guard original.manualCategoryKey != key || changesSecrecy else { return false }
+
+        var updated = original
+        if movesToPassword, !original.isSecret {
+            guard let plaintext = original.text,
+                  let ciphertext = try? SecretVault.encrypt(plaintext) else {
+                lastError = L10n.text("无法加密密码，已跳过记录。")
+                return false
+            }
+            updated.text = ciphertext
+            updated.origin = .concealedPassword
+        } else if original.isSecret, let key, key != .builtin(.password) {
+            guard let ciphertext = original.text,
+                  let plaintext = try? SecretVault.decrypt(ciphertext) else {
+                lastError = L10n.text("无法解密密码。")
+                return false
+            }
+            updated.text = plaintext
+            updated.origin = nil
+        }
+        updated.manualCategoryStorageValue = key?.storageValue
+        updated.updatedAt = .now
+        entries[index] = updated
+
+        // `@Published` announces in willSet. A SwiftUI subscriber can therefore
+        // ask for an already-memoized target category before `entries.didSet`
+        // clears the cache, then receive no later invalidation. Publish once
+        // more after both the new value and the cleared cache are observable.
+        objectWillChange.send()
+        persist()
+        return true
+    }
+
     @discardableResult
     public func copyToPasteboard(_ entry: ClipboardEntry, autoPaste: Bool = false) -> Bool {
         let pasteboard = NSPasteboard.general
         pasteboard.clearContents()
         switch entry.kind {
         case .text:
-            guard let text = entry.text else { return false }
             if entry.isSecret {
                 // Decrypt only at the moment of use, and re-declare the copy
                 // concealed so other clipboard managers (and our own monitor)
                 // treat it as a secret rather than as ordinary text.
-                guard let secret = try? SecretVault.decrypt(text) else {
+                // UI projections may carry plaintext for display after unlock;
+                // always resolve the original persisted ciphertext by ID so a
+                // copy action never depends on that transient projection.
+                guard let protectedText = entries.first(where: { $0.id == entry.id })?.text ?? entry.text else {
+                    return false
+                }
+                guard let secret = try? SecretVault.decrypt(protectedText) else {
                     lastError = L10n.text("无法解密密码。")
                     return false
                 }
@@ -491,6 +557,7 @@ public final class ClipboardHistoryStore: ObservableObject {
                 )
                 pasteboard.setString(secret, forType: .string)
             } else {
+                guard let text = entry.text else { return false }
                 pasteboard.setString(text, forType: .string)
             }
         case .image:

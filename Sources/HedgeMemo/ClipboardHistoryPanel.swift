@@ -820,11 +820,16 @@ private enum ClipboardShortcutHint {
     /// is the one worth surfacing. "编辑" only applies to text-kind entries
     /// (images have no editable text body), so it is omitted for images rather
     /// than shown as a dead shortcut.
-    static func text(kind: ClipboardEntryKind, isPinned: Bool, isDesktopPinned: Bool) -> String {
+    static func text(
+        kind: ClipboardEntryKind,
+        isSecret: Bool,
+        isPinned: Bool,
+        isDesktopPinned: Bool
+    ) -> String {
         let pin = L10n.text(isPinned ? "取消置顶" : "置顶")
         let desktop = L10n.text(isDesktopPinned ? "取消固定" : "固定桌面")
         var segments = [String]()
-        if kind == .text { segments.append(L10n.text("编辑：⌘E")) }
+        if kind == .text, !isSecret { segments.append(L10n.text("编辑：⌘E")) }
         segments.append(L10n.text("删除：⌫"))
         segments.append("\(pin)：⌘P")
         segments.append("\(desktop)：⌥P")
@@ -837,7 +842,9 @@ private enum ClipboardShortcutHint {
     /// The widest variant (a text entry, both toggles in their longer "cancel"
     /// wording); the card minimum width is sized to this so the hint never
     /// truncates. `editing` is always shorter, so it needs no floor of its own.
-    static var widest: String { text(kind: .text, isPinned: true, isDesktopPinned: true) }
+    static var widest: String {
+        text(kind: .text, isSecret: false, isPinned: true, isDesktopPinned: true)
+    }
 
     /// Matches the footer `Text`'s `.font(.system(size: 10))`, for measurement.
     static var font: NSFont { .systemFont(ofSize: 10) }
@@ -871,7 +878,12 @@ private struct ClipboardDetailCard: View {
             Text(
                 isEditing
                     ? ClipboardShortcutHint.editing
-                    : ClipboardShortcutHint.text(kind: entry.kind, isPinned: entry.isPinned, isDesktopPinned: entry.isDesktopPinned == true)
+                    : ClipboardShortcutHint.text(
+                        kind: entry.kind,
+                        isSecret: entry.isSecret,
+                        isPinned: entry.isPinned,
+                        isDesktopPinned: entry.isDesktopPinned == true
+                    )
             )
             .font(.system(size: 10))
             .foregroundStyle(.secondary)
@@ -1279,6 +1291,10 @@ struct ClipboardHistoryPanelView: View {
     /// cannot silently swap the preview out from under an unsaved draft.
     @State private var editingEntryID: UUID?
     @State private var editDraftText: String = ""
+    /// Plaintext exists only while the unlocked password category is visible.
+    /// It is view-local so locking, switching category, or closing the panel
+    /// can discard every revealed value in one operation.
+    @State private var revealedSecretTexts: [UUID: String] = [:]
     /// Drives the fade/scale-out that plays when an edit finishes, before the
     /// panel actually collapses. Without it the whole expanded preview vanishes
     /// in a single frame, which reads as a crash rather than a dismissal.
@@ -1319,7 +1335,13 @@ struct ClipboardHistoryPanelView: View {
     private var isActiveCategoryLocked: Bool { activeGate != .open }
     private var entries: [ClipboardEntry] {
         guard !isActiveCategoryLocked else { return [] }
-        return store.orderedEntries(query: query, key: activeKey)
+        let ordered = store.orderedEntries(query: query, key: activeKey)
+        guard activeKey == .builtin(.password) else { return ordered }
+        return ordered.map {
+            // Never fall back to stored ciphertext in the UI. If decryption
+            // failed or has not completed, `previewText` supplies the mask.
+            $0.displayProjection(revealedSecret: revealedSecretTexts[$0.id])
+        }
     }
     private var visibleEntries: [ClipboardEntry] {
         guard ClipboardPanelPagination.pageSize(for: activeKey) != nil else { return entries }
@@ -1438,6 +1460,7 @@ struct ClipboardHistoryPanelView: View {
         // actions remain available no matter which control has focus.
         .background(KeyCaptureView { event in handleKey(event) }.frame(width: 1, height: 1))
         .onAppear {
+            refreshRevealedSecrets()
             resetPagination()
             validateSelection()
             reportContentHeight()
@@ -1445,14 +1468,20 @@ struct ClipboardHistoryPanelView: View {
         }
         .onChange(of: query) { _, _ in selectionAndSizeChanged(resetPage: true) }
         .onChange(of: store.settings.lastCategory) { _, _ in selectionAndSizeChanged(resetPage: true) }
-        .onChange(of: activeKey.storageValue) { _, _ in selectionAndSizeChanged(resetPage: true) }
+        .onChange(of: activeKey.storageValue) { _, _ in
+            refreshRevealedSecrets()
+            selectionAndSizeChanged(resetPage: true)
+        }
         // Only the *gate* transition needs its own resize. A category switch is
         // already handled above; reacting to both fired two resizes for one
         // change, which is what made switching to 密码 flicker and judder.
-        .onChange(of: activeGate) { _, _ in reportContentHeight() }
+        .onChange(of: activeGate) { _, _ in protectedGateChanged() }
         // Opening a protected category counts as using it.
         .onChange(of: activeKey.storageValue) { _, _ in noteProtectedActivity() }
-        .onChange(of: store.entries) { _, _ in selectionAndSizeChanged(resetPage: false) }
+        .onChange(of: store.entries) { _, _ in
+            refreshRevealedSecrets()
+            selectionAndSizeChanged(resetPage: false)
+        }
         .onChange(of: visibleEntryLimit) { _, _ in
             DispatchQueue.main.async { reportContentHeight() }
         }
@@ -1461,7 +1490,10 @@ struct ClipboardHistoryPanelView: View {
         .onChange(of: detailPresentation.isVisible) { _, visible in
             if !visible { editorClosing = false }
         }
-        .onDisappear { cancelPendingPreview() }
+        .onDisappear {
+            cancelPendingPreview()
+            revealedSecretTexts.removeAll(keepingCapacity: false)
+        }
     }
 
     @ViewBuilder
@@ -1529,6 +1561,36 @@ struct ClipboardHistoryPanelView: View {
         // a detail slideout is visible.
         onDetailEntry(nil)
         DispatchQueue.main.async { reportContentHeight() }
+    }
+
+    private func refreshRevealedSecrets() {
+        guard activeKey == .builtin(.password), activeGate == .open else {
+            revealedSecretTexts.removeAll(keepingCapacity: false)
+            return
+        }
+        var revealed: [UUID: String] = [:]
+        for entry in store.orderedEntries(key: .builtin(.password)) where entry.isSecret {
+            if let plaintext = store.plaintextForUnlockedDisplay(entry) {
+                revealed[entry.id] = plaintext
+            }
+        }
+        revealedSecretTexts = revealed
+    }
+
+    private func protectedGateChanged() {
+        refreshRevealedSecrets()
+        if isActiveCategoryLocked {
+            // A preview retains the value it was given even after the list
+            // becomes empty. Tear it down before the next frame so plaintext
+            // cannot survive a re-lock in the slide-out card.
+            cancelPendingPreview()
+            hoveredID = nil
+            keyboardSelectedID = nil
+            editingEntryID = nil
+            editDraftText = ""
+            onDetailEntry(nil)
+        }
+        reportContentHeight()
     }
 
     /// Marks the unlocked session as in use while a protected category is being
@@ -1684,12 +1746,51 @@ struct ClipboardHistoryPanelView: View {
             }
             Divider()
         }
-        if entry.kind == .text {
+        if entry.kind == .text, !entry.isSecret {
             Button(L10n.text("编辑")) { beginEditing(entry) }
         }
+        Menu {
+            Button {
+                store.setManualCategory(id: entry.id, key: nil)
+            } label: {
+                categoryMenuLabel(
+                    title: L10n.text("自动分类"),
+                    selected: entry.manualCategoryKey == nil
+                )
+            }
+            Divider()
+            ForEach(manualCategoryTargets(for: entry), id: \.storageValue) { key in
+                Button {
+                    if store.setManualCategory(id: entry.id, key: key) {
+                        refreshRevealedSecrets()
+                    }
+                } label: {
+                    categoryMenuLabel(
+                        title: title(for: key),
+                        selected: entry.manualCategoryKey == key
+                    )
+                }
+            }
+        } label: {
+            Label(L10n.text("手动分类"), systemImage: "folder")
+        }
+        Divider()
         Button(L10n.text(entry.isPinned ? "取消置顶" : "置顶")) { store.togglePinned(id: entry.id) }
         Button(L10n.text(entry.isDesktopPinned == true ? "取消桌面固定" : "固定到桌面")) { onTogglePin(entry) }
         Button(L10n.text("删除"), role: .destructive) { delete(entry) }
+    }
+
+    private func manualCategoryTargets(for entry: ClipboardEntry) -> [ClipboardCategoryKey] {
+        store.settings.enabledCategoryKeys.filter { entry.supportsManualCategory($0) }
+    }
+
+    @ViewBuilder
+    private func categoryMenuLabel(title: String, selected: Bool) -> some View {
+        if selected {
+            Label(title, systemImage: "checkmark")
+        } else {
+            Text(title)
+        }
     }
 
     private func validateSelection() {
@@ -1754,9 +1855,11 @@ struct ClipboardHistoryPanelView: View {
 
     // MARK: - Editing
 
-    /// Only text-kind entries can be edited (images have no text body); this
-    /// is enforced by every caller (the ⌘E handler, the context menu item).
+    /// Only non-secret text entries can be edited. Password values are revealed
+    /// for reading/copying after unlock but remain immutable ciphertext in the
+    /// history store.
     private func beginEditing(_ entry: ClipboardEntry) {
+        guard entry.kind == .text, !entry.isSecret else { return }
         cancelPendingPreview()
         // Route the selection through the keyboard slot instead of hover, so
         // the pointer leaving this row can never trigger the hover-exit path
@@ -1858,7 +1961,8 @@ struct ClipboardHistoryPanelView: View {
         // ⌘E enters editing for the active text entry. Images have no text
         // body, so the shortcut simply falls through and does nothing for them.
         if flags.contains(.command), event.charactersIgnoringModifiers?.lowercased() == "e",
-           let entry = entries.first(where: { $0.id == activeSelectionID }), entry.kind == .text {
+           let entry = entries.first(where: { $0.id == activeSelectionID }),
+           entry.kind == .text, !entry.isSecret {
             beginEditing(entry)
             return true
         }

@@ -136,6 +136,44 @@ final class ClipboardHistoryPolicyTests: XCTestCase {
         XCTAssertEqual(filtered.map(\.id), [link.id])
     }
 
+    func testManualBuiltinCategoryOverridesAutomaticClassification() {
+        var code = Fixture.text("let answer = 42", hash: "manual-code")
+        XCTAssertEqual(code.contentCategory, .code)
+
+        code.manualCategoryStorageValue = ClipboardCategoryKey.builtin(.text).storageValue
+
+        XCTAssertEqual(code.contentCategory, .text)
+        XCTAssertTrue(code.matches(key: .builtin(.text)))
+        XCTAssertFalse(code.matches(key: .builtin(.code)))
+    }
+
+    func testManualCustomCategoryIsExclusiveAndDoesNotRequireRegexMatch() {
+        let custom = CustomClipboardCategory(name: "工作", pattern: "^WORK-")
+        var entry = Fixture.text("普通备忘", hash: "manual-custom")
+        entry.manualCategoryStorageValue = ClipboardCategoryKey.custom(custom.id).storageValue
+
+        XCTAssertTrue(entry.matches(key: .custom(custom.id), customCategories: [custom]))
+        XCTAssertFalse(entry.matches(key: .builtin(.text), customCategories: [custom]))
+
+        entry.manualCategoryStorageValue = nil
+        XCTAssertFalse(entry.matches(key: .custom(custom.id), customCategories: [custom]))
+        XCTAssertTrue(entry.matches(key: .builtin(.text), customCategories: [custom]))
+    }
+
+    func testManualCategoryAllowsPasswordForTextButRejectsIncompatibleKinds() {
+        let text = Fixture.text("普通文字", hash: "manual-text")
+        let image = Fixture.image(hash: "manual-image")
+        let secret = Fixture.text("ciphertext", hash: "manual-secret", origin: .concealedPassword)
+
+        XCTAssertTrue(text.supportsManualCategory(.builtin(.code)))
+        XCTAssertTrue(text.supportsManualCategory(.builtin(.password)))
+        XCTAssertFalse(text.supportsManualCategory(.builtin(.image)))
+        XCTAssertTrue(image.supportsManualCategory(.builtin(.screenshot)))
+        XCTAssertFalse(image.supportsManualCategory(.builtin(.link)))
+        XCTAssertFalse(image.supportsManualCategory(.builtin(.password)))
+        XCTAssertTrue(secret.supportsManualCategory(.builtin(.text)))
+    }
+
     func testQueryFilterIsCaseInsensitive() {
         let entry = Fixture.text("发票报销 Invoice", hash: "q")
         XCTAssertTrue(entry.matches(query: "报销"))
