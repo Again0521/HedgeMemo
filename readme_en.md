@@ -37,6 +37,7 @@ HedgeMemo keeps copied text, code, links, and images, then places them in the ri
 - Add clipboard images directly to the meme library. Screenshots captured by HedgeMemo remain in their own Screenshots category.
 - Read code with syntax highlighting and choose the color theme you prefer.
 - Turn categories on or off, rearrange them, or create custom text categories with regular expressions.
+- Choose which apps may add items to history with an allowlist or blocklist in Settings.
 - Pause over an item to see its full contents, source, and capture time.
 
 Add `%` to a search to find several fragments in order, even when they are separated in the original content. Once you find the item, press <kbd>⏎</kbd> or click it to copy again.

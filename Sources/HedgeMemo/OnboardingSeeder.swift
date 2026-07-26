@@ -70,7 +70,9 @@ enum OnboardingSeeder {
                 text: line,
                 contentHash: Data(line.utf8).clipboardContentHash,
                 createdAt: now.addingTimeInterval(-Double(index)),
-                sourceApp: "HedgeMemo"
+                sourceApp: ClipboardSourceApplication.hedgeMemo.displayName,
+                sourceBundleIdentifier: ClipboardSourceApplication.hedgeMemo.bundleIdentifier,
+                sourceBundleURLPath: ClipboardSourceApplication.hedgeMemo.bundleURLPath
             )
         }
         store.addSeedEntries(entries)
