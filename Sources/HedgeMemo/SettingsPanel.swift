@@ -238,11 +238,10 @@ struct SettingsPanelView: View {
         clipboardSection
         codeAppearanceSection
         categorySection
-        securitySection
     }
 
-    /// PIN lock lives with the clipboard because that is the only content it
-    /// protects today.
+    /// The lock spans the clipboard's 密码 category and the meme panel, so it
+    /// belongs in 通用 rather than inside any one feature's pane.
     private var securitySection: some View {
         SettingsSection(
             title: L10n.text("安全"),
@@ -305,7 +304,12 @@ struct SettingsPanelView: View {
                         ForEach(lockableCategoryKeys, id: \.storageValue) { key in
                             Toggle(categoryDisplayName(key), isOn: lockedCategoryBinding(key))
                                 .toggleStyle(.checkbox)
+                                // 密码 holds nothing but secrets, so its gate is
+                                // not optional and the row is shown fixed on.
+                                .disabled(key == .builtin(.password))
                         }
+                        Toggle(L10n.text("表情包面板"), isOn: memePanelLockedBinding)
+                            .toggleStyle(.checkbox)
                     }
                     .padding(.vertical, 4)
                 }
@@ -333,6 +337,13 @@ struct SettingsPanelView: View {
         Binding(
             get: { lockStore.settings.lockedCategoryKeys.contains(key.storageValue) },
             set: { lockStore.settings.setCategory(key, locked: $0) }
+        )
+    }
+
+    private var memePanelLockedBinding: Binding<Bool> {
+        Binding(
+            get: { lockStore.settings.lockedCategoryKeys.contains(AppLockSettings.memePanelStorageKey) },
+            set: { lockStore.settings.setMemePanelLocked($0) }
         )
     }
 
@@ -391,6 +402,7 @@ struct SettingsPanelView: View {
     @ViewBuilder
     private var generalTab: some View {
         languageSection
+        securitySection
         appearanceSection
         startupSection
         updateSection

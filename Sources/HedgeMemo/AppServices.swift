@@ -52,6 +52,11 @@ final class AppServices: ObservableObject {
             self?.clipboardStore.suppressCurrentPasteboardChange()
         }
         updateCheckStore.checkAutomaticallyIfNeeded()
+        // Resolve Touch ID availability once, at launch, far away from any
+        // SwiftUI update. Probing it from inside a view body installs
+        // LocalAuthentication's remote view mid-render, which crashed the app
+        // as the Settings window was ordered on screen.
+        BiometricAuthenticator.prepare()
         // The capture path needs to know whether concealed copies are wanted,
         // without the history store having to depend on the lock store.
         clipboardStore.capturesPasswords = lockStore.settings.capturesPasswords

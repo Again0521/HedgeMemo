@@ -1293,7 +1293,8 @@ struct ClipboardHistoryPanelView: View {
     /// True while the active category requires unlocking. Everything downstream
     /// (`entries`, the height math, ⌘1–9, Return) reads an empty list in this
     /// state, so a locked category cannot leak rows through any path.
-    private var isActiveCategoryLocked: Bool { lockStore.isCategoryLocked(activeKey) }
+    private var activeGate: AppLockStore.GateState { lockStore.gateState(forCategory: activeKey) }
+    private var isActiveCategoryLocked: Bool { activeGate != .open }
     private var entries: [ClipboardEntry] {
         guard !isActiveCategoryLocked else { return [] }
         return store.orderedEntries(query: query, key: activeKey)
@@ -1371,7 +1372,11 @@ struct ClipboardHistoryPanelView: View {
             categoryBar
                 .frame(height: ClipboardPanelLayout.segmentedHeight)
             if isActiveCategoryLocked {
-                PINUnlockView(lockStore: lockStore, categoryName: title(for: activeKey))
+                PINGateView(lockStore: lockStore, gate: activeGate, surfaceName: title(for: activeKey))
+                    // A fixed height: the gate is a panel state, not a list, so
+                    // without this the content grows the card and pushes the
+                    // search field and category bar off the top of the window.
+                    .frame(height: ClipboardPanelLayout.lockedStateHeight)
             } else {
             ScrollViewReader { proxy in
                 ScrollView {
@@ -1414,6 +1419,9 @@ struct ClipboardHistoryPanelView: View {
         .onChange(of: query) { _, _ in selectionAndSizeChanged(resetPage: true) }
         .onChange(of: store.settings.lastCategory) { _, _ in selectionAndSizeChanged(resetPage: true) }
         .onChange(of: activeKey.storageValue) { _, _ in selectionAndSizeChanged(resetPage: true) }
+        // Unlocking swaps the gate out for the real list, which is a different
+        // height; without this the panel keeps the gate's size.
+        .onChange(of: isActiveCategoryLocked) { _, _ in selectionAndSizeChanged(resetPage: true) }
         .onChange(of: store.entries) { _, _ in selectionAndSizeChanged(resetPage: false) }
         .onChange(of: visibleEntryLimit) { _, _ in
             DispatchQueue.main.async { reportContentHeight() }
@@ -1497,6 +1505,10 @@ struct ClipboardHistoryPanelView: View {
         // One page is deliberately much taller than the panel's maximum viewport,
         // so using the rendered prefix yields the same clamped window size without
         // scanning every long code value solely for height arithmetic.
+        guard !isActiveCategoryLocked else {
+            onContentChange(ClipboardPanelLayout.lockedStateHeight)
+            return
+        }
         onContentChange(ClipboardPanelLayout.contentHeight(for: visibleEntries, key: activeKey))
     }
 

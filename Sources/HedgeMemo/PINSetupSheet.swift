@@ -1,8 +1,8 @@
 import HedgeMemoCore
 import SwiftUI
 
-/// Creates or replaces the PIN. Requires the same value twice so a typo cannot
-/// silently lock the user out of their own locked categories.
+/// Creates or replaces the PIN from Settings. Requires the same four digits
+/// twice so a typo cannot silently lock the user out of their own content.
 struct PINSetupSheet: View {
     @ObservedObject var lockStore: AppLockStore
     /// Called with true once a PIN exists, so the caller can enable the lock in
@@ -12,21 +12,28 @@ struct PINSetupSheet: View {
     @State private var pin = ""
     @State private var confirmation = ""
     @State private var errorMessage: String?
+    @FocusState private var pinFocused: Bool
+    @FocusState private var confirmFocused: Bool
     @Environment(\.dismiss) private var dismiss
 
-    private static let minimumLength = 4
-
     private var canSave: Bool {
-        pin.count >= Self.minimumLength && pin == confirmation
+        pin.count == PINPolicy.length && pin == confirmation
     }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 14) {
+        VStack(spacing: 12) {
             Text(L10n.text(lockStore.hasPIN ? "修改 PIN 码…" : "设置 PIN 码…"))
                 .font(.headline)
 
-            SecureField(L10n.text("新建 PIN 码"), text: $pin)
-            SecureField(L10n.text("确认 PIN 码"), text: $confirmation)
+            Text(L10n.text("新建 PIN 码"))
+                .font(.system(size: 11))
+                .foregroundStyle(.secondary)
+            PINDotsField(pin: $pin, isFocused: $pinFocused) { confirmFocused = true }
+
+            Text(L10n.text("确认 PIN 码"))
+                .font(.system(size: 11))
+                .foregroundStyle(.secondary)
+            PINDotsField(pin: $confirmation, isFocused: $confirmFocused) { save() }
 
             if let errorMessage {
                 Label(errorMessage, systemImage: "exclamationmark.triangle")
@@ -37,6 +44,7 @@ struct PINSetupSheet: View {
             Text(L10n.text("密码内容会加密保存，仅在复制时解密；列表中始终以隐藏形式显示。"))
                 .font(.caption)
                 .foregroundStyle(.secondary)
+                .multilineTextAlignment(.center)
                 .fixedSize(horizontal: false, vertical: true)
 
             HStack {
@@ -52,17 +60,20 @@ struct PINSetupSheet: View {
         }
         .padding(20)
         .frame(width: 320)
+        .onAppear { pinFocused = true }
         .onChange(of: pin) { _, _ in errorMessage = nil }
         .onChange(of: confirmation) { _, _ in errorMessage = nil }
     }
 
     private func save() {
-        guard pin.count >= Self.minimumLength else {
-            errorMessage = L10n.text("PIN 码至少 4 位")
+        guard pin.count == PINPolicy.length else {
+            errorMessage = L10n.text("PIN 码需为 4 位数字")
             return
         }
         guard pin == confirmation else {
             errorMessage = L10n.text("两次输入的 PIN 码不一致")
+            confirmation = ""
+            confirmFocused = true
             return
         }
         do {

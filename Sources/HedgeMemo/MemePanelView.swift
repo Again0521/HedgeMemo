@@ -13,6 +13,7 @@ private final class MemeScrollMetrics {
 
 struct MemePanelView: View {
     @ObservedObject var store: MemeStore
+    @ObservedObject var lockStore: AppLockStore
     var onDismiss: () -> Void = {}
     @State private var query = ""
     @State private var isManaging = false
@@ -47,6 +48,21 @@ struct MemePanelView: View {
     private var gridHeight: CGFloat { tileSide * 3 + tileSpacing * 2 + 4 }
 
     var body: some View {
+        // The whole panel is gated, not just the grid: a locked meme library
+        // must not leak its categories or item count either.
+        if lockStore.memePanelGateState != .open {
+            PINGateView(
+                lockStore: lockStore,
+                gate: lockStore.memePanelGateState,
+                surfaceName: L10n.text("表情包面板")
+            )
+            .frame(width: 420, height: 300)
+        } else {
+            unlockedBody
+        }
+    }
+
+    private var unlockedBody: some View {
         VStack(spacing: 10) {
             header
             CategoryBarView(

@@ -110,6 +110,7 @@ final class StatusItemController: NSObject {
             rootView: LanguageSurface {
                 MemePanelView(
                     store: services.memeStore,
+                    lockStore: services.lockStore,
                     onDismiss: { [weak self] in self?.popover.performClose(nil) }
                 )
             }
@@ -196,6 +197,7 @@ final class StatusItemController: NSObject {
         PanelMaterialHost.replace(
             MemePanelView(
                 store: services.memeStore,
+                lockStore: services.lockStore,
                 onDismiss: { [weak self] in self?.hideKeyboardMemePanel() }
             ),
             in: root

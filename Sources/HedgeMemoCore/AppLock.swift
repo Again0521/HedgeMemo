@@ -66,11 +66,28 @@ public struct AppLockSettings: Codable, Equatable, Sendable {
     }
 
     public mutating func setCategory(_ key: ClipboardCategoryKey, locked: Bool) {
+        setLocked(key.storageValue, locked)
+    }
+
+    /// The meme panel is a lockable surface too, but it is not a clipboard
+    /// category, so it gets a reserved storage value that can never collide with
+    /// a built-in name or a `custom:<uuid>` key.
+    public static let memePanelStorageKey = "panel:meme"
+
+    public var locksMemePanel: Bool {
+        isEnabled && lockedCategoryKeys.contains(Self.memePanelStorageKey)
+    }
+
+    public mutating func setMemePanelLocked(_ locked: Bool) {
+        setLocked(Self.memePanelStorageKey, locked)
+    }
+
+    private mutating func setLocked(_ storageValue: String, _ locked: Bool) {
         if locked {
-            guard !lockedCategoryKeys.contains(key.storageValue) else { return }
-            lockedCategoryKeys.append(key.storageValue)
+            guard !lockedCategoryKeys.contains(storageValue) else { return }
+            lockedCategoryKeys.append(storageValue)
         } else {
-            lockedCategoryKeys.removeAll { $0 == key.storageValue }
+            lockedCategoryKeys.removeAll { $0 == storageValue }
         }
     }
 }

@@ -47,19 +47,54 @@ public final class AppLockStore: ObservableObject {
 
     public var hasPIN: Bool { SecretVault.hasPIN }
 
+    /// What a protected surface should show right now.
+    public enum GateState: Equatable, Sendable {
+        /// Not protected, or already unlocked for this session.
+        case open
+        /// Protected but no PIN exists yet — first entry is where one is created.
+        case needsSetup
+        case needsUnlock
+    }
+
+    /// Whether the current unlock session is still valid. Deliberately
+    /// independent of `settings.isEnabled`, because the 密码 category is gated
+    /// even before the user has switched the lock on for anything else.
+    private var isSessionUnlocked: Bool {
+        guard let unlockedAt else { return false }
+        switch settings.timing {
+        case .onPanelClose, .onSleepOrQuit:
+            return true
+        case .afterIdle:
+            let reference = lastUsedAt ?? unlockedAt
+            return Date.now.timeIntervalSince(reference) < Double(settings.idleMinutes) * 60
+        }
+    }
+
     /// True when locked content should be withheld right now.
     public var isLocked: Bool {
         guard settings.isEnabled else { return false }
-        return !AppLockPolicy.remainsUnlocked(
-            settings: settings,
-            unlockedAt: unlockedAt,
-            lastUsedAt: lastUsedAt,
-            now: .now
-        )
+        return !isSessionUnlocked
+    }
+
+    /// The 密码 category always requires the gate — it holds nothing but
+    /// secrets, so protecting it is not something the user has to remember to
+    /// switch on. Every other surface is protected only when configured.
+    public func gateState(forCategory key: ClipboardCategoryKey) -> GateState {
+        gate(isProtected: key == .builtin(.password) || settings.isCategoryLocked(key))
+    }
+
+    public var memePanelGateState: GateState {
+        gate(isProtected: settings.locksMemePanel)
+    }
+
+    private func gate(isProtected: Bool) -> GateState {
+        guard isProtected else { return .open }
+        if isSessionUnlocked { return .open }
+        return SecretVault.hasPIN ? .needsUnlock : .needsSetup
     }
 
     public func isCategoryLocked(_ key: ClipboardCategoryKey) -> Bool {
-        settings.isCategoryLocked(key) && isLocked
+        gateState(forCategory: key) != .open
     }
 
     // MARK: - PIN lifecycle

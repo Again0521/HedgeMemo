@@ -24,6 +24,11 @@ public enum ClipboardPanelLayout {
     public static let imageColumns = 3
     public static let imageCellSpacing: CGFloat = 8
     public static let emptyStateHeight: CGFloat = 150
+    /// Height reserved for the PIN unlock / first-run PIN setup screen. It is a
+    /// fixed panel state rather than a list, so the panel must size to it
+    /// explicitly — otherwise the unlock content grows the card and pushes the
+    /// search field and category bar up off the top of the window.
+    public static let lockedStateHeight: CGFloat = 208
 
     /// Chrome above the scrolling content: paddings, search field, category switcher.
     public static var chromeHeight: CGFloat {
