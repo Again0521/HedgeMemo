@@ -139,6 +139,7 @@ struct SettingsPanelView: View {
     let hotKeyWarnings: [String]
     @State private var accessibilityTrusted = AXIsProcessTrusted()
     @State private var customDraft: CustomCategoryDraft?
+    @State private var customCategoryError: String?
     @State private var selectedTab: SettingsTab = .clipboard
     @State private var isSettingPIN = false
     @State private var isVerifyingPIN = false
@@ -168,7 +169,12 @@ struct SettingsPanelView: View {
             biometricsAvailable = BiometricAuthenticator.isAvailable
         }
         .sheet(item: $customDraft) { draft in
-            CustomCategoryEditorSheet(draft: draft) { saveCustomCategory($0) }
+            CustomCategoryEditorSheet(
+                draft: draft,
+                recentApplications: recentSourceApplications
+            ) {
+                saveCustomCategory($0)
+            }
         }
         .sheet(isPresented: $isSettingPIN) {
             // Nothing to enable afterwards: a surface is locked purely by being
@@ -177,6 +183,17 @@ struct SettingsPanelView: View {
         }
         .sheet(isPresented: $isVerifyingPIN) {
             PINVerifySheet(lockStore: lockStore)
+        }
+        .alert(
+            L10n.text("无法保存分类"),
+            isPresented: Binding(
+                get: { customCategoryError != nil },
+                set: { if !$0 { customCategoryError = nil } }
+            )
+        ) {
+            Button(L10n.text("好")) { customCategoryError = nil }
+        } message: {
+            Text(customCategoryError ?? "")
         }
     }
 
@@ -542,7 +559,7 @@ struct SettingsPanelView: View {
     }
 
     private var categorySection: some View {
-        SettingsSection(title: L10n.text("剪贴板分类"), footer: L10n.text("自定义分类按正则表达式筛选文本条目。")) {
+        SettingsSection(title: L10n.text("剪贴板分类"), footer: L10n.text("自定义分类可组合内容、来源应用和内容类型等条件。")) {
             let keys = clipboardStore.settings.orderedCategoryKeys
             ForEach(Array(keys.enumerated()), id: \.element.storageValue) { index, key in
                 SettingsRow { categoryRow(key: key, index: index, total: keys.count) }
@@ -591,8 +608,8 @@ struct SettingsPanelView: View {
             case .custom(let id):
                 let custom = clipboardStore.settings.customCategory(id: id)
                 categoryLabel(title: custom?.name ?? L10n.text("自定义"), systemImage: "tag")
-                if let pattern = custom?.pattern {
-                    Text(pattern)
+                if let custom {
+                    Text(ruleSummary(for: custom))
                         .font(.system(size: 10, design: .monospaced))
                         .foregroundStyle(.secondary)
                         .lineLimit(1)
@@ -650,7 +667,35 @@ struct SettingsPanelView: View {
         clipboardStore.settings.categoryOrder = order.map(\.storageValue)
     }
 
-    private func saveCustomCategory(_ category: CustomClipboardCategory) {
+    private func ruleSummary(for category: CustomClipboardCategory) -> String {
+        let rules = category.effectiveRules
+        guard let first = rules.first else { return L10n.text("未设置条件") }
+        let value = first.displayValue ?? first.value
+        let prefix = first.isNegated ? L10n.text("排除") + " " : ""
+        let firstSummary = "\(prefix)\(first.kind.displayName): \(value)"
+        guard rules.count > 1 else { return firstSummary }
+        return L10n.format("%@，另有 %d 条", firstSummary, rules.count - 1)
+    }
+
+    private var recentSourceApplications: [ClipboardSourceApplication] {
+        var seen = Set<String>()
+        return clipboardStore.entries
+            .compactMap(\.sourceApplication)
+            .filter { seen.insert($0.stableIdentifier).inserted }
+            .prefix(20)
+            .map { $0 }
+    }
+
+    @discardableResult
+    private func saveCustomCategory(_ category: CustomClipboardCategory) -> Bool {
+        var category = category
+        category.name = category.name.trimmingCharacters(in: .whitespacesAndNewlines)
+        do {
+            try category.validate()
+        } catch {
+            customCategoryError = error.localizedDescription
+            return false
+        }
         var customs = clipboardStore.settings.customCategories ?? []
         if let index = customs.firstIndex(where: { $0.id == category.id }) {
             customs[index] = category
@@ -658,6 +703,7 @@ struct SettingsPanelView: View {
             customs.append(category)
         }
         clipboardStore.settings.customCategories = customs
+        return true
     }
 
     private func deleteCustomCategory(id: UUID) {
@@ -1145,36 +1191,53 @@ struct SettingsDivider: View {
 struct CustomCategoryDraft: Identifiable {
     let id: UUID
     var name: String
-    var pattern: String
+    var matchMode: ClipboardRuleMatchMode
+    var rules: [ClipboardClassificationRule]
     let isNew: Bool
 
     init() {
         id = UUID()
         name = ""
-        pattern = ""
+        matchMode = .all
+        rules = [ClipboardClassificationRule(kind: .contains)]
         isNew = true
     }
 
     init(category: CustomClipboardCategory) {
         id = category.id
         name = category.name
-        pattern = category.pattern
+        matchMode = category.resolvedMatchMode
+        rules = category.effectiveRules
         isNew = false
     }
 }
 
 private struct CustomCategoryEditorSheet: View {
     @State var draft: CustomCategoryDraft
-    let onSave: (CustomClipboardCategory) -> Void
+    let recentApplications: [ClipboardSourceApplication]
+    let onSave: (CustomClipboardCategory) -> Bool
     @Environment(\.dismiss) private var dismiss
 
     private var category: CustomClipboardCategory {
-        CustomClipboardCategory(id: draft.id, name: draft.name, pattern: draft.pattern)
+        CustomClipboardCategory(
+            id: draft.id,
+            name: draft.name,
+            matchMode: draft.matchMode,
+            rules: draft.rules
+        )
     }
 
-    private var isPatternValid: Bool { category.isPatternValid }
+    private var validationError: String? {
+        do {
+            try category.validate()
+            return nil
+        } catch {
+            return error.localizedDescription
+        }
+    }
+
     private var canSave: Bool {
-        !draft.name.trimmingCharacters(in: .whitespaces).isEmpty && isPatternValid
+        !draft.name.trimmingCharacters(in: .whitespaces).isEmpty && validationError == nil
     }
 
     var body: some View {
@@ -1182,10 +1245,42 @@ private struct CustomCategoryEditorSheet: View {
             Text(L10n.text(draft.isNew ? "新建自定义分类" : "编辑自定义分类"))
                 .font(.headline)
             TextField(L10n.text("分类名称"), text: $draft.name)
-            TextField(L10n.text("正则表达式，例如 ^\\d{6}$"), text: $draft.pattern)
-                .font(.system(size: 12, design: .monospaced))
-            if !draft.pattern.isEmpty && !isPatternValid {
-                Label(L10n.text("正则表达式无效"), systemImage: "exclamationmark.triangle")
+
+            Picker(L10n.text("匹配方式"), selection: $draft.matchMode) {
+                ForEach(ClipboardRuleMatchMode.allCases, id: \.self) { mode in
+                    Text(mode.displayName).tag(mode)
+                }
+            }
+            .pickerStyle(.segmented)
+
+            ScrollView {
+                VStack(spacing: 8) {
+                    ForEach($draft.rules) { $rule in
+                        classificationRuleRow(rule: $rule)
+                    }
+                }
+            }
+            .frame(maxHeight: 340)
+
+            HStack {
+                Menu {
+                    ForEach(ClipboardClassificationRuleKind.allCases, id: \.self) { kind in
+                        Button(kind.displayName) {
+                            draft.rules.append(defaultRule(kind))
+                        }
+                    }
+                } label: {
+                    Label(L10n.text("添加条件"), systemImage: "plus")
+                }
+                .disabled(draft.rules.count >= 8)
+                Spacer()
+                Text(L10n.format("%d / 8 条条件", draft.rules.count))
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+
+            if let validationError {
+                Label(validationError, systemImage: "exclamationmark.triangle")
                     .font(.caption)
                     .foregroundStyle(.orange)
             }
@@ -1193,15 +1288,124 @@ private struct CustomCategoryEditorSheet: View {
                 Spacer()
                 Button(L10n.text("取消")) { dismiss() }
                 Button(L10n.text("保存")) {
-                    onSave(category)
-                    dismiss()
+                    if onSave(category) { dismiss() }
                 }
                 .keyboardShortcut(.defaultAction)
                 .disabled(!canSave)
             }
         }
         .padding(20)
-        .frame(width: 320)
+        .frame(width: 560)
+    }
+
+    @ViewBuilder
+    private func classificationRuleRow(
+        rule: Binding<ClipboardClassificationRule>
+    ) -> some View {
+        HStack(spacing: 8) {
+            Toggle(L10n.text("排除"), isOn: rule.isNegated)
+                .toggleStyle(.checkbox)
+                .labelsHidden()
+                .help(L10n.text("排除满足此条件的条目"))
+
+            Picker(L10n.text("条件"), selection: rule.kind) {
+                ForEach(ClipboardClassificationRuleKind.allCases, id: \.self) { kind in
+                    Text(kind.displayName).tag(kind)
+                }
+            }
+            .labelsHidden()
+            .frame(width: 118)
+            .onChange(of: rule.wrappedValue.kind) { _, kind in
+                let replacement = defaultRule(kind)
+                rule.wrappedValue.value = replacement.value
+                rule.wrappedValue.displayValue = nil
+                rule.wrappedValue.isCaseSensitive = false
+            }
+
+            ruleValueEditor(rule: rule)
+
+            if [.contains, .startsWith, .endsWith, .regularExpression]
+                .contains(rule.wrappedValue.kind) {
+                Toggle(L10n.text("区分大小写"), isOn: rule.isCaseSensitive)
+                    .toggleStyle(.checkbox)
+                    .help(L10n.text("区分大小写"))
+            }
+
+            Button {
+                draft.rules.removeAll { $0.id == rule.wrappedValue.id }
+            } label: {
+                Image(systemName: "minus.circle")
+            }
+            .buttonStyle(.plain)
+            .foregroundStyle(.secondary)
+            .help(L10n.text("删除条件"))
+        }
+        .padding(8)
+        .background(.quaternary.opacity(0.7), in: RoundedRectangle(cornerRadius: 8))
+    }
+
+    @ViewBuilder
+    private func ruleValueEditor(
+        rule: Binding<ClipboardClassificationRule>
+    ) -> some View {
+        switch rule.wrappedValue.kind {
+        case .contentType:
+            Picker(L10n.text("内容类型"), selection: rule.value) {
+                ForEach(
+                    ClipboardContentCategory.allCases.filter { $0 != .password },
+                    id: \.rawValue
+                ) { category in
+                    Text(category.displayName).tag(category.rawValue)
+                }
+            }
+            .labelsHidden()
+            .frame(maxWidth: .infinity)
+        case .sourceApplication:
+            HStack(spacing: 4) {
+                TextField(
+                    L10n.text("应用名称或 Bundle ID"),
+                    text: Binding(
+                        get: { rule.wrappedValue.value },
+                        set: {
+                            rule.wrappedValue.value = $0
+                            rule.wrappedValue.displayValue = nil
+                        }
+                    )
+                )
+                if !recentApplications.isEmpty {
+                    Menu {
+                        ForEach(recentApplications) { application in
+                            Button(application.displayName) {
+                                rule.wrappedValue.value = application.bundleIdentifier
+                                    ?? application.stableIdentifier
+                                rule.wrappedValue.displayValue = application.displayName
+                            }
+                        }
+                    } label: {
+                        Image(systemName: "app.badge")
+                    }
+                    .menuStyle(.borderlessButton)
+                    .fixedSize()
+                }
+            }
+            .frame(maxWidth: .infinity)
+        case .regularExpression:
+            TextField(L10n.text("正则表达式，例如 ^\\d{6}$"), text: rule.value)
+                .font(.system(size: 11, design: .monospaced))
+                .frame(maxWidth: .infinity)
+        case .contains, .startsWith, .endsWith:
+            TextField(L10n.text("匹配内容"), text: rule.value)
+                .frame(maxWidth: .infinity)
+        }
+    }
+
+    private func defaultRule(
+        _ kind: ClipboardClassificationRuleKind
+    ) -> ClipboardClassificationRule {
+        ClipboardClassificationRule(
+            kind: kind,
+            value: kind == .contentType ? ClipboardContentCategory.text.rawValue : ""
+        )
     }
 }
 

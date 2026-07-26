@@ -255,7 +255,10 @@ final class ClipboardHistoryPanelController: NSObject, NSWindowDelegate {
         if lockStore.isCategoryLocked(key) {
             initialContentHeight = ClipboardPanelLayout.lockedStateHeight
         } else {
-            let ordered = store.orderedEntries(key: key)
+            let ordered = store.orderedEntries(
+                key: key,
+                advancedOptions: store.settings.resolvedAdvancedOptions
+            )
             let pageLimit = ClipboardPanelPagination.initialLimit(for: key)
             let heightEntries = Array(ordered.prefix(min(pageLimit, ordered.count)))
             initialContentHeight = ClipboardPanelLayout.contentHeight(for: heightEntries, key: key)
@@ -404,7 +407,8 @@ final class ClipboardHistoryPanelController: NSObject, NSWindowDelegate {
         let visibleFrame = activeScreen?.visibleFrame ?? NSRect(x: 0, y: 0, width: 900, height: 700)
         let height = ClipboardPanelLayout.panelHeight(
             contentHeight: contentHeight,
-            availableHeight: visibleFrame.height - panelInset * 2
+            availableHeight: visibleFrame.height - panelInset * 2,
+            advancedMode: store.settings.resolvedAdvancedModeEnabled
         )
         let currentMainFrame = mainScreenFrame.isEmpty ? panel.frame : mainScreenFrame
         var frame = currentMainFrame
@@ -677,6 +681,43 @@ final class ClipboardHistoryPanelController: NSObject, NSWindowDelegate {
             let entries = self.store.orderedEntries(key: .builtin(.text))
             if entries.count > 20 { self.updateDetail(entry: entries[20]) }
         }
+    }
+
+    /// Deterministic visual fixture for the advanced category-row controls.
+    /// Preview injection disables persistence, so this never changes the
+    /// user's history or saved filter choices.
+    func previewAdvancedMode() {
+        let safari = ClipboardSourceApplication(
+            bundleIdentifier: "com.apple.Safari",
+            displayName: "Safari"
+        )
+        let notes = ClipboardSourceApplication(
+            bundleIdentifier: "com.apple.Notes",
+            displayName: "Notes"
+        )
+        let now = Date()
+        let fakes = (0..<14).map { index in
+            let source = index.isMultiple(of: 2) ? safari : notes
+            return ClipboardEntry(
+                kind: .text,
+                text: "高级筛选示例 \(index + 1)",
+                contentHash: "advanced-preview-\(index)",
+                createdAt: now.addingTimeInterval(-Double(index) * 60),
+                lastUsedAt: index.isMultiple(of: 3)
+                    ? nil
+                    : now.addingTimeInterval(-Double(index) * 12),
+                useCount: index * 3,
+                sourceApp: source.displayName,
+                sourceBundleIdentifier: source.bundleIdentifier
+            )
+        }
+        store.injectPreviewEntries(fakes)
+        store.settings.activeCategoryKey = .builtin(.text)
+        store.settings.advancedModeEnabled = true
+        store.settings.advancedSourceIdentifier = nil
+        store.settings.advancedSortField = .useCount
+        store.settings.advancedSortDirection = .descending
+        show()
     }
 
     // MARK: - Layout self-check (--preview-verify-layout)
@@ -1290,6 +1331,7 @@ struct ClipboardHistoryPanelView: View {
     @State private var contextMenuTrackingDepth = 0
     @State private var hoverPreviewDelay = ClipboardHoverPreviewDelay()
     @State private var pendingCommandCopyID: UUID?
+    @State private var queueError: String?
     /// The entry currently open for in-place editing, if any. Non-nil forces
     /// the detail card to stay showing that entry (see `updateHover` and
     /// `selectionAndSizeChanged`), so a stray hover or list refresh mid-edit
@@ -1333,6 +1375,9 @@ struct ClipboardHistoryPanelView: View {
     }
 
     private var activeKey: ClipboardCategoryKey { store.settings.activeCategoryKey }
+    private var advancedOptions: ClipboardAdvancedOptions? {
+        store.settings.resolvedAdvancedOptions
+    }
     /// True while the active category requires unlocking. Everything downstream
     /// (`entries`, the height math, ⌘1–9, Return) reads an empty list in this
     /// state, so a locked category cannot leak rows through any path.
@@ -1340,7 +1385,11 @@ struct ClipboardHistoryPanelView: View {
     private var isActiveCategoryLocked: Bool { activeGate != .open }
     private var entries: [ClipboardEntry] {
         guard !isActiveCategoryLocked else { return [] }
-        let ordered = store.orderedEntries(query: query, key: activeKey)
+        let ordered = store.orderedEntries(
+            query: query,
+            key: activeKey,
+            advancedOptions: advancedOptions
+        )
         guard activeKey == .builtin(.password) else { return ordered }
         return ordered.map {
             // Never fall back to stored ciphertext in the UI. If decryption
@@ -1422,6 +1471,11 @@ struct ClipboardHistoryPanelView: View {
                 .frame(height: ClipboardPanelLayout.headerHeight)
             categoryBar
                 .frame(height: ClipboardPanelLayout.segmentedHeight)
+            if store.settings.resolvedAdvancedModeEnabled {
+                advancedFilterBar
+                    .frame(height: ClipboardPanelLayout.advancedFilterHeight)
+                    .transition(.move(edge: .top).combined(with: .opacity))
+            }
             if isActiveCategoryLocked {
                 // Fills the same slot the scrolling list would, so the VStack
                 // keeps filling its frame. A fixed-height gate left the stack
@@ -1475,6 +1529,18 @@ struct ClipboardHistoryPanelView: View {
         }
         .onChange(of: query) { _, _ in selectionAndSizeChanged(resetPage: true) }
         .onChange(of: store.settings.lastCategory) { _, _ in selectionAndSizeChanged(resetPage: true) }
+        .onChange(of: store.settings.advancedModeEnabled) { _, _ in
+            selectionAndSizeChanged(resetPage: true)
+        }
+        .onChange(of: store.settings.advancedSourceIdentifier) { _, _ in
+            selectionAndSizeChanged(resetPage: true)
+        }
+        .onChange(of: store.settings.advancedSortField) { _, _ in
+            selectionAndSizeChanged(resetPage: true)
+        }
+        .onChange(of: store.settings.advancedSortDirection) { _, _ in
+            selectionAndSizeChanged(resetPage: true)
+        }
         .onChange(of: activeKey.storageValue) { _, _ in
             refreshRevealedSecrets()
             selectionAndSizeChanged(resetPage: true)
@@ -1508,6 +1574,17 @@ struct ClipboardHistoryPanelView: View {
             contextMenuEntryID = nil
             contextMenuTrackingDepth = 0
             revealedSecretTexts.removeAll(keepingCapacity: false)
+        }
+        .alert(
+            L10n.text("粘贴队列"),
+            isPresented: Binding(
+                get: { queueError != nil },
+                set: { if !$0 { queueError = nil } }
+            )
+        ) {
+            Button(L10n.text("好"), role: .cancel) { queueError = nil }
+        } message: {
+            Text(queueError ?? "")
         }
     }
 
@@ -1661,14 +1738,201 @@ struct ClipboardHistoryPanelView: View {
     }
 
     private var categoryBar: some View {
-        ScrollView(.horizontal, showsIndicators: false) {
-            HStack(spacing: 6) {
-                ForEach(store.settings.enabledCategoryKeys, id: \.storageValue) { key in
-                    CategoryChip(title: title(for: key), isSelected: activeKey == key) {
-                        store.settings.activeCategoryKey = key
+        HStack(spacing: 6) {
+            ScrollView(.horizontal, showsIndicators: false) {
+                HStack(spacing: 6) {
+                    ForEach(store.settings.enabledCategoryKeys, id: \.storageValue) { key in
+                        CategoryChip(title: title(for: key), isSelected: activeKey == key) {
+                            store.settings.activeCategoryKey = key
+                        }
                     }
                 }
             }
+            Button {
+                pasteNextQueued()
+            } label: {
+                HStack(spacing: 3) {
+                    Image(systemName: "list.number")
+                        .font(.system(size: 11, weight: .semibold))
+                    if store.pasteQueueCount > 0 {
+                        Text("\(store.pasteQueueCount)")
+                            .font(.system(size: 10, weight: .semibold, design: .rounded))
+                            .monospacedDigit()
+                    }
+                }
+                .foregroundStyle(store.pasteQueueCount > 0 ? Color.white : Color.primary)
+                .frame(minWidth: 24, minHeight: 22)
+                .padding(.horizontal, store.pasteQueueCount > 0 ? 4 : 0)
+                .background(
+                    Capsule(style: .continuous)
+                        .fill(
+                            store.pasteQueueCount > 0
+                                ? AnyShapeStyle(Color.accentColor)
+                                : AnyShapeStyle(.quinary)
+                        )
+                )
+            }
+            .buttonStyle(.plain)
+            .disabled(store.pasteQueueCount == 0)
+            .help(L10n.text("粘贴队列中的下一项"))
+            .accessibilityLabel(L10n.text("粘贴队列"))
+            .accessibilityValue(
+                L10n.format("粘贴队列项目数格式", store.pasteQueueCount)
+            )
+            .contextMenu {
+                Button(L10n.text("清空粘贴队列"), role: .destructive) {
+                    store.clearPasteQueue()
+                }
+                .disabled(store.pasteQueueCount == 0)
+            }
+            Button {
+                withAnimation(.easeOut(duration: 0.16)) {
+                    store.settings.advancedModeEnabled =
+                        !store.settings.resolvedAdvancedModeEnabled
+                }
+            } label: {
+                Image(systemName: "line.3.horizontal.decrease")
+                    .font(.system(size: 11, weight: .semibold))
+                    .foregroundStyle(
+                        store.settings.resolvedAdvancedModeEnabled
+                            ? Color.white
+                            : Color.primary
+                    )
+                    .frame(width: 24, height: 22)
+                    .background(
+                        Capsule(style: .continuous)
+                            .fill(
+                                store.settings.resolvedAdvancedModeEnabled
+                                    ? AnyShapeStyle(Color.accentColor)
+                                    : AnyShapeStyle(.quinary)
+                            )
+                    )
+            }
+            .buttonStyle(.plain)
+            .help(L10n.text("高级筛选与排序"))
+            .accessibilityLabel(L10n.text("高级筛选与排序"))
+            .accessibilityValue(
+                L10n.text(store.settings.resolvedAdvancedModeEnabled ? "已开启" : "已关闭")
+            )
+        }
+    }
+
+    private var availableSourceApplications: [ClipboardSourceApplication] {
+        store.sourceApplicationsForFiltering(includeSecrets: mayExposeSecretSources)
+    }
+
+    private var hasUnknownSourceEntries: Bool {
+        store.hasUnknownSourceForFiltering(includeSecrets: mayExposeSecretSources)
+    }
+
+    private var mayExposeSecretSources: Bool {
+        activeKey == .builtin(.password) && activeGate == .open
+    }
+
+    private var selectedSourceTitle: String {
+        guard let identifier = store.settings.advancedSourceIdentifier else {
+            return L10n.text("全部来源")
+        }
+        if identifier == ClipboardAdvancedOptions.unknownSourceIdentifier {
+            return L10n.text("未知来源")
+        }
+        return availableSourceApplications
+            .first(where: { $0.stableIdentifier == identifier })?
+            .displayName
+            ?? L10n.text("来源不可用")
+    }
+
+    private var advancedFilterBar: some View {
+        HStack(spacing: 8) {
+            Menu {
+                Button {
+                    store.settings.advancedSourceIdentifier = nil
+                } label: {
+                    menuSelectionLabel(
+                        L10n.text("全部来源"),
+                        selected: store.settings.advancedSourceIdentifier == nil
+                    )
+                }
+                if hasUnknownSourceEntries {
+                    Button {
+                        store.settings.advancedSourceIdentifier =
+                            ClipboardAdvancedOptions.unknownSourceIdentifier
+                    } label: {
+                        menuSelectionLabel(
+                            L10n.text("未知来源"),
+                            selected: store.settings.advancedSourceIdentifier
+                                == ClipboardAdvancedOptions.unknownSourceIdentifier
+                        )
+                    }
+                }
+                if !availableSourceApplications.isEmpty { Divider() }
+                ForEach(availableSourceApplications) { application in
+                    Button {
+                        store.settings.advancedSourceIdentifier = application.stableIdentifier
+                    } label: {
+                        menuSelectionLabel(
+                            application.displayName,
+                            selected: store.settings.advancedSourceIdentifier
+                                == application.stableIdentifier
+                        )
+                    }
+                }
+            } label: {
+                Label(selectedSourceTitle, systemImage: "app")
+                    .lineLimit(1)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+            }
+            .menuStyle(.borderlessButton)
+            .frame(maxWidth: .infinity)
+            .help(L10n.text("按来源应用筛选"))
+
+            Menu {
+                ForEach(ClipboardAdvancedSortField.allCases, id: \.self) { field in
+                    Button {
+                        store.settings.advancedSortField = field
+                    } label: {
+                        menuSelectionLabel(
+                            field.displayName,
+                            selected: store.settings.resolvedAdvancedSortField == field
+                        )
+                    }
+                }
+            } label: {
+                Label(
+                    store.settings.resolvedAdvancedSortField.displayName,
+                    systemImage: "arrow.up.arrow.down"
+                )
+                .lineLimit(1)
+            }
+            .menuStyle(.borderlessButton)
+            .fixedSize()
+            .help(L10n.text("排序依据"))
+
+            Button {
+                store.settings.advancedSortDirection =
+                    store.settings.resolvedAdvancedSortDirection == .descending
+                    ? .ascending
+                    : .descending
+            } label: {
+                Image(systemName: store.settings.resolvedAdvancedSortDirection.systemImage)
+                    .frame(width: 22, height: 22)
+            }
+            .buttonStyle(.plain)
+            .help(store.settings.resolvedAdvancedSortDirection.displayName)
+            .accessibilityLabel(L10n.text("排序方向"))
+            .accessibilityValue(store.settings.resolvedAdvancedSortDirection.displayName)
+        }
+        .font(.system(size: 11))
+        .padding(.horizontal, 8)
+        .background(.quinary, in: RoundedRectangle(cornerRadius: 7))
+    }
+
+    @ViewBuilder
+    private func menuSelectionLabel(_ title: String, selected: Bool) -> some View {
+        if selected {
+            Label(title, systemImage: "checkmark")
+        } else {
+            Text(title)
         }
     }
 
@@ -1707,7 +1971,17 @@ struct ClipboardHistoryPanelView: View {
             LazyVStack(spacing: ClipboardPanelLayout.listSpacing) {
                 ForEach(Array(visibleEntries.enumerated()), id: \.element.id) { index, entry in
                     VStack(spacing: 0) {
-                        if activeKey == .builtin(.code) {
+                        if entry.kind == .image {
+                            CompactImageEntryRow(
+                                entry: entry,
+                                index: index,
+                                imageURL: store.imageURL(for: entry),
+                                isSelected: activeSelectionID == entry.id,
+                                onTogglePin: { onTogglePin(entry) },
+                                onToggleClipboardPin: { store.togglePinned(id: entry.id) }
+                            )
+                            .equatable()
+                        } else if activeKey == .builtin(.code) {
                             CodeEntryRow(
                                 entry: entry,
                                 index: index,
@@ -1794,6 +2068,23 @@ struct ClipboardHistoryPanelView: View {
         // it captures the exact row even if the manual-category submenu is
         // never opened.
         .onAppear { pinContextMenuSelection(to: entry) }
+        Divider()
+        if let position = store.pasteQueuePosition(of: entry.id) {
+            Button {
+                store.removeFromPasteQueue(id: entry.id)
+            } label: {
+                Label(
+                    L10n.format("从粘贴队列移除格式", position),
+                    systemImage: "text.badge.minus"
+                )
+            }
+        } else {
+            Button {
+                enqueue(entry)
+            } label: {
+                Label(L10n.text("加入粘贴队列"), systemImage: "text.badge.plus")
+            }
+        }
         Divider()
         Button(L10n.text(entry.isPinned ? "取消置顶" : "置顶")) { store.togglePinned(id: entry.id) }
         Button(L10n.text(entry.isDesktopPinned == true ? "取消桌面固定" : "固定到桌面")) { onTogglePin(entry) }
@@ -1890,6 +2181,29 @@ struct ClipboardHistoryPanelView: View {
         }
         _ = store.copyToPasteboard(entry, autoPaste: store.settings.autoPaste)
         onDone()
+    }
+
+    private func enqueue(_ entry: ClipboardEntry) {
+        do {
+            _ = try store.enqueueForPaste(id: entry.id)
+        } catch {
+            queueError = error.localizedDescription
+        }
+    }
+
+    private func pasteNextQueued() {
+        do {
+            let passwordUnlocked =
+                lockStore.gateState(forCategory: .builtin(.password)) == .open
+            let entry = try store.pasteNextQueued(
+                autoPaste: store.settings.autoPaste,
+                allowsProtectedEntries: passwordUnlocked
+            )
+            if entry.isSecret { lockStore.noteActivity() }
+            onDone()
+        } catch {
+            queueError = error.localizedDescription
+        }
     }
 
     private func delete(_ entry: ClipboardEntry) {
@@ -2012,6 +2326,15 @@ struct ClipboardHistoryPanelView: View {
         }
         if flags.contains(.command), event.charactersIgnoringModifiers?.lowercased() == "p", let selectedID = activeSelectionID {
             store.togglePinned(id: selectedID)
+            return true
+        }
+        if flags.contains(.command), event.keyCode == 36,
+           let entry = entries.first(where: { $0.id == activeSelectionID }) {
+            enqueue(entry)
+            return true
+        }
+        if flags.contains(.shift), event.keyCode == 36 {
+            pasteNextQueued()
             return true
         }
         // ⌥P mirrors the "固定到桌面" button/menu, going through the same callback
@@ -2153,6 +2476,84 @@ private struct TextEntryRow: View, Equatable {
                 // explicit; a near-white fallback fill here used to become
                 // visible during AppKit hover compositing and made the panel
                 // flash white under the pointer.
+                .fill(isSelected ? AnyShapeStyle(Color.accentColor) : AnyShapeStyle(.clear))
+        )
+    }
+}
+
+/// Custom smart categories can mix text and images. Keep image rows at the
+/// same compact list height while retaining a real thumbnail; falling back to
+/// the word “图片” would make source/type rules visually lossy.
+private struct CompactImageEntryRow: View, Equatable {
+    nonisolated static func == (lhs: CompactImageEntryRow, rhs: CompactImageEntryRow) -> Bool {
+        lhs.entry == rhs.entry
+            && lhs.index == rhs.index
+            && lhs.imageURL == rhs.imageURL
+            && lhs.isSelected == rhs.isSelected
+    }
+
+    let entry: ClipboardEntry
+    let index: Int?
+    let imageURL: URL?
+    let isSelected: Bool
+    let onTogglePin: () -> Void
+    let onToggleClipboardPin: () -> Void
+
+    var body: some View {
+        HStack(spacing: 7) {
+            ZStack {
+                RoundedRectangle(cornerRadius: 4, style: .continuous)
+                    .fill(.quinary)
+                if let imageURL {
+                    ThumbnailImageView(
+                        url: imageURL,
+                        targetPoints: 22,
+                        contentIdentity: entry.contentHash
+                    )
+                    .padding(1)
+                } else {
+                    Image(systemName: "photo")
+                        .font(.system(size: 10))
+                        .foregroundStyle(.secondary)
+                }
+            }
+            .frame(width: 22, height: 22)
+            .clipShape(RoundedRectangle(cornerRadius: 4, style: .continuous))
+
+            Text(entry.text?.isEmpty == false ? entry.text! : L10n.text("图片"))
+                .font(.system(size: 12))
+                .lineLimit(1)
+                .foregroundStyle(isSelected ? Color.white : Color.primary)
+            Spacer(minLength: 0)
+
+            if isSelected {
+                Button(action: onToggleClipboardPin) {
+                    Image(systemName: entry.isPinned ? "pin.fill" : "pin")
+                        .font(.system(size: 10, weight: .medium))
+                        .frame(width: 18, height: 18)
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .foregroundStyle(.white)
+                .help(L10n.text(entry.isPinned ? "取消剪切板内固定" : "固定到剪切板"))
+                ClipboardPinButton(entry: entry, isSelected: true, action: onTogglePin)
+            } else {
+                if entry.isDesktopPinned == true {
+                    ClipboardPinButton(entry: entry, isSelected: false, action: onTogglePin)
+                }
+                if let index, index < 9 {
+                    Text("⌘ \(index + 1)")
+                        .font(.system(size: 11).monospacedDigit())
+                        .foregroundStyle(entry.isPinned ? Color.primary : Color.secondary)
+                        .frame(width: 28, alignment: .trailing)
+                }
+            }
+        }
+        .padding(.horizontal, 10)
+        .frame(height: ClipboardPanelLayout.textRowHeight)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(
+            RoundedRectangle(cornerRadius: 7, style: .continuous)
                 .fill(isSelected ? AnyShapeStyle(Color.accentColor) : AnyShapeStyle(.clear))
         )
     }

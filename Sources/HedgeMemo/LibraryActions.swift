@@ -25,7 +25,11 @@ enum LibraryActions {
                 memeStore.importArchive(manifest, imagesURL: extracted.directory.appendingPathComponent(memeImagesDirectory, isDirectory: true))
             }
             if let clipboardSnapshot {
-                clipboardStore.importArchive(clipboardSnapshot, imagesURL: extracted.directory.appendingPathComponent("clipboard-images", isDirectory: true))
+                try clipboardStore.importArchive(
+                    clipboardSnapshot,
+                    imagesURL: extracted.directory.appendingPathComponent("clipboard-images", isDirectory: true),
+                    originalFormatsURL: extracted.directory.appendingPathComponent("clipboard-formats", isDirectory: true)
+                )
             }
         } catch {
             memeStore.report(error)

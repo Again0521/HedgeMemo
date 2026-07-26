@@ -11,6 +11,7 @@ public enum ClipboardPanelLayout {
     public static let outerPadding: CGFloat = 12
     public static let headerHeight: CGFloat = 28
     public static let segmentedHeight: CGFloat = 22
+    public static let advancedFilterHeight: CGFloat = 26
     public static let sectionSpacing: CGFloat = 8
 
     public static let textRowHeight: CGFloat = 27
@@ -32,7 +33,17 @@ public enum ClipboardPanelLayout {
 
     /// Chrome above the scrolling content: paddings, search field, category switcher.
     public static var chromeHeight: CGFloat {
-        outerPadding + headerHeight + sectionSpacing + segmentedHeight + sectionSpacing + outerPadding
+        chromeHeight(advancedMode: false)
+    }
+
+    public static func chromeHeight(advancedMode: Bool) -> CGFloat {
+        outerPadding
+            + headerHeight
+            + sectionSpacing
+            + segmentedHeight
+            + (advancedMode ? sectionSpacing + advancedFilterHeight : 0)
+            + sectionSpacing
+            + outerPadding
     }
 
     public static var imageCellSide: CGFloat {
@@ -145,9 +156,14 @@ public enum ClipboardPanelLayout {
 
     /// Total panel height, clamped to the available screen height (callers pass
     /// the screen's visible frame height, which excludes menu bar and Dock).
-    public static func panelHeight(contentHeight: CGFloat, availableHeight: CGFloat) -> CGFloat {
-        let desired = chromeHeight + contentHeight
-        let minimum = chromeHeight + emptyStateHeight
+    public static func panelHeight(
+        contentHeight: CGFloat,
+        availableHeight: CGFloat,
+        advancedMode: Bool = false
+    ) -> CGFloat {
+        let chrome = chromeHeight(advancedMode: advancedMode)
+        let desired = chrome + contentHeight
+        let minimum = chrome + emptyStateHeight
         let maximum = max(minimum, availableHeight)
         return min(max(desired, minimum), maximum)
     }

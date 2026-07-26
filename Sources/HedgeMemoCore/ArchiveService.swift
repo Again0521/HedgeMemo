@@ -64,8 +64,10 @@ public enum MemeArchiveService {
         try fm.createDirectory(at: staging, withIntermediateDirectories: true)
         let memeDirectory = staging.appendingPathComponent("meme-images", isDirectory: true)
         let clipboardDirectory = staging.appendingPathComponent("clipboard-images", isDirectory: true)
+        let clipboardFormatsDirectory = staging.appendingPathComponent("clipboard-formats", isDirectory: true)
         try fm.createDirectory(at: memeDirectory, withIntermediateDirectories: true)
         try fm.createDirectory(at: clipboardDirectory, withIntermediateDirectories: true)
+        try fm.createDirectory(at: clipboardFormatsDirectory, withIntermediateDirectories: true)
 
         let encoder = JSONEncoder()
         encoder.dateEncodingStrategy = .iso8601
@@ -79,9 +81,18 @@ public enum MemeArchiveService {
             try fm.copyItem(at: source, to: memeDirectory.appendingPathComponent(meme.fileName))
         }
         for entry in clipboardSnapshot?.entries ?? [] {
-            guard let source = clipboardRepository.imageURL(for: entry), fm.fileExists(atPath: source.path),
-                  let fileName = entry.imageFileName else { continue }
-            try fm.copyItem(at: source, to: clipboardDirectory.appendingPathComponent(fileName))
+            if let source = clipboardRepository.imageURL(for: entry),
+               fm.fileExists(atPath: source.path),
+               let fileName = entry.imageFileName {
+                try fm.copyItem(at: source, to: clipboardDirectory.appendingPathComponent(fileName))
+            }
+            for format in entry.originalFormats ?? [] {
+                let source = try clipboardRepository.originalFormatURL(for: format)
+                try fm.copyItem(
+                    at: source,
+                    to: clipboardFormatsDirectory.appendingPathComponent(format.fileName)
+                )
+            }
         }
         try run("/usr/bin/zip", ["-rq", destination.path, "."], currentDirectory: staging)
     }

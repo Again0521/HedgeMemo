@@ -170,35 +170,262 @@ public enum ClipboardEntryOrigin: String, Codable, Sendable {
     case concealedPassword
 }
 
-/// User-defined category that filters text entries with a regular expression.
+public enum ClipboardRuleMatchMode: String, Codable, CaseIterable, Sendable {
+    case all
+    case any
+
+    public var displayName: String {
+        switch self {
+        case .all: L10n.text("满足全部条件")
+        case .any: L10n.text("满足任一条件")
+        }
+    }
+}
+
+public enum ClipboardClassificationRuleKind: String, Codable, CaseIterable, Sendable {
+    case contains
+    case startsWith
+    case endsWith
+    case regularExpression
+    case sourceApplication
+    case contentType
+
+    public var displayName: String {
+        switch self {
+        case .contains: L10n.text("内容包含")
+        case .startsWith: L10n.text("内容开头是")
+        case .endsWith: L10n.text("内容结尾是")
+        case .regularExpression: L10n.text("正则表达式")
+        case .sourceApplication: L10n.text("来源应用")
+        case .contentType: L10n.text("内容类型")
+        }
+    }
+}
+
+public struct ClipboardClassificationRule: Codable, Equatable, Hashable, Identifiable, Sendable {
+    public let id: UUID
+    public var kind: ClipboardClassificationRuleKind
+    public var value: String
+    public var displayValue: String?
+    public var isNegated: Bool
+    public var isCaseSensitive: Bool
+
+    public init(
+        id: UUID = UUID(),
+        kind: ClipboardClassificationRuleKind,
+        value: String = "",
+        displayValue: String? = nil,
+        isNegated: Bool = false,
+        isCaseSensitive: Bool = false
+    ) {
+        self.id = id
+        self.kind = kind
+        self.value = value
+        self.displayValue = displayValue
+        self.isNegated = isNegated
+        self.isCaseSensitive = isCaseSensitive
+    }
+
+    public func validate() throws {
+        let cleaned = value.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !cleaned.isEmpty else {
+            throw ClipboardClassificationRuleError.missingValue(kind)
+        }
+        switch kind {
+        case .regularExpression:
+            guard CustomClipboardCategory.compiledRegex(
+                for: value,
+                caseSensitive: isCaseSensitive
+            ) != nil else {
+                throw ClipboardClassificationRuleError.invalidRegularExpression(value)
+            }
+        case .contentType:
+            guard let category = ClipboardContentCategory(rawValue: value),
+                  category != .password else {
+                throw ClipboardClassificationRuleError.invalidContentType(value)
+            }
+        default:
+            break
+        }
+    }
+
+    fileprivate func matches(_ entry: ClipboardEntry) -> Bool {
+        guard !value.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            return false
+        }
+        let rawResult: Bool
+        switch kind {
+        case .contains, .startsWith, .endsWith:
+            guard entry.kind == .text, !entry.isSecret, let text = entry.text else {
+                rawResult = false
+                break
+            }
+            let options: String.CompareOptions = isCaseSensitive ? [] : [.caseInsensitive]
+            switch kind {
+            case .contains:
+                rawResult = text.range(of: value, options: options) != nil
+            case .startsWith:
+                rawResult = text.range(
+                    of: value,
+                    options: options.union(.anchored),
+                    range: text.startIndex..<text.endIndex
+                ) != nil
+            case .endsWith:
+                rawResult = text.range(
+                    of: value,
+                    options: options.union([.anchored, .backwards]),
+                    range: text.startIndex..<text.endIndex
+                ) != nil
+            default:
+                rawResult = false
+            }
+        case .regularExpression:
+            guard entry.kind == .text, !entry.isSecret, let text = entry.text,
+                  let regex = CustomClipboardCategory.compiledRegex(
+                    for: value,
+                    caseSensitive: isCaseSensitive
+                  ) else {
+                rawResult = false
+                break
+            }
+            let scanned = text.count > CustomClipboardCategory.maxMatchLength
+                ? String(text.prefix(CustomClipboardCategory.maxMatchLength))
+                : text
+            rawResult = regex.firstMatch(
+                in: scanned,
+                range: NSRange(scanned.startIndex..., in: scanned)
+            ) != nil
+        case .sourceApplication:
+            guard let source = entry.sourceApplication else {
+                rawResult = false
+                break
+            }
+            let cleaned = value.trimmingCharacters(in: .whitespacesAndNewlines)
+            rawResult = source.stableIdentifier.caseInsensitiveCompare(cleaned) == .orderedSame
+                || source.bundleIdentifier?.caseInsensitiveCompare(cleaned) == .orderedSame
+                || source.displayName.localizedCaseInsensitiveContains(cleaned)
+        case .contentType:
+            rawResult = entry.contentCategory.rawValue == value
+        }
+        return isNegated ? !rawResult : rawResult
+    }
+}
+
+public enum ClipboardClassificationRuleError: LocalizedError, Equatable {
+    case noRules
+    case tooManyRules(Int)
+    case missingValue(ClipboardClassificationRuleKind)
+    case invalidRegularExpression(String)
+    case invalidContentType(String)
+
+    public var errorDescription: String? {
+        switch self {
+        case .noRules:
+            L10n.text("请至少添加一条分类条件。")
+        case .tooManyRules:
+            L10n.text("每个分类最多可以添加八条条件。")
+        case .missingValue:
+            L10n.text("分类条件不能为空。")
+        case .invalidRegularExpression:
+            L10n.text("正则表达式无效")
+        case .invalidContentType:
+            L10n.text("分类条件中的内容类型无效。")
+        }
+    }
+}
+
+/// User-defined category. Legacy `pattern` remains persisted so existing
+/// regex-only categories decode without migration work; new categories use
+/// composable rules.
 public struct CustomClipboardCategory: Codable, Equatable, Hashable, Identifiable, Sendable {
     public let id: UUID
     public var name: String
     public var pattern: String
+    public var matchMode: ClipboardRuleMatchMode?
+    public var rules: [ClipboardClassificationRule]?
 
-    public init(id: UUID = UUID(), name: String, pattern: String) {
+    public init(
+        id: UUID = UUID(),
+        name: String,
+        pattern: String,
+        matchMode: ClipboardRuleMatchMode? = nil,
+        rules: [ClipboardClassificationRule]? = nil
+    ) {
         self.id = id
         self.name = name
         self.pattern = pattern
+        self.matchMode = matchMode
+        self.rules = rules
+    }
+
+    public init(
+        id: UUID = UUID(),
+        name: String,
+        matchMode: ClipboardRuleMatchMode = .all,
+        rules: [ClipboardClassificationRule]
+    ) {
+        self.id = id
+        self.name = name
+        self.pattern = ""
+        self.matchMode = matchMode
+        self.rules = rules
+    }
+
+    public var resolvedMatchMode: ClipboardRuleMatchMode { matchMode ?? .all }
+
+    public var effectiveRules: [ClipboardClassificationRule] {
+        if let rules, !rules.isEmpty { return rules }
+        guard !pattern.isEmpty else { return [] }
+        return [
+            ClipboardClassificationRule(
+                kind: .regularExpression,
+                value: pattern,
+                isCaseSensitive: true
+            )
+        ]
     }
 
     public var isPatternValid: Bool {
-        !pattern.isEmpty && Self.compiledRegex(for: pattern) != nil
+        !pattern.isEmpty && Self.compiledRegex(for: pattern, caseSensitive: true) != nil
+    }
+
+    public var isRuleSetValid: Bool {
+        (try? validate()) != nil
+    }
+
+    public func validate() throws {
+        let rules = effectiveRules
+        guard !rules.isEmpty else { throw ClipboardClassificationRuleError.noRules }
+        guard rules.count <= 8 else {
+            throw ClipboardClassificationRuleError.tooManyRules(rules.count)
+        }
+        for rule in rules { try rule.validate() }
     }
 
     public func matches(_ text: String) -> Bool {
-        guard let regex = Self.compiledRegex(for: pattern) else { return false }
-        // `matches(_:)` runs once per entry per filter pass against a
-        // user-authored pattern. Bounding the scanned length keeps a
-        // catastrophically-backtracking pattern from freezing the main thread on
-        // a large clipboard item; a category rule that needs to see past this
-        // prefix is vanishingly rare.
-        let scanned = text.count > Self.maxMatchLength ? String(text.prefix(Self.maxMatchLength)) : text
-        let range = NSRange(scanned.startIndex..., in: scanned)
-        return regex.firstMatch(in: scanned, range: range) != nil
+        matches(
+            ClipboardEntry(
+                kind: .text,
+                text: text,
+                contentHash: Data(text.utf8).clipboardContentHash
+            )
+        )
     }
 
-    private static let maxMatchLength = 10_000
+    public func matches(_ entry: ClipboardEntry) -> Bool {
+        // Secrets remain exclusive to the password category and its mandatory
+        // lock. A broad source/content rule must never surface one in an
+        // ordinary custom category.
+        guard !entry.isSecret else { return false }
+        let rules = effectiveRules
+        guard !rules.isEmpty, rules.count <= 8 else { return false }
+        switch resolvedMatchMode {
+        case .all: return rules.allSatisfy { $0.matches(entry) }
+        case .any: return rules.contains { $0.matches(entry) }
+        }
+    }
+
+    fileprivate static let maxMatchLength = 10_000
 
     /// Compiling an `NSRegularExpression` is not free, and the old code rebuilt
     /// one on every `matches`/`isPatternValid` call — i.e. once per entry per
@@ -206,17 +433,21 @@ public struct CustomClipboardCategory: Codable, Equatable, Hashable, Identifiabl
     /// once. NSCache is thread-safe.
     nonisolated(unsafe) private static let regexCache = NSCache<NSString, NSRegularExpression>()
 
-    private static func compiledRegex(for pattern: String) -> NSRegularExpression? {
+    fileprivate static func compiledRegex(
+        for pattern: String,
+        caseSensitive: Bool
+    ) -> NSRegularExpression? {
         guard !pattern.isEmpty else { return nil }
-        let key = pattern as NSString
+        let key = "\(caseSensitive ? "1" : "0"):\(pattern)" as NSString
         if let cached = regexCache.object(forKey: key) { return cached }
-        guard let regex = try? NSRegularExpression(pattern: pattern) else { return nil }
+        let options: NSRegularExpression.Options = caseSensitive ? [] : [.caseInsensitive]
+        guard let regex = try? NSRegularExpression(pattern: pattern, options: options) else { return nil }
         regexCache.setObject(regex, forKey: key)
         return regex
     }
 }
 
-/// Identifies either a built-in category or a custom regex category,
+/// Identifies either a built-in category or a custom rule category,
 /// with a stable string form for persistence ("text", "custom:<uuid>", ...).
 public enum ClipboardCategoryKey: Hashable, Sendable {
     case builtin(ClipboardContentCategory)
@@ -589,6 +820,16 @@ public struct ClipboardHistorySettings: Codable, Equatable, Sendable {
     /// capture policy existed.
     public var appFilterMode: ClipboardAppFilterMode?
     public var appFilterApplications: [ClipboardSourceApplication]?
+    /// Optional fields preserve settings written before the panel's advanced
+    /// filter and sort controls existed.
+    public var advancedModeEnabled: Bool?
+    public var advancedSourceIdentifier: String?
+    public var advancedSortField: ClipboardAdvancedSortField?
+    public var advancedSortDirection: ClipboardSortDirection?
+    /// FIFO paste queue entry identifiers. Keeping identifiers instead of
+    /// duplicating payloads preserves rich text, images, and encrypted secrets
+    /// through the same single source of truth as ordinary history.
+    public var pasteQueueEntryIDs: [UUID]?
 
     public init(
         maxEntries: Int = 100,
@@ -602,7 +843,12 @@ public struct ClipboardHistorySettings: Codable, Equatable, Sendable {
         disabledCategoryKeys: [String]? = nil,
         codeHighlightTheme: CodeHighlightTheme? = .system,
         appFilterMode: ClipboardAppFilterMode? = .disabled,
-        appFilterApplications: [ClipboardSourceApplication]? = nil
+        appFilterApplications: [ClipboardSourceApplication]? = nil,
+        advancedModeEnabled: Bool? = false,
+        advancedSourceIdentifier: String? = nil,
+        advancedSortField: ClipboardAdvancedSortField? = .capturedAt,
+        advancedSortDirection: ClipboardSortDirection? = .descending,
+        pasteQueueEntryIDs: [UUID]? = nil
     ) {
         self.maxEntries = Self.normalizedMaxEntries(maxEntries)
         self.savesImages = savesImages
@@ -616,6 +862,11 @@ public struct ClipboardHistorySettings: Codable, Equatable, Sendable {
         self.codeHighlightTheme = codeHighlightTheme
         self.appFilterMode = appFilterMode
         self.appFilterApplications = appFilterApplications
+        self.advancedModeEnabled = advancedModeEnabled
+        self.advancedSourceIdentifier = advancedSourceIdentifier
+        self.advancedSortField = advancedSortField
+        self.advancedSortDirection = advancedSortDirection
+        self.pasteQueueEntryIDs = pasteQueueEntryIDs
         normalize()
     }
 
@@ -625,6 +876,23 @@ public struct ClipboardHistorySettings: Codable, Equatable, Sendable {
 
     public var resolvedAppFilterMode: ClipboardAppFilterMode {
         appFilterMode ?? .disabled
+    }
+
+    public var resolvedAdvancedModeEnabled: Bool { advancedModeEnabled ?? false }
+    public var resolvedAdvancedSortField: ClipboardAdvancedSortField {
+        advancedSortField ?? .capturedAt
+    }
+    public var resolvedAdvancedSortDirection: ClipboardSortDirection {
+        advancedSortDirection ?? .descending
+    }
+    public var resolvedPasteQueueEntryIDs: [UUID] { pasteQueueEntryIDs ?? [] }
+    public var resolvedAdvancedOptions: ClipboardAdvancedOptions? {
+        guard resolvedAdvancedModeEnabled else { return nil }
+        return ClipboardAdvancedOptions(
+            sourceIdentifier: advancedSourceIdentifier,
+            sortField: resolvedAdvancedSortField,
+            sortDirection: resolvedAdvancedSortDirection
+        )
     }
 
     public func allowsCapture(from source: ClipboardSourceApplication?) -> Bool {
@@ -677,12 +945,28 @@ public struct ClipboardHistorySettings: Codable, Equatable, Sendable {
         customCategories?.first(where: { $0.id == id })
     }
 
+    public func validateCustomCategories() throws {
+        for category in customCategories ?? [] {
+            try category.validate()
+        }
+    }
+
     public mutating func normalize() {
         maxEntries = Self.normalizedMaxEntries(maxEntries)
         if hotKey == nil || hotKey == .legacyClipboard { hotKey = .defaultClipboard }
         let customs = customCategories ?? []
         customCategories = customs
         appFilterMode = resolvedAppFilterMode
+        advancedModeEnabled = resolvedAdvancedModeEnabled
+        advancedSortField = resolvedAdvancedSortField
+        advancedSortDirection = resolvedAdvancedSortDirection
+        var seenQueueIDs = Set<UUID>()
+        pasteQueueEntryIDs = resolvedPasteQueueEntryIDs.filter {
+            seenQueueIDs.insert($0).inserted
+        }
+        if advancedSourceIdentifier?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == true {
+            advancedSourceIdentifier = nil
+        }
         var seenApplications = Set<String>()
         appFilterApplications = (appFilterApplications ?? []).filter {
             !$0.displayName.isEmpty && seenApplications.insert($0.stableIdentifier).inserted
@@ -737,6 +1021,9 @@ public struct ClipboardEntry: Codable, Hashable, Identifiable, Sendable {
     /// clipboard-history snapshots source-compatible.
     public var sourceBundleIdentifier: String?
     public var sourceBundleURLPath: String?
+    /// Original RTF/RTFD/HTML representations, stored as sidecar files.
+    /// Optional keeps snapshots written before rich-text capture compatible.
+    public var originalFormats: [ClipboardOriginalFormat]?
     public var isPinned: Bool
     public var pinnedOrder: Int?
     /// Independent from clipboard ordering/quick-slot pinning. Optional keeps
@@ -765,6 +1052,7 @@ public struct ClipboardEntry: Codable, Hashable, Identifiable, Sendable {
         sourceApp: String? = nil,
         sourceBundleIdentifier: String? = nil,
         sourceBundleURLPath: String? = nil,
+        originalFormats: [ClipboardOriginalFormat]? = nil,
         isPinned: Bool = false,
         pinnedOrder: Int? = nil,
         isDesktopPinned: Bool? = false,
@@ -784,6 +1072,7 @@ public struct ClipboardEntry: Codable, Hashable, Identifiable, Sendable {
         self.sourceApp = sourceApp
         self.sourceBundleIdentifier = sourceBundleIdentifier
         self.sourceBundleURLPath = sourceBundleURLPath
+        self.originalFormats = originalFormats
         self.isPinned = isPinned
         self.pinnedOrder = pinnedOrder
         self.isDesktopPinned = isDesktopPinned
@@ -823,7 +1112,8 @@ public struct ClipboardEntry: Codable, Hashable, Identifiable, Sendable {
              (.text, .builtin(.code)),
              (.text, .builtin(.link)),
              (.text, .builtin(.password)),
-             (.text, .custom):
+             (.text, .custom),
+             (.image, .custom):
             return true
         case (.image, .builtin(.image)),
              (.image, .builtin(.screenshot)):
@@ -911,9 +1201,8 @@ public struct ClipboardEntry: Codable, Hashable, Identifiable, Sendable {
         case .builtin(let category):
             return contentCategory == category
         case .custom(let id):
-            guard kind == .text, let text,
-                  let custom = customCategories.first(where: { $0.id == id }) else { return false }
-            return custom.matches(text)
+            guard let custom = customCategories.first(where: { $0.id == id }) else { return false }
+            return custom.matches(self)
         }
     }
 }
@@ -940,11 +1229,13 @@ public enum ClipboardHistoryPolicy {
         _ entries: [ClipboardEntry],
         query: String = "",
         key: ClipboardCategoryKey? = nil,
-        customCategories: [CustomClipboardCategory] = []
+        customCategories: [CustomClipboardCategory] = [],
+        advancedOptions: ClipboardAdvancedOptions? = nil
     ) -> [ClipboardEntry] {
         let matcher = PercentFuzzyMatcher(query: query)
         let filtered = entries.filter {
             $0.matches(matcher: matcher) && $0.matches(key: key, customCategories: customCategories)
+                && (advancedOptions?.matchesSource($0) ?? true)
         }
         let desktopPinned = desktopPinnedEntries(filtered)
         let ordinary = filtered
@@ -954,7 +1245,7 @@ public enum ClipboardHistoryPolicy {
                 if lhs.isPinned {
                     return (lhs.pinnedOrder ?? Int.max) < (rhs.pinnedOrder ?? Int.max)
                 }
-                return lhs.createdAt > rhs.createdAt
+                return advancedOptions?.comesBefore(lhs, rhs) ?? (lhs.createdAt > rhs.createdAt)
             }
         let insertion = min(desktopPinnedInsertionIndex, ordinary.count)
         return Array(ordinary[..<insertion]) + desktopPinned + Array(ordinary[insertion...])

@@ -34,10 +34,13 @@ HedgeMemo keeps copied text, code, links, and images, then places them in the ri
 
 - Pin an item in the list, or keep it visible as a desktop note.
 - Copy something already in the history and its original entry moves forward—no duplicate is created.
+- Copy rich text from a supported app and its fonts, colors, links, and original formatting return with it.
 - Add clipboard images directly to the meme library. Screenshots captured by HedgeMemo remain in their own Screenshots category.
 - Read code with syntax highlighting and choose the color theme you prefer.
-- Turn categories on or off, rearrange them, or create custom text categories with regular expressions.
+- Turn categories on or off, rearrange them, or combine content, source app, content type, and regular expressions into smart categories of your own.
 - Choose which apps may add items to history with an allowlist or blocklist in Settings.
+- Open Advanced Mode at the right of the category bar to filter by source app or sort by capture time, last use, or times used.
+- Add several items to the paste queue from their context menus, then use them in order from the category bar. Rich text and images keep their original form.
 - Pause over an item to see its full contents, source, and capture time.
 
 Add `%` to a search to find several fragments in order, even when they are separated in the original content. Once you find the item, press <kbd>⏎</kbd> or click it to copy again.
@@ -91,8 +94,8 @@ Any clipboard item can become a desktop note, keeping code, to-do lists, and ref
 
 Anything copied from a password manager or a browser password field goes into its own Passwords category. That category always asks for a PIN, which you can create the first time you open it.
 
-- Password text is sealed with AES-GCM before it reaches the disk. The key lives in the system keychain and the text is decrypted only at the moment you copy it.
-- Lists, search, and previews only ever show “Hidden password” — never the value itself.
+- Password text is sealed with AES-GCM before it reaches the disk. The key lives in the system keychain, and values are decrypted temporarily only after the Passwords category is unlocked.
+- Before unlocking, lists, search, and previews show only “Hidden password.” After unlocking, values appear in plain text so you can identify and use them.
 - Beyond passwords, you can lock text, code, screenshots, other categories, and the meme panel.
 - Choose when it re-locks: when the Mac locks, or after 5, 15, or 30 minutes unused.
 - Unlock with Touch ID (with the system password as a fallback). Five wrong PINs start a 10-minute cooldown.
@@ -131,6 +134,8 @@ Adjust the language, shortcuts, code colors, scroll bars, and startup behavior i
 | <kbd>⇧</kbd><kbd>⌘</kbd><kbd>E</kbd> | Open the meme panel beside the pointer |
 | <kbd>⌘</kbd><kbd>1</kbd> – <kbd>⌘</kbd><kbd>9</kbd> | Copy a pinned clipboard item |
 | <kbd>⏎</kbd> / <kbd>⌫</kbd> | Copy / delete the selected clipboard item |
+| <kbd>⌘</kbd><kbd>⏎</kbd> | Add the selected item to the paste queue |
+| <kbd>⇧</kbd><kbd>⏎</kbd> | Use the next item in the paste queue |
 
 The clipboard, screenshot, and meme panel shortcuts can all be recorded again in Settings.
 

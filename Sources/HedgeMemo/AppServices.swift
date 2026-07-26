@@ -200,6 +200,10 @@ final class AppServices: ObservableObject {
         clipboardPanelController?.previewStress()
     }
 
+    func previewClipboardAdvancedMode() {
+        clipboardPanelController?.previewAdvancedMode()
+    }
+
     func clearClipboardHistoryByCategory() {
         ClipboardClearSelectionPanel.run(store: clipboardStore)
     }

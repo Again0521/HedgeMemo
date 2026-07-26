@@ -54,4 +54,12 @@ else
     "$DMG_PATH"
 fi
 
+# `dist` lives under a File Provider-backed Documents checkout. The provider
+# can reattach Finder metadata to a loose app bundle seconds after it was
+# signed, making that intermediate artifact fail strict verification even
+# though the clean staged bundle inside the completed DMG is valid. Keep the
+# release artifact only; `build_and_run.sh --package` remains available when a
+# standalone app bundle is explicitly needed.
+rm -rf "$DIST_APP"
+
 echo "Created $DMG_PATH"

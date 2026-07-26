@@ -6,13 +6,23 @@ import Foundation
 @MainActor
 public final class ClipboardHistoryStore: ObservableObject {
     @Published public private(set) var entries: [ClipboardEntry] = [] {
-        didSet { orderedMemo.removeAll(keepingCapacity: true) }
+        didSet {
+            orderedMemo.removeAll(keepingCapacity: true)
+            sourceApplicationMemo = nil
+            sourceApplicationIncludingSecretsMemo = nil
+            hasUnknownSourceMemo = nil
+            hasUnknownSourceIncludingSecretsMemo = nil
+        }
     }
     /// `orderedEntries` is asked several times per UI pass (rows, key handling,
     /// height math), and every miss filters and sorts the entire history.
     /// Results are memoized per (category, query) until entries or settings
     /// change. Not published: reads during view rendering must stay silent.
     private var orderedMemo: [String: [ClipboardEntry]] = [:]
+    private var sourceApplicationMemo: [ClipboardSourceApplication]?
+    private var sourceApplicationIncludingSecretsMemo: [ClipboardSourceApplication]?
+    private var hasUnknownSourceMemo: Bool?
+    private var hasUnknownSourceIncludingSecretsMemo: Bool?
     // Mutating `settings` inside its own didSet re-enters the @Published setter;
     // without this guard normalize() recurses until the stack overflows.
     private var isNormalizingSettings = false
@@ -24,6 +34,11 @@ public final class ClipboardHistoryStore: ObservableObject {
             isNormalizingSettings = true
             settings.normalize()
             isNormalizingSettings = false
+            do {
+                try settings.validateCustomCategories()
+            } catch {
+                lastError = error.localizedDescription
+            }
             trimToLimit()
             persist()
         }
@@ -91,8 +106,18 @@ public final class ClipboardHistoryStore: ObservableObject {
             settings = ClipboardHistorySettings()
             lastError = error.localizedDescription
         }
+        do {
+            try settings.validateCustomCategories()
+        } catch {
+            // Invalid user-authored rules must be visible, but they must never
+            // make otherwise healthy clipboard history disappear.
+            lastError = error.localizedDescription
+        }
         let removedDuplicates = collapsePersistedDuplicates()
-        if removedDuplicates || normalizeDesktopPinnedOrders() { persist() }
+        let removedStaleQueueReferences = normalizePasteQueueReferences()
+        if removedDuplicates || removedStaleQueueReferences || normalizeDesktopPinnedOrders() {
+            persist()
+        }
     }
 
     public func startMonitoring() {
@@ -173,21 +198,70 @@ public final class ClipboardHistoryStore: ObservableObject {
         schedulePollTimer()
     }
 
-    public func orderedEntries(query: String = "", key: ClipboardCategoryKey? = nil) -> [ClipboardEntry] {
+    public func orderedEntries(
+        query: String = "",
+        key: ClipboardCategoryKey? = nil,
+        advancedOptions: ClipboardAdvancedOptions? = nil
+    ) -> [ClipboardEntry] {
         if let key, !settings.isCategoryEnabled(key) { return [] }
-        let memoKey = (key?.storageValue ?? "*") + "\u{1}" + query
+        let memoKey = (key?.storageValue ?? "*")
+            + "\u{1}" + query
+            + "\u{1}" + (advancedOptions?.cacheKey ?? "standard")
         if let cached = orderedMemo[memoKey] { return cached }
         let result = ClipboardHistoryPolicy.ordered(
             entries,
             query: query,
             key: key,
-            customCategories: settings.customCategories ?? []
+            customCategories: settings.customCategories ?? [],
+            advancedOptions: advancedOptions
         )
         // Typing a search accumulates one memo entry per query string; keep the
         // table small rather than tracking usage.
         if orderedMemo.count >= 24 { orderedMemo.removeAll(keepingCapacity: true) }
         orderedMemo[memoKey] = result
         return result
+    }
+
+    /// Source menus are read during every panel render, including hover-driven
+    /// renders. Build the de-duplicated list only when entries change instead
+    /// of rescanning a 10,000-item history for every pointer movement.
+    public func sourceApplicationsForFiltering(
+        includeSecrets: Bool = false
+    ) -> [ClipboardSourceApplication] {
+        if includeSecrets, let sourceApplicationIncludingSecretsMemo {
+            return sourceApplicationIncludingSecretsMemo
+        }
+        if !includeSecrets, let sourceApplicationMemo { return sourceApplicationMemo }
+        var seen = Set<String>()
+        let applications = entries
+            .filter { includeSecrets || !$0.isSecret }
+            .compactMap(\.sourceApplication)
+            .filter { seen.insert($0.stableIdentifier).inserted }
+            .sorted {
+                $0.displayName.localizedCaseInsensitiveCompare($1.displayName) == .orderedAscending
+            }
+        if includeSecrets {
+            sourceApplicationIncludingSecretsMemo = applications
+        } else {
+            sourceApplicationMemo = applications
+        }
+        return applications
+    }
+
+    public func hasUnknownSourceForFiltering(includeSecrets: Bool = false) -> Bool {
+        if includeSecrets, let hasUnknownSourceIncludingSecretsMemo {
+            return hasUnknownSourceIncludingSecretsMemo
+        }
+        if !includeSecrets, let hasUnknownSourceMemo { return hasUnknownSourceMemo }
+        let value = entries.contains {
+            (includeSecrets || !$0.isSecret) && $0.sourceApplication == nil
+        }
+        if includeSecrets {
+            hasUnknownSourceIncludingSecretsMemo = value
+        } else {
+            hasUnknownSourceMemo = value
+        }
+        return value
     }
 
     /// Returns plaintext for an already-authorized UI projection without
@@ -225,7 +299,63 @@ public final class ClipboardHistoryStore: ObservableObject {
             sourceBundleURLPath: source?.bundleURLPath
         )
         guard shouldRecord(entry) else { return false }
-        if promoteExistingEntry(contentHash: hash, source: source) {
+        if promoteExistingEntry(
+            contentHash: hash,
+            source: source,
+            replacementOriginalFormats: [],
+            replacesOriginalFormats: true
+        ) {
+            persist()
+            return false
+        }
+        entries.append(entry)
+        trimToLimit()
+        persist()
+        return true
+    }
+
+    /// Stores plain text for search/preview and keeps supported original
+    /// representations in repository sidecars for lossless copying later.
+    @discardableResult
+    public func addRichText(
+        _ payload: ClipboardRichTextPayload,
+        source: ClipboardSourceApplication?
+    ) throws -> Bool {
+        let text = payload.plainText
+        let cleaned = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !cleaned.isEmpty else { return false }
+        guard text.utf8.count <= Self.maxTextByteCount else { return false }
+        guard !payload.formats.isEmpty else { return addText(text, source: source) }
+        var totalFormatByteCount = 0
+        for format in payload.formats {
+            guard ClipboardRichTextPayload.supports(typeIdentifier: format.typeIdentifier) else {
+                throw ClipboardRichTextError.unsupportedRepresentation(format.typeIdentifier)
+            }
+            let (newTotal, overflow) = totalFormatByteCount.addingReportingOverflow(format.data.count)
+            guard !overflow, newTotal <= ClipboardRichTextPayload.maxOriginalFormatByteCount else {
+                throw ClipboardRichTextError.originalFormatsTooLarge(newTotal)
+            }
+            totalFormatByteCount = newTotal
+        }
+
+        let hash = Data(cleaned.utf8).clipboardContentHash
+        var entry = ClipboardEntry(
+            kind: .text,
+            text: text,
+            contentHash: hash,
+            sourceApp: source?.displayName,
+            sourceBundleIdentifier: source?.bundleIdentifier,
+            sourceBundleURLPath: source?.bundleURLPath
+        )
+        guard shouldRecord(entry) else { return false }
+        entry.originalFormats = try repository.saveOriginalFormats(payload.formats)
+
+        if promoteExistingEntry(
+            contentHash: hash,
+            source: source,
+            replacementOriginalFormats: entry.originalFormats,
+            replacesOriginalFormats: true
+        ) {
             persist()
             return false
         }
@@ -383,7 +513,8 @@ public final class ClipboardHistoryStore: ObservableObject {
     public func delete(id: UUID) {
         guard let index = entries.firstIndex(where: { $0.id == id }) else { return }
         let removed = entries.remove(at: index)
-        removeImageIfNeeded(removed)
+        settings.pasteQueueEntryIDs = settings.resolvedPasteQueueEntryIDs.filter { $0 != id }
+        removeBackingAssets(removed)
         normalizePinOrders()
         persist()
     }
@@ -391,7 +522,8 @@ public final class ClipboardHistoryStore: ObservableObject {
     public func clearHistory() {
         let removed = entries
         entries.removeAll()
-        for entry in removed { removeImageIfNeeded(entry) }
+        settings.pasteQueueEntryIDs = []
+        for entry in removed { removeBackingAssets(entry) }
         persist()
     }
 
@@ -417,7 +549,10 @@ public final class ClipboardHistoryStore: ObservableObject {
         guard !removed.isEmpty else { return }
         let removedIDs = Set(removed.map(\.id))
         entries.removeAll { removedIDs.contains($0.id) }
-        for entry in removed { removeImageIfNeeded(entry) }
+        settings.pasteQueueEntryIDs = settings.resolvedPasteQueueEntryIDs.filter {
+            !removedIDs.contains($0)
+        }
+        for entry in removed { removeBackingAssets(entry) }
         normalizePinOrders()
         persist()
     }
@@ -428,7 +563,13 @@ public final class ClipboardHistoryStore: ObservableObject {
     /// (including this one, after a keychain reset) could decrypt — while still
     /// shipping the user's secrets off the device.
     public func snapshot() -> ClipboardHistorySnapshot {
-        ClipboardHistorySnapshot(entries: entries.filter { !$0.isSecret }, settings: settings)
+        let exportedEntries = entries.filter { !$0.isSecret }
+        let exportedIDs = Set(exportedEntries.map(\.id))
+        var exportedSettings = settings
+        exportedSettings.pasteQueueEntryIDs = settings.resolvedPasteQueueEntryIDs.filter {
+            exportedIDs.contains($0)
+        }
+        return ClipboardHistorySnapshot(entries: exportedEntries, settings: exportedSettings)
     }
 
     /// The full in-memory state, secrets included. Only persistence uses this.
@@ -450,7 +591,11 @@ public final class ClipboardHistoryStore: ObservableObject {
 
     /// Archive import deliberately reuses the ordinary storage path so imported
     /// image assets are re-hashed and never overwrite an existing clipboard file.
-    public func importArchive(_ snapshot: ClipboardHistorySnapshot, imagesURL: URL) {
+    public func importArchive(
+        _ snapshot: ClipboardHistorySnapshot,
+        imagesURL: URL,
+        originalFormatsURL: URL
+    ) throws {
         for entry in snapshot.entries {
             // Export strips secrets, so any here came from a hand-made archive.
             // Importing one would drop its origin and surface the ciphertext as
@@ -458,7 +603,26 @@ public final class ClipboardHistoryStore: ObservableObject {
             guard !entry.isSecret else { continue }
             switch entry.kind {
             case .text:
-                _ = addText(entry.text ?? "", source: entry.sourceApplication)
+                let formats = try (entry.originalFormats ?? []).map { format -> ClipboardFormatData in
+                    guard let url = MemeArchiveService.safeContainedURL(
+                        base: originalFormatsURL,
+                        fileName: format.fileName
+                    ) else {
+                        throw ClipboardRichTextError.unsafeStoredFileName(format.fileName)
+                    }
+                    return ClipboardFormatData(
+                        typeIdentifier: format.typeIdentifier,
+                        data: try Data(contentsOf: url)
+                    )
+                }
+                if formats.isEmpty {
+                    _ = addText(entry.text ?? "", source: entry.sourceApplication)
+                } else {
+                    _ = try addRichText(
+                        ClipboardRichTextPayload(plainText: entry.text ?? "", formats: formats),
+                        source: entry.sourceApplication
+                    )
+                }
             case .image:
                 guard let fileName = entry.imageFileName,
                       let url = MemeArchiveService.safeContainedURL(base: imagesURL, fileName: fileName),
@@ -525,9 +689,13 @@ public final class ClipboardHistoryStore: ObservableObject {
         // meaningful to edit — and writing the draft back would replace the
         // ciphertext with plain text.
         guard !entries[index].isSecret else { return }
+        let obsoleteFormats = entries[index].originalFormats ?? []
         entries[index].text = text
         entries[index].contentHash = Data(text.utf8).clipboardContentHash
+        entries[index].originalFormats = []
         entries[index].updatedAt = .now
+        do { try repository.removeOriginalFormats(obsoleteFormats) }
+        catch { lastError = error.localizedDescription }
         _ = collapsePersistedDuplicates()
         persist()
     }
@@ -553,6 +721,7 @@ public final class ClipboardHistoryStore: ObservableObject {
         guard original.manualCategoryKey != key || changesSecrecy else { return false }
 
         var updated = original
+        var obsoleteFormats: [ClipboardOriginalFormat] = []
         if movesToPassword, !original.isSecret {
             guard let plaintext = original.text,
                   let ciphertext = try? SecretVault.encrypt(plaintext) else {
@@ -561,6 +730,8 @@ public final class ClipboardHistoryStore: ObservableObject {
             }
             updated.text = ciphertext
             updated.origin = .concealedPassword
+            obsoleteFormats = updated.originalFormats ?? []
+            updated.originalFormats = []
         } else if original.isSecret, let key, key != .builtin(.password) {
             guard let ciphertext = original.text,
                   let plaintext = try? SecretVault.decrypt(ciphertext) else {
@@ -573,6 +744,8 @@ public final class ClipboardHistoryStore: ObservableObject {
         updated.manualCategoryStorageValue = key?.storageValue
         updated.updatedAt = .now
         entries[index] = updated
+        do { try repository.removeOriginalFormats(obsoleteFormats) }
+        catch { lastError = error.localizedDescription }
 
         // `@Published` announces in willSet. A SwiftUI subscriber can therefore
         // ask for an already-memoized target category before `entries.didSet`
@@ -584,8 +757,90 @@ public final class ClipboardHistoryStore: ObservableObject {
     }
 
     @discardableResult
-    public func copyToPasteboard(_ entry: ClipboardEntry, autoPaste: Bool = false) -> Bool {
-        let pasteboard = NSPasteboard.general
+    public func copyToPasteboard(
+        _ entry: ClipboardEntry,
+        to pasteboard: NSPasteboard = .general,
+        autoPaste: Bool = false
+    ) -> Bool {
+        do {
+            try writeToPasteboard(entry, pasteboard: pasteboard)
+        } catch {
+            lastError = error.localizedDescription
+            return false
+        }
+        finishPasteboardWrite(entry: entry, pasteboard: pasteboard, autoPaste: autoPaste)
+        return true
+    }
+
+    public var pasteQueueCount: Int {
+        validPasteQueueIDs.count
+    }
+
+    public func pasteQueuePosition(of id: UUID) -> Int? {
+        validPasteQueueIDs.firstIndex(of: id).map { $0 + 1 }
+    }
+
+    @discardableResult
+    public func enqueueForPaste(id: UUID) throws -> Int {
+        guard entries.contains(where: { $0.id == id }) else {
+            return try failQueue(.entryNotFound)
+        }
+        var ids = validPasteQueueIDs
+        if let existing = ids.firstIndex(of: id) { return existing + 1 }
+        ids.append(id)
+        settings.pasteQueueEntryIDs = ids
+        return ids.count
+    }
+
+    public func removeFromPasteQueue(id: UUID) {
+        settings.pasteQueueEntryIDs = validPasteQueueIDs.filter { $0 != id }
+    }
+
+    public func clearPasteQueue() {
+        settings.pasteQueueEntryIDs = []
+    }
+
+    /// Copies and removes exactly the first queued item. A failed write or a
+    /// locked secret remains at the head so FIFO order is never silently lost.
+    @discardableResult
+    public func pasteNextQueued(
+        to pasteboard: NSPasteboard = .general,
+        autoPaste: Bool = false,
+        allowsProtectedEntries: Bool = false
+    ) throws -> ClipboardEntry {
+        let ids = validPasteQueueIDs
+        guard let id = ids.first else { return try failQueue(.queueEmpty) }
+        guard let entry = entries.first(where: { $0.id == id }) else {
+            return try failQueue(.entryNotFound)
+        }
+        guard !entry.isSecret || allowsProtectedEntries else {
+            return try failQueue(.protectedEntryLocked)
+        }
+        do {
+            try writeToPasteboard(entry, pasteboard: pasteboard)
+        } catch {
+            lastError = error.localizedDescription
+            throw error
+        }
+        settings.pasteQueueEntryIDs = Array(ids.dropFirst())
+        finishPasteboardWrite(entry: entry, pasteboard: pasteboard, autoPaste: autoPaste)
+        return entry
+    }
+
+    private var validPasteQueueIDs: [UUID] {
+        let existing = Set(entries.map(\.id))
+        return settings.resolvedPasteQueueEntryIDs.filter { existing.contains($0) }
+    }
+
+    private func failQueue<T>(_ error: ClipboardPasteQueueError) throws -> T {
+        lastError = error.localizedDescription
+        throw error
+    }
+
+    private func writeToPasteboard(
+        _ entry: ClipboardEntry,
+        pasteboard: NSPasteboard
+    ) throws {
         pasteboard.clearContents()
         switch entry.kind {
         case .text:
@@ -597,31 +852,47 @@ public final class ClipboardHistoryStore: ObservableObject {
                 // always resolve the original persisted ciphertext by ID so a
                 // copy action never depends on that transient projection.
                 guard let protectedText = entries.first(where: { $0.id == entry.id })?.text ?? entry.text else {
-                    return false
+                    throw ClipboardPasteQueueError.pasteboardWriteFailed
                 }
-                guard let secret = try? SecretVault.decrypt(protectedText) else {
-                    lastError = L10n.text("无法解密密码。")
-                    return false
-                }
+                let secret = try SecretVault.decrypt(protectedText)
                 pasteboard.declareTypes(
                     [.string, NSPasteboard.PasteboardType("org.nspasteboard.ConcealedType")],
                     owner: nil
                 )
-                pasteboard.setString(secret, forType: .string)
+                guard pasteboard.setString(secret, forType: .string) else {
+                    throw ClipboardPasteQueueError.pasteboardWriteFailed
+                }
             } else {
-                guard let text = entry.text else { return false }
-                pasteboard.setString(text, forType: .string)
+                guard let text = entry.text else {
+                    throw ClipboardPasteQueueError.pasteboardWriteFailed
+                }
+                let formats = try repository.loadOriginalFormats(for: entry)
+                if formats.isEmpty {
+                    guard pasteboard.setString(text, forType: .string) else {
+                        throw ClipboardPasteQueueError.pasteboardWriteFailed
+                    }
+                } else {
+                    try ClipboardRichTextPayload(plainText: text, formats: formats).write(to: pasteboard)
+                }
             }
         case .image:
             guard let url = repository.imageURL(for: entry),
-                  let payload = ImageAssetData(fileURL: url) else { return false }
-            payload.write(to: pasteboard)
+                  let payload = ImageAssetData(fileURL: url),
+                  payload.write(to: pasteboard) else {
+                throw ClipboardPasteQueueError.pasteboardWriteFailed
+            }
         }
+    }
+
+    private func finishPasteboardWrite(
+        entry: ClipboardEntry,
+        pasteboard: NSPasteboard,
+        autoPaste: Bool
+    ) {
         suppressedChangeCount = pasteboard.changeCount
         observedChangeCount = pasteboard.changeCount
         markUsed(id: entry.id)
         if autoPaste { scheduleAutoPaste() }
-        return true
     }
 
     /// Injecting ⌘V immediately would land in the still-open clipboard panel
@@ -648,6 +919,8 @@ public final class ClipboardHistoryStore: ObservableObject {
     private func promoteExistingEntry(
         contentHash: String,
         source: ClipboardSourceApplication?,
+        replacementOriginalFormats: [ClipboardOriginalFormat]? = nil,
+        replacesOriginalFormats: Bool = false,
         isSecret: Bool = false,
         now: Date = .now
     ) -> Bool {
@@ -660,6 +933,9 @@ public final class ClipboardHistoryStore: ObservableObject {
             merged.sourceApp = source.displayName
             merged.sourceBundleIdentifier = source.bundleIdentifier
             merged.sourceBundleURLPath = source.bundleURLPath
+        }
+        if replacesOriginalFormats {
+            merged.originalFormats = replacementOriginalFormats ?? []
         }
         replaceEntries(matching: contentHash, isSecret: isSecret, with: merged)
         normalizePinOrders()
@@ -704,16 +980,42 @@ public final class ClipboardHistoryStore: ObservableObject {
     }
 
     private func replaceEntries(matching contentHash: String, isSecret: Bool, with merged: ClipboardEntry) {
-        let removed = entries.filter {
-            $0.contentHash == contentHash && $0.isSecret == isSecret && $0.id != merged.id
+        let replaced = entries.filter {
+            $0.contentHash == contentHash && $0.isSecret == isSecret
         }
-        for entry in removed where entry.kind == .image {
-            guard let fileName = entry.imageFileName,
-                  fileName != merged.imageFileName else { continue }
-            try? repository.removeImage(named: fileName)
+        let replacedIDs = Set(replaced.map(\.id))
+        var mergedQueue: [UUID] = []
+        var seenQueueIDs = Set<UUID>()
+        for id in settings.resolvedPasteQueueEntryIDs {
+            let resolvedID = replacedIDs.contains(id) ? merged.id : id
+            if seenQueueIDs.insert(resolvedID).inserted { mergedQueue.append(resolvedID) }
+        }
+        let preservedFormats = Set((merged.originalFormats ?? []).map(\.fileName))
+        for entry in replaced {
+            if entry.id != merged.id, entry.kind == .image,
+               let fileName = entry.imageFileName, fileName != merged.imageFileName {
+                do { try repository.removeImage(named: fileName) }
+                catch { lastError = error.localizedDescription }
+            }
+            let obsoleteFormats = (entry.originalFormats ?? []).filter {
+                !preservedFormats.contains($0.fileName)
+            }
+            do { try repository.removeOriginalFormats(obsoleteFormats) }
+            catch { lastError = error.localizedDescription }
         }
         entries.removeAll { $0.contentHash == contentHash && $0.isSecret == isSecret }
         entries.append(merged)
+        if mergedQueue != settings.resolvedPasteQueueEntryIDs {
+            settings.pasteQueueEntryIDs = mergedQueue
+        }
+    }
+
+    @discardableResult
+    private func normalizePasteQueueReferences() -> Bool {
+        let normalized = validPasteQueueIDs
+        guard normalized != settings.resolvedPasteQueueEntryIDs else { return false }
+        settings.pasteQueueEntryIDs = normalized
+        return true
     }
 
     @discardableResult
@@ -789,9 +1091,19 @@ public final class ClipboardHistoryStore: ObservableObject {
         // Require an explicitly declared text payload. Asking AppKit to convert
         // a Finder file URL to `.string` can resolve the external file and cause
         // a broad Documents permission prompt during background monitoring.
-        if pasteboard.types?.contains(.string) == true,
-           let text = pasteboard.string(forType: .string),
-           addText(text, source: source) { return }
+        do {
+            if let richText = try ClipboardRichTextPayload.read(from: pasteboard) {
+                if richText.formats.isEmpty {
+                    _ = addText(richText.plainText, source: source)
+                } else {
+                    _ = try addRichText(richText, source: source)
+                }
+                return
+            }
+        } catch {
+            lastError = error.localizedDescription
+            return
+        }
         if settings.savesImages, let image = ImageAssetData.read(from: pasteboard, allowFileURLs: false) {
             _ = addImageData(image, source: source)
         }
@@ -824,8 +1136,12 @@ public final class ClipboardHistoryStore: ObservableObject {
     private func clearEntries(matching key: ClipboardCategoryKey) {
         let customs = settings.customCategories ?? []
         let removed = entries.filter { $0.matches(key: key, customCategories: customs) }
+        let removedIDs = Set(removed.map(\.id))
         entries.removeAll { $0.matches(key: key, customCategories: customs) }
-        for entry in removed { removeImageIfNeeded(entry) }
+        settings.pasteQueueEntryIDs = settings.resolvedPasteQueueEntryIDs.filter {
+            !removedIDs.contains($0)
+        }
+        for entry in removed { removeBackingAssets(entry) }
         normalizePinOrders()
     }
 
@@ -834,7 +1150,10 @@ public final class ClipboardHistoryStore: ObservableObject {
         guard !ids.isEmpty else { return }
         let removed = entries.filter { ids.contains($0.id) }
         entries.removeAll { ids.contains($0.id) }
-        for entry in removed { removeImageIfNeeded(entry) }
+        settings.pasteQueueEntryIDs = settings.resolvedPasteQueueEntryIDs.filter {
+            !ids.contains($0)
+        }
+        for entry in removed { removeBackingAssets(entry) }
     }
 
     /// Position of every entry by id, built once per normalize pass. Both
@@ -874,9 +1193,12 @@ public final class ClipboardHistoryStore: ObservableObject {
         return changed
     }
 
-    private func removeImageIfNeeded(_ entry: ClipboardEntry) {
-        guard let fileName = entry.imageFileName else { return }
-        do { try repository.removeImage(named: fileName) }
+    private func removeBackingAssets(_ entry: ClipboardEntry) {
+        if let fileName = entry.imageFileName {
+            do { try repository.removeImage(named: fileName) }
+            catch { lastError = error.localizedDescription }
+        }
+        do { try repository.removeOriginalFormats(entry.originalFormats ?? []) }
         catch { lastError = error.localizedDescription }
     }
 
