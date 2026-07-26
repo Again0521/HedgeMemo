@@ -24,6 +24,16 @@ public enum SecretVault {
     }
 
     private static let service = "com.hedgememo.app.vault"
+
+    /// In-memory caches. Every `encrypt`/`decrypt` used to re-read the content
+    /// key from the keychain, and `hasPIN` re-queried on each call — on a
+    /// locally-signed build each of those reads can raise the system's "allow
+    /// access to this key" dialog, which is why the prompt kept reappearing.
+    /// Both values are owned exclusively by this type, so caching them cannot
+    /// go stale.
+    nonisolated(unsafe) private static var cachedContentKey: SymmetricKey?
+    nonisolated(unsafe) private static var cachedHasPIN: Bool?
+    private static let cacheLock = NSLock()
     private static let pinAccount = "clipboard-pin-verifier"
     private static let contentKeyAccount = "clipboard-content-key"
 
@@ -38,7 +48,12 @@ public enum SecretVault {
     private static let derivationRounds = 150_000
 
     public static var hasPIN: Bool {
-        (try? loadData(account: pinAccount)) != nil
+        cacheLock.lock()
+        defer { cacheLock.unlock() }
+        if let cachedHasPIN { return cachedHasPIN }
+        let exists = (try? loadData(account: pinAccount)) != nil
+        cachedHasPIN = exists
+        return exists
     }
 
     public static func setPIN(_ pin: String) throws {
@@ -51,6 +66,7 @@ public enum SecretVault {
         }
         let verifier = salt + derive(pin: pin, salt: salt)
         try store(verifier, account: pinAccount)
+        cacheLock.lock(); cachedHasPIN = true; cacheLock.unlock()
         // A new PIN must not orphan already-encrypted entries, so the content
         // key is deliberately left in place — it is independent of the PIN.
         _ = try? ensureContentKey()
@@ -68,6 +84,7 @@ public enum SecretVault {
 
     public static func removePIN() throws {
         try delete(account: pinAccount)
+        cacheLock.lock(); cachedHasPIN = false; cacheLock.unlock()
     }
 
     private static func derive(pin: String, salt: Data) -> Data {
@@ -119,27 +136,60 @@ public enum SecretVault {
 
     @discardableResult
     public static func ensureContentKey() throws -> SymmetricKey {
+        cacheLock.lock()
+        defer { cacheLock.unlock() }
+        if let cachedContentKey { return cachedContentKey }
         if let existing = try? loadData(account: contentKeyAccount), existing.count == 32 {
-            return SymmetricKey(data: existing)
+            let key = SymmetricKey(data: existing)
+            cachedContentKey = key
+            return key
         }
         let key = SymmetricKey(size: .bits256)
         let raw = key.withUnsafeBytes { Data($0) }
         try store(raw, account: contentKeyAccount)
+        cachedContentKey = key
         return key
     }
 
     // MARK: - Keychain plumbing
 
-    private static func baseQuery(account: String) -> [String: Any] {
-        [
+    /// `kSecUseDataProtectionKeychain` selects the modern, iOS-style keychain.
+    /// Items there belong to the app and are read without the legacy keychain's
+    /// per-signature ACL prompt ("HedgeMemo wants to access key …"), which the
+    /// file-based keychain raises again every time the app is re-signed.
+    private static func baseQuery(account: String, dataProtection: Bool) -> [String: Any] {
+        var query: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
             kSecAttrService as String: service,
             kSecAttrAccount as String: account,
         ]
+        if dataProtection { query[kSecUseDataProtectionKeychain as String] = true }
+        return query
+    }
+
+    /// The data-protection keychain needs an `application-identifier`
+    /// entitlement, which a locally-signed build may not carry. Probe it once
+    /// and fall back to the legacy keychain rather than failing outright — the
+    /// stored data and its protection are the same either way; only the ACL
+    /// prompt behaviour differs.
+    nonisolated(unsafe) private static var usesDataProtection = true
+
+    private static func isEntitlementFailure(_ status: OSStatus) -> Bool {
+        // -34018 errSecMissingEntitlement, plus the generic parameter rejection
+        // older systems return for an unsupported query key.
+        status == -34018 || status == errSecParam
     }
 
     private static func store(_ data: Data, account: String) throws {
-        var query = baseQuery(account: account)
+        do { try store(data, account: account, dataProtection: usesDataProtection) }
+        catch VaultError.keychainFailure(let status) where isEntitlementFailure(status) && usesDataProtection {
+            usesDataProtection = false
+            try store(data, account: account, dataProtection: false)
+        }
+    }
+
+    private static func store(_ data: Data, account: String, dataProtection: Bool) throws {
+        var query = baseQuery(account: account, dataProtection: dataProtection)
         SecItemDelete(query as CFDictionary)
         query[kSecValueData as String] = data
         // The vault is only meaningful while this Mac is unlocked, and it must
@@ -150,7 +200,15 @@ public enum SecretVault {
     }
 
     private static func loadData(account: String) throws -> Data {
-        var query = baseQuery(account: account)
+        do { return try loadData(account: account, dataProtection: usesDataProtection) }
+        catch VaultError.keychainFailure(let status) where isEntitlementFailure(status) && usesDataProtection {
+            usesDataProtection = false
+            return try loadData(account: account, dataProtection: false)
+        }
+    }
+
+    private static func loadData(account: String, dataProtection: Bool) throws -> Data {
+        var query = baseQuery(account: account, dataProtection: dataProtection)
         query[kSecReturnData as String] = true
         query[kSecMatchLimit as String] = kSecMatchLimitOne
         var item: CFTypeRef?
@@ -162,7 +220,9 @@ public enum SecretVault {
     }
 
     private static func delete(account: String) throws {
-        let status = SecItemDelete(baseQuery(account: account) as CFDictionary)
+        // Clear both keychains so a fallback never leaves a stale copy behind.
+        _ = SecItemDelete(baseQuery(account: account, dataProtection: false) as CFDictionary)
+        let status = SecItemDelete(baseQuery(account: account, dataProtection: true) as CFDictionary)
         guard status == errSecSuccess || status == errSecItemNotFound else {
             throw VaultError.keychainFailure(status)
         }

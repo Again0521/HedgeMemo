@@ -272,3 +272,7 @@
 "设置 4 位 PIN 码以保护此分类" = "Choose a 4-digit PIN to protect this category";
 "PIN 码需为 4 位数字" = "The PIN must be 4 digits";
 "密码分类始终锁定" = "The Passwords category is always locked";
+"当电脑锁定后" = "When the Mac locks";
+"当未用 5 分钟后" = "After 5 minutes unused";
+"当未用 15 分钟后" = "After 15 minutes unused";
+"当未用 30 分钟后" = "After 30 minutes unused";

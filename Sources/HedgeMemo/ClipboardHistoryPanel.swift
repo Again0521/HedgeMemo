@@ -210,8 +210,6 @@ final class ClipboardHistoryPanelController: NSObject, NSWindowDelegate {
         pendingProgrammaticFrame = nil
         store.releaseTransientCaches()
         ImageThumbnailCache.shared.scheduleIdlePurge()
-        // One of the configurable re-lock triggers.
-        lockStore.handlePanelClosed()
     }
 
     private func show() {
@@ -347,11 +345,25 @@ final class ClipboardHistoryPanelController: NSObject, NSWindowDelegate {
         }
     }
 
-    private func setPanelFrame(_ frame: NSRect, display: Bool = true) {
+    private func setPanelFrame(_ frame: NSRect, display: Bool = true, animated: Bool = false) {
         guard let panel else { return }
         pendingProgrammaticFrame = frame
-        panel.setFrame(frame, display: display, animate: false)
-        panel.contentView?.layoutSubtreeIfNeeded()
+        if animated {
+            // Height changes between categories are eased instead of snapping.
+            // The hosted content is sized from this window's own geometry (see
+            // the GeometryReader in `body`), so it follows the animator frame by
+            // frame and the glass surface never renders a mismatched size —
+            // which is what an animated `setFrame(animate:)` used to produce.
+            NSAnimationContext.runAnimationGroup { context in
+                context.duration = Self.resizeDuration
+                context.timingFunction = CAMediaTimingFunction(name: .easeOut)
+                context.allowsImplicitAnimation = true
+                panel.animator().setFrame(frame, display: display)
+            }
+        } else {
+            panel.setFrame(frame, display: display, animate: false)
+            panel.contentView?.layoutSubtreeIfNeeded()
+        }
         // AppKit normally delivers `windowDidMove` synchronously.  Clear an
         // unmatched pending value on the next run-loop turn so a later user
         // drag is never mistaken for this resize.
@@ -377,7 +389,10 @@ final class ClipboardHistoryPanelController: NSObject, NSWindowDelegate {
     /// Only the main card changes size, anchored by its top edge so the list
     /// never jumps under the pointer. The preview is temporarily hidden before
     /// sizing, then can be added back as a sibling card in the same window.
-    private func resize(contentHeight: CGFloat, animate _: Bool) {
+    /// Short enough to feel immediate, long enough to read as a stretch.
+    private static let resizeDuration: TimeInterval = 0.22
+
+    private func resize(contentHeight: CGFloat, animate: Bool) {
         guard let panel else { return }
         let visibleFrame = activeScreen?.visibleFrame ?? NSRect(x: 0, y: 0, width: 900, height: 700)
         let height = ClipboardPanelLayout.panelHeight(
@@ -418,7 +433,7 @@ final class ClipboardHistoryPanelController: NSObject, NSWindowDelegate {
         // was the source of the occasional compressed, horizontal-strip panel.
         // The SwiftUI content change is already animated where appropriate;
         // commit the host geometry atomically instead.
-        setPanelFrame(frame)
+        setPanelFrame(frame, animated: animate)
         mainScreenFrame = frame
     }
 

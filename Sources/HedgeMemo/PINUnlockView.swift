@@ -15,24 +15,40 @@ import SwiftUI
 enum BiometricAuthenticator {
     /// Cached because the answer cannot change while the app is running, and
     /// because probing it is exactly what must not happen during a body pass.
-    private static var cachedAvailability: Bool?
+    ///
+    /// `canEvaluatePolicy` is not a cheap accessor: it talks to `biometrickitd`
+    /// over XPC and can block for a noticeable fraction of a second on the first
+    /// call. Reading it straight from a SwiftUI body is what made opening
+    /// Settings stutter, so the probe runs once on a background queue and the
+    /// body only ever reads the resolved boolean.
+    nonisolated(unsafe) private static var cachedAvailability: Bool?
+    private static let availabilityLock = NSLock()
 
+    /// Defaults to false until the background probe lands. Settings only uses it
+    /// to enable the Touch ID toggle, which corrects itself as soon as the probe
+    /// finishes — far better than blocking the window's first frame.
     static var isAvailable: Bool {
-        if let cachedAvailability { return cachedAvailability }
-        var error: NSError?
-        let available = LAContext().canEvaluatePolicy(
-            .deviceOwnerAuthenticationWithBiometrics,
-            error: &error
-        )
-        cachedAvailability = available
-        return available
+        availabilityLock.lock()
+        defer { availabilityLock.unlock() }
+        return cachedAvailability ?? false
     }
 
-    /// Warms the cache away from any view update, so the first body pass that
-    /// asks is a plain boolean read.
+    /// Resolves availability off the main thread. Called once at launch.
     static func prepare() {
-        guard cachedAvailability == nil else { return }
-        DispatchQueue.main.async { _ = isAvailable }
+        availabilityLock.lock()
+        let alreadyResolved = cachedAvailability != nil
+        availabilityLock.unlock()
+        guard !alreadyResolved else { return }
+        DispatchQueue.global(qos: .utility).async {
+            var error: NSError?
+            let available = LAContext().canEvaluatePolicy(
+                .deviceOwnerAuthenticationWithBiometrics,
+                error: &error
+            )
+            availabilityLock.lock()
+            cachedAvailability = available
+            availabilityLock.unlock()
+        }
     }
 
     static func authenticate(reason: String) async -> Bool {

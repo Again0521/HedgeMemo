@@ -55,14 +55,12 @@ public final class AppLockStore: ObservableObject {
 
     /// Whether the current unlock session is still valid.
     private var isSessionUnlocked: Bool {
-        guard let unlockedAt else { return false }
-        switch settings.timing {
-        case .onPanelClose, .onSleepOrQuit:
-            return true
-        case .afterIdle:
-            let reference = lastUsedAt ?? unlockedAt
-            return Date.now.timeIntervalSince(reference) < Double(settings.idleMinutes) * 60
-        }
+        AppLockPolicy.remainsUnlocked(
+            settings: settings,
+            unlockedAt: unlockedAt,
+            lastUsedAt: lastUsedAt,
+            now: .now
+        )
     }
 
     /// True when locked content should be withheld right now.
@@ -135,13 +133,9 @@ public final class AppLockStore: ObservableObject {
         lastUsedAt = nil
     }
 
-    public func handlePanelClosed() {
-        guard AppLockPolicy.locksOnPanelClose(settings) else { return }
-        lock()
-    }
-
-    public func handleSystemSleep() {
-        guard AppLockPolicy.locksOnSleep(settings) else { return }
+    /// Locking the Mac re-locks in every mode; the timing option only decides
+    /// whether there is also an idle timeout.
+    public func handleScreenLocked() {
         lock()
     }
 

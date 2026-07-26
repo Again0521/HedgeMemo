@@ -436,7 +436,7 @@ await MainActor.run {
     )
 
     // Lock policy.
-    var lockSettings = AppLockSettings(timing: .afterIdle, idleMinutes: 5)
+    var lockSettings = AppLockSettings(timing: .idle5)
     expect(
         lockSettings.isCategoryLocked(.builtin(.password)),
         "the password category is locked by default"
@@ -466,11 +466,23 @@ await MainActor.run {
         !unprotected.isCategoryLocked(.builtin(.password)),
         "deselecting a surface is the only thing that unlocks it — there is no master switch"
     )
-    lockSettings.timing = .onPanelClose
-    expect(AppLockPolicy.locksOnPanelClose(lockSettings), "panel-close timing re-locks on close")
-    expect(!AppLockPolicy.locksOnSleep(lockSettings), "panel-close timing does not also wait for sleep")
-    lockSettings.timing = .onSleepOrQuit
-    expect(AppLockPolicy.locksOnSleep(lockSettings), "sleep timing re-locks on sleep")
+    // Screen-lock-only mode has no idle timeout at all.
+    lockSettings.timing = .onScreenLock
+    expect(lockSettings.timing.idleInterval == nil, "screen-lock mode has no idle timeout")
+    expect(
+        AppLockPolicy.remainsUnlocked(
+            settings: lockSettings,
+            unlockedAt: now.addingTimeInterval(-86_400),
+            lastUsedAt: now.addingTimeInterval(-86_400),
+            now: now
+        ),
+        "screen-lock mode must not expire on its own"
+    )
+    expect(AppLockTiming.idle5.idleInterval == 300, "idle5 is five minutes")
+    expect(AppLockTiming.idle15.idleInterval == 900, "idle15 is fifteen minutes")
+    expect(AppLockTiming.idle30.idleInterval == 1_800, "idle30 is thirty minutes")
+    expect(AppLockTiming.allCases.count == 4, "exactly the four offered timings")
+    lockSettings.timing = .idle5
 
     lockSettings.setCategory(.builtin(.text), locked: true)
     expect(lockSettings.isCategoryLocked(.builtin(.text)), "an extra category can be locked")

@@ -281,20 +281,7 @@ struct SettingsPanelView: View {
                 }
                 .labelsHidden()
                 .pickerStyle(.menu)
-                .frame(width: 190, alignment: .trailing)
-            }
-            if lockStore.settings.timing == .afterIdle {
-                SettingsDivider()
-                SettingsFormRow(L10n.text("闲置时长")) {
-                    Picker(L10n.text("闲置时长"), selection: idleMinutesBinding) {
-                        ForEach(AppLockSettings.idleMinuteChoices, id: \.self) { minutes in
-                            Text(L10n.format("闲置分钟数格式", minutes)).tag(minutes)
-                        }
-                    }
-                    .labelsHidden()
-                    .pickerStyle(.menu)
-                    .frame(width: 190, alignment: .trailing)
-                }
+                .frame(width: SettingsLayout.controlColumnWidth, alignment: .trailing)
             }
             SettingsDivider()
             SettingsFormRow(L10n.text("允许触控 ID 解锁")) {
@@ -347,13 +334,6 @@ struct SettingsPanelView: View {
         Binding(
             get: { lockStore.settings.timing },
             set: { lockStore.settings.timing = $0 }
-        )
-    }
-
-    private var idleMinutesBinding: Binding<Int> {
-        Binding(
-            get: { lockStore.settings.idleMinutes },
-            set: { lockStore.settings.idleMinutes = $0 }
         )
     }
 

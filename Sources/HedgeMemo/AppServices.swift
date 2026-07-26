@@ -67,13 +67,25 @@ final class AppServices: ObservableObject {
                 self?.clipboardStore.capturesPasswords = captures
             }
             .store(in: &cancellables)
-        // Sleeping the Mac is one of the configurable re-lock triggers.
+        // Locking the Mac re-locks protected surfaces in every timing mode.
+        // The screen-lock signal is a distributed notification (there is no
+        // NSWorkspace equivalent); sleep is kept as a companion trigger because
+        // a Mac that sleeps is about to require the login password anyway.
+        for name in ["com.apple.screenIsLocked", "com.apple.sessionDidMoveOffConsole"] {
+            DistributedNotificationCenter.default().addObserver(
+                forName: NSNotification.Name(name),
+                object: nil,
+                queue: .main
+            ) { [weak self] _ in
+                Task { @MainActor in self?.lockStore.handleScreenLocked() }
+            }
+        }
         NSWorkspace.shared.notificationCenter.addObserver(
             forName: NSWorkspace.willSleepNotification,
             object: nil,
             queue: .main
         ) { [weak self] _ in
-            Task { @MainActor in self?.lockStore.handleSystemSleep() }
+            Task { @MainActor in self?.lockStore.handleScreenLocked() }
         }
         if !CommandLine.arguments.contains(where: { $0.hasPrefix("--preview-") }) {
             // Seed first-run content before monitoring writes any history, so the

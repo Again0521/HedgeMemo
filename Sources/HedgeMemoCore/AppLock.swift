@@ -1,28 +1,39 @@
 import Foundation
 
 /// When a previously unlocked session falls back to locked.
+///
+/// Locking the Mac always re-locks, in every mode — nobody is surprised by
+/// their passwords being protected again after they locked their screen. The
+/// choice here is therefore whether there is *also* an idle timeout on top.
 public enum AppLockTiming: String, Codable, CaseIterable, Sendable {
-    /// Re-lock as soon as the clipboard panel closes.
-    case onPanelClose
-    /// Re-lock after a period of not being used.
-    case afterIdle
-    /// Stay unlocked until the Mac sleeps or the app quits.
-    case onSleepOrQuit
+    /// Screen lock only; no idle timeout.
+    case onScreenLock
+    case idle5
+    case idle15
+    case idle30
+
+    /// How long unused content may stay unlocked, or nil for "no idle timeout".
+    public var idleInterval: TimeInterval? {
+        switch self {
+        case .onScreenLock: nil
+        case .idle5: 5 * 60
+        case .idle15: 15 * 60
+        case .idle30: 30 * 60
+        }
+    }
 
     public var displayName: String {
         switch self {
-        case .onPanelClose: L10n.text("关闭面板后立即锁定")
-        case .afterIdle: L10n.text("闲置一段时间后锁定")
-        case .onSleepOrQuit: L10n.text("睡眠或退出后锁定")
+        case .onScreenLock: L10n.text("当电脑锁定后")
+        case .idle5: L10n.text("当未用 5 分钟后")
+        case .idle15: L10n.text("当未用 15 分钟后")
+        case .idle30: L10n.text("当未用 30 分钟后")
         }
     }
 }
 
 public struct AppLockSettings: Codable, Equatable, Sendable {
-    public static let idleMinuteChoices = [1, 2, 5, 10, 15, 30, 60]
-
     public var timing: AppLockTiming
-    public var idleMinutes: Int
     /// Storage values of the categories that require unlocking.
     public var lockedCategoryKeys: [String]
     public var allowsBiometrics: Bool
@@ -34,14 +45,12 @@ public struct AppLockSettings: Codable, Equatable, Sendable {
     public var capturesPasswords: Bool
 
     public init(
-        timing: AppLockTiming = .onPanelClose,
-        idleMinutes: Int = 5,
+        timing: AppLockTiming = .onScreenLock,
         lockedCategoryKeys: [String]? = nil,
         allowsBiometrics: Bool = true,
         capturesPasswords: Bool = false
     ) {
         self.timing = timing
-        self.idleMinutes = idleMinutes
         self.lockedCategoryKeys = lockedCategoryKeys
             ?? [ClipboardCategoryKey.builtin(.password).storageValue]
         self.allowsBiometrics = allowsBiometrics
@@ -50,7 +59,6 @@ public struct AppLockSettings: Codable, Equatable, Sendable {
     }
 
     public mutating func normalize() {
-        idleMinutes = Self.idleMinuteChoices.min { abs($0 - idleMinutes) < abs($1 - idleMinutes) } ?? 5
         // De-duplicate while keeping order stable for the settings list.
         var seen = Set<String>()
         lockedCategoryKeys = lockedCategoryKeys.filter { seen.insert($0).inserted }
@@ -100,27 +108,10 @@ public enum AppLockPolicy {
         lastUsedAt: Date?,
         now: Date
     ) -> Bool {
-        guard unlockedAt != nil else { return false }
-        switch settings.timing {
-        case .onPanelClose:
-            // Panel close is an explicit event; nothing time-based expires it.
-            return true
-        case .afterIdle:
-            let reference = lastUsedAt ?? unlockedAt ?? now
-            return now.timeIntervalSince(reference) < Double(settings.idleMinutes) * 60
-        case .onSleepOrQuit:
-            return true
-        }
-    }
-
-    /// Whether closing the clipboard panel should re-lock.
-    public static func locksOnPanelClose(_ settings: AppLockSettings) -> Bool {
-        settings.timing == .onPanelClose
-    }
-
-    /// Whether the machine going to sleep should re-lock.
-    public static func locksOnSleep(_ settings: AppLockSettings) -> Bool {
-        settings.timing != .onPanelClose
+        guard let unlockedAt else { return false }
+        guard let interval = settings.timing.idleInterval else { return true }
+        let reference = lastUsedAt ?? unlockedAt
+        return now.timeIntervalSince(reference) < interval
     }
 
     /// A locked category must never leak its rows through search or the quick
