@@ -141,6 +141,7 @@ struct SettingsPanelView: View {
     @State private var customDraft: CustomCategoryDraft?
     @State private var selectedTab: SettingsTab = .clipboard
     @State private var isSettingPIN = false
+    @State private var isVerifyingPIN = false
     @StateObject private var launchAtLogin = LaunchAtLoginController()
     @AppStorage(AppPreferences.showsScrollIndicatorsKey) private var showsScrollIndicators = true
     @AppStorage(AppPreferences.interfaceOpacityKey)
@@ -169,6 +170,18 @@ struct SettingsPanelView: View {
             // selected in the chips below, so creating the PIN is the whole step.
             PINSetupSheet(lockStore: lockStore) { _ in }
         }
+        .sheet(isPresented: $isVerifyingPIN) {
+            PINVerifySheet(lockStore: lockStore)
+        }
+    }
+
+    /// Managing the PIN is only offered once the user has proved they know it.
+    /// Without this, anyone at an unattended Mac could strip the protection off
+    /// the encrypted 密码 category without ever entering the PIN.
+    private var requiresUnlockToManagePIN: Bool {
+        lockStore.hasPIN
+            && !lockStore.settings.lockedCategoryKeys.isEmpty
+            && lockStore.isLocked
     }
 
     /// The feature switcher is its own surface floating over the window's
@@ -243,16 +256,24 @@ struct SettingsPanelView: View {
     private var securitySection: some View {
         SettingsSection(
             title: L10n.text("安全"),
-            footer: L10n.text("开启后，密码管理器等标记为隐私的复制内容会记录到「密码」分类，并加密保存。关闭时（默认）这类内容不会被记录。")
+            footer: L10n.text("密码管理器等标记为隐私的复制内容会记录到「密码」分类并加密保存；该分类始终需要 PIN 码解锁。关闭后这类内容将完全不被记录。")
         ) {
             SettingsActionRow {
                 HStack(spacing: 8) {
-                    Button(L10n.text(lockStore.hasPIN ? "修改 PIN 码…" : "设置 PIN 码…")) {
-                        isSettingPIN = true
-                    }
-                    if lockStore.hasPIN {
-                        Button(L10n.text("移除 PIN 码"), role: .destructive) {
-                            try? lockStore.removePIN()
+                    if requiresUnlockToManagePIN {
+                        // While something is still locked, managing the PIN has
+                        // to be earned. Changing it is gated too: otherwise
+                        // "change" would be a way around "remove" — set a PIN
+                        // you know, then remove it.
+                        Button(L10n.text("解锁")) { isVerifyingPIN = true }
+                    } else {
+                        Button(L10n.text(lockStore.hasPIN ? "修改 PIN 码…" : "设置 PIN 码…")) {
+                            isSettingPIN = true
+                        }
+                        if lockStore.hasPIN {
+                            Button(L10n.text("移除 PIN 码"), role: .destructive) {
+                                try? lockStore.removePIN()
+                            }
                         }
                     }
                 }
@@ -876,10 +897,8 @@ private struct LockTargetChips: View {
     let isFixed: (LockTarget) -> Bool
     let toggle: (LockTarget) -> Void
 
-    private let columns = [GridItem(.adaptive(minimum: 72, maximum: 160), spacing: 6, alignment: .leading)]
-
     var body: some View {
-        LazyVGrid(columns: columns, alignment: .leading, spacing: 6) {
+        ChipFlowLayout(spacing: 6, lineSpacing: 6) {
             ForEach(targets) { target in
                 let locked = isLocked(target)
                 let fixed = isFixed(target)
@@ -889,10 +908,12 @@ private struct LockTargetChips: View {
                     Text(target.name)
                         .font(.system(size: 12, weight: locked ? .semibold : .regular))
                         .foregroundStyle(locked ? Color.white : Color.primary)
-                        .lineLimit(1)
-                        .padding(.horizontal, 10)
+                        // No `lineLimit`/`maxWidth`: the layout gives each chip
+                        // exactly the width its label needs, so a longer name
+                        // like 表情包面板 is never truncated to an ellipsis.
+                        .fixedSize()
+                        .padding(.horizontal, 12)
                         .frame(height: 24)
-                        .frame(maxWidth: .infinity)
                         .background(
                             Capsule(style: .continuous)
                                 .fill(locked ? AnyShapeStyle(Color.accentColor) : AnyShapeStyle(.quaternary))
@@ -906,6 +927,62 @@ private struct LockTargetChips: View {
                 .help(fixed ? L10n.text("密码分类始终锁定") : target.name)
             }
         }
+    }
+}
+
+/// Wraps chips onto as many lines as they need, each at its own natural width.
+/// `LazyVGrid`'s adaptive columns force every cell to a shared column width,
+/// which is what truncated the longer labels.
+private struct ChipFlowLayout: Layout {
+    var spacing: CGFloat = 6
+    var lineSpacing: CGFloat = 6
+
+    func sizeThatFits(proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) -> CGSize {
+        let maxWidth = proposal.width ?? .infinity
+        let rows = arrange(subviews: subviews, maxWidth: maxWidth)
+        let height = rows.reduce(into: CGFloat.zero) { total, row in
+            total += row.height
+        } + lineSpacing * CGFloat(max(0, rows.count - 1))
+        let width = rows.map(\.width).max() ?? 0
+        return CGSize(width: proposal.width ?? width, height: height)
+    }
+
+    func placeSubviews(in bounds: CGRect, proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) {
+        let rows = arrange(subviews: subviews, maxWidth: bounds.width)
+        var y = bounds.minY
+        for row in rows {
+            var x = bounds.minX
+            for item in row.items {
+                subviews[item.index].place(
+                    at: CGPoint(x: x, y: y),
+                    anchor: .topLeading,
+                    proposal: ProposedViewSize(item.size)
+                )
+                x += item.size.width + spacing
+            }
+            y += row.height + lineSpacing
+        }
+    }
+
+    private struct Item { let index: Int; let size: CGSize }
+    private struct Row { var items: [Item] = []; var width: CGFloat = 0; var height: CGFloat = 0 }
+
+    private func arrange(subviews: Subviews, maxWidth: CGFloat) -> [Row] {
+        var rows: [Row] = []
+        var current = Row()
+        for index in subviews.indices {
+            let size = subviews[index].sizeThatFits(.unspecified)
+            let needed = current.items.isEmpty ? size.width : current.width + spacing + size.width
+            if !current.items.isEmpty, needed > maxWidth {
+                rows.append(current)
+                current = Row()
+            }
+            current.width = current.items.isEmpty ? size.width : current.width + spacing + size.width
+            current.height = max(current.height, size.height)
+            current.items.append(Item(index: index, size: size))
+        }
+        if !current.items.isEmpty { rows.append(current) }
+        return rows
     }
 }
 

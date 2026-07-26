@@ -67,7 +67,10 @@ final class PinnedClipboardWindowsController {
     }
 
     private func synchronize(with entries: [ClipboardEntry]) {
-        let pinnedEntries = entries.filter { $0.isDesktopPinned == true }
+        // A desktop note has no lock of its own, so a secret must never become
+        // one. The store already refuses to pin them; this also drops any that
+        // an older build managed to persist.
+        let pinnedEntries = entries.filter { $0.isDesktopPinned == true && !$0.isSecret }
         let pinned = Dictionary(uniqueKeysWithValues: pinnedEntries.map { ($0.id, $0) })
 
         let staleWindowIDs = windows.keys.filter { pinned[$0] == nil }

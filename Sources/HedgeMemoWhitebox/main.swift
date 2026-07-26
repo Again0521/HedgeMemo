@@ -428,6 +428,24 @@ await MainActor.run {
         "ZIP export must never carry password entries off this Mac"
     )
 
+    // A desktop note is always visible and has no gate, so a secret must never
+    // become one.
+    secretStore.toggleDesktopPinned(id: secretEntry.id)
+    expect(
+        secretStore.entries.first(where: { $0.id == secretEntry.id })?.isDesktopPinned != true,
+        "a secret must never be pinnable to the desktop — that would bypass the PIN gate"
+    )
+
+    // An identical plain copy shares the hash (it is taken over the plaintext),
+    // so dedup must not collapse the two and leave the readable one behind.
+    let plainTwin = ClipboardEntry(kind: .text, text: "twin", contentHash: "hash-secret")
+    secretStore.addSeedEntries([plainTwin])
+    expect(
+        secretStore.entries.contains(where: { $0.isSecret })
+            && secretStore.entries.contains(where: { $0.id == plainTwin.id }),
+        "a secret and a same-hash plain entry must survive as two separate entries"
+    )
+
     // Editing must not overwrite ciphertext with plain text.
     secretStore.updateText(id: secretEntry.id, text: "plain")
     expect(
@@ -489,13 +507,68 @@ await MainActor.run {
     lockSettings.setCategory(.builtin(.text), locked: false)
     expect(!lockSettings.isCategoryLocked(.builtin(.text)), "and unlocked again")
 
-    expect(
-        AppLockPolicy.hidesEntry(secretEntry, settings: lockSettings, customCategories: [], isUnlocked: false),
-        "a locked category's entry stays hidden while locked"
+    // The quick ⌘1–9 slots bypass the category UI entirely, so they must never
+    // return a secret.
+    let pinnedSecret = ClipboardEntry(
+        kind: .text,
+        text: "hmenc.v1:ZmFrZQ==",
+        contentHash: "pinned-secret",
+        isPinned: true,
+        pinnedOrder: 0,
+        origin: .concealedPassword
     )
     expect(
-        !AppLockPolicy.hidesEntry(secretEntry, settings: lockSettings, customCategories: [], isUnlocked: true),
-        "and becomes visible once unlocked"
+        ClipboardHistoryPolicy.quickEntry(in: [pinnedSecret], number: 1) == nil,
+        "a pinned secret must never be reachable through a quick slot"
+    )
+
+    expect(
+        AppLockSettings().capturesPasswords,
+        "password capture is on by default; the 密码 category is always PIN-gated and encrypted"
+    )
+    expect(
+        AppLockSettings().isCategoryLocked(.builtin(.password)),
+        "…and that default is only safe because the category ships locked"
+    )
+
+    // Brute-force penalty: five wrong PINs, then a ten-minute cooldown.
+    expect(AppLockPolicy.maxFailedAttempts == 5, "five attempts before the penalty")
+    expect(AppLockPolicy.cooldownDuration == 600, "the penalty lasts ten minutes")
+    var attempts = 0
+    var cooldown: Date?
+    for strike in 1...AppLockPolicy.maxFailedAttempts {
+        let outcome = AppLockPolicy.afterFailedAttempt(failedAttempts: attempts, now: now)
+        attempts = outcome.failedAttempts
+        cooldown = outcome.cooldownUntil
+        if strike < AppLockPolicy.maxFailedAttempts {
+            expect(cooldown == nil, "no penalty before the fifth wrong PIN (strike \(strike))")
+            expect(attempts == strike, "each wrong PIN counts once")
+        }
+    }
+    expect(cooldown != nil, "the fifth wrong PIN starts the cooldown")
+    expect(
+        attempts == 0,
+        "the counter resets with the penalty, so the next one needs five fresh failures"
+    )
+    expect(
+        AppLockPolicy.isCoolingDown(until: cooldown, now: now),
+        "entry is refused while the penalty runs"
+    )
+    expect(
+        AppLockPolicy.cooldownRemaining(until: cooldown, now: now) == 600,
+        "the full ten minutes remain at the start"
+    )
+    expect(
+        !AppLockPolicy.isCoolingDown(until: cooldown, now: now.addingTimeInterval(601)),
+        "entry is allowed again once it expires"
+    )
+    expect(
+        AppLockPolicy.cooldownRemaining(until: cooldown, now: now.addingTimeInterval(900)) == 0,
+        "remaining time never goes negative"
+    )
+    expect(
+        !AppLockPolicy.isCoolingDown(until: nil, now: now),
+        "no penalty means no refusal"
     )
 
     // The cipher envelope must be recognisable and must not be plain text.

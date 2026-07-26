@@ -247,13 +247,20 @@ final class ClipboardHistoryPanelController: NSObject, NSWindowDelegate {
             PanelMaterialHost.replace(content, in: mainSurface, usesWindowMaterial: false)
         }
         let key = store.settings.activeCategoryKey
-        let ordered = store.orderedEntries(key: key)
-        let pageLimit = ClipboardPanelPagination.initialLimit(for: key)
-        let heightEntries = Array(ordered.prefix(min(pageLimit, ordered.count)))
-        resize(
-            contentHeight: ClipboardPanelLayout.contentHeight(for: heightEntries, key: key),
-            animate: false
-        )
+        // A locked category shows the PIN gate, not a list, so its height comes
+        // from the gate. Sizing from the (hidden) entries here made the panel
+        // open at the wrong height and then jump as soon as the view reported
+        // its real content height.
+        let initialContentHeight: CGFloat
+        if lockStore.isCategoryLocked(key) {
+            initialContentHeight = ClipboardPanelLayout.lockedStateHeight
+        } else {
+            let ordered = store.orderedEntries(key: key)
+            let pageLimit = ClipboardPanelPagination.initialLimit(for: key)
+            let heightEntries = Array(ordered.prefix(min(pageLimit, ordered.count)))
+            initialContentHeight = ClipboardPanelLayout.contentHeight(for: heightEntries, key: key)
+        }
+        resize(contentHeight: initialContentHeight, animate: false)
         position(panel)
         // Match the reference popup's activation contract. The material is
         // fixed by PanelMaterialHost; becoming key must not replace it with a
@@ -1387,12 +1394,12 @@ struct ClipboardHistoryPanelView: View {
             categoryBar
                 .frame(height: ClipboardPanelLayout.segmentedHeight)
             if isActiveCategoryLocked {
-                // A fixed height: the gate is a panel state, not a list, so
-                // without this the content grows the card and pushes the search
-                // field and category bar off the top of the window.
+                // Fills the same slot the scrolling list would, so the VStack
+                // keeps filling its frame. A fixed-height gate left the stack
+                // shorter than the card, and its default centring then slid the
+                // search field up and back while the height animated.
                 PINGateView(lockStore: lockStore, gate: activeGate, surfaceName: title(for: activeKey))
-                    .frame(maxWidth: .infinity)
-                    .frame(height: ClipboardPanelLayout.lockedStateHeight)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
             } else {
             ScrollViewReader { proxy in
                 ScrollView {
@@ -1419,6 +1426,9 @@ struct ClipboardHistoryPanelView: View {
             }
             }
         }
+        // Top-anchored: the search field and category bar must keep their
+        // position no matter how the area below them resizes.
+        .frame(maxHeight: .infinity, alignment: .top)
         .padding(ClipboardPanelLayout.outerPadding)
         .frame(width: ClipboardPanelLayout.panelWidth)
         // A non-activating panel's search field normally owns first responder,
@@ -1431,6 +1441,7 @@ struct ClipboardHistoryPanelView: View {
             resetPagination()
             validateSelection()
             reportContentHeight()
+            noteProtectedActivity()
         }
         .onChange(of: query) { _, _ in selectionAndSizeChanged(resetPage: true) }
         .onChange(of: store.settings.lastCategory) { _, _ in selectionAndSizeChanged(resetPage: true) }
@@ -1439,6 +1450,8 @@ struct ClipboardHistoryPanelView: View {
         // already handled above; reacting to both fired two resizes for one
         // change, which is what made switching to 密码 flicker and judder.
         .onChange(of: activeGate) { _, _ in reportContentHeight() }
+        // Opening a protected category counts as using it.
+        .onChange(of: activeKey.storageValue) { _, _ in noteProtectedActivity() }
         .onChange(of: store.entries) { _, _ in selectionAndSizeChanged(resetPage: false) }
         .onChange(of: visibleEntryLimit) { _, _ in
             DispatchQueue.main.async { reportContentHeight() }
@@ -1516,6 +1529,13 @@ struct ClipboardHistoryPanelView: View {
         // a detail slideout is visible.
         onDetailEntry(nil)
         DispatchQueue.main.async { reportContentHeight() }
+    }
+
+    /// Marks the unlocked session as in use while a protected category is being
+    /// viewed, so the idle timing means "unused" rather than "since unlock".
+    private func noteProtectedActivity() {
+        guard lockStore.settings.isCategoryLocked(activeKey) else { return }
+        lockStore.noteActivity()
     }
 
     private func reportContentHeight() {
@@ -1717,6 +1737,12 @@ struct ClipboardHistoryPanelView: View {
     }
 
     private func copy(_ entry: ClipboardEntry) {
+        // Using protected content is what the "N minutes unused" timing counts;
+        // without this the idle window ran from the unlock instant regardless
+        // of how actively the user was working with the category.
+        if entry.isSecret || lockStore.settings.isCategoryLocked(activeKey) {
+            lockStore.noteActivity()
+        }
         _ = store.copyToPasteboard(entry, autoPaste: store.settings.autoPaste)
         onDone()
     }

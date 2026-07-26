@@ -3,51 +3,63 @@ import HedgeMemoCore
 import LocalAuthentication
 import SwiftUI
 
+/// Thread-safe home for the resolved Touch ID availability.
+///
+/// It lives outside `BiometricAuthenticator` on purpose: that enum is
+/// `@MainActor`, so its static storage — including a plain `NSLock` — is
+/// main-actor isolated and cannot be touched from the background probe. A
+/// self-synchronising `Sendable` box is readable from either side without
+/// weakening the isolation of anything else.
+private final class BiometricAvailabilityBox: @unchecked Sendable {
+    private let lock = NSLock()
+    private var resolved: Bool?
+
+    var value: Bool? {
+        lock.lock()
+        defer { lock.unlock() }
+        return resolved
+    }
+
+    func resolve(_ newValue: Bool) {
+        lock.lock()
+        resolved = newValue
+        lock.unlock()
+    }
+}
+
+/// A `let` global of a `Sendable` type carries no actor isolation, which is
+/// exactly what both the main-actor readers and the background writer need.
+private let biometricAvailability = BiometricAvailabilityBox()
+
 /// Touch ID (falling back to the login password) for unlocking a protected
 /// surface.
 ///
-/// `isAvailable` is resolved **once**, lazily, and never from inside a SwiftUI
-/// body. Constructing an `LAContext` while a window's view tree is being built
-/// installs LocalAuthentication's out-of-process `NSRemoteView`; that view then
-/// throws from `containingWindowWillOrderOnScreen:` as the window is ordered on
-/// screen, which crashed the app (SIGABRT) the moment Settings was opened.
+/// Availability is resolved **once**, off the main thread, and never from inside
+/// a SwiftUI body: constructing an `LAContext` while a window's view tree is
+/// being built installs LocalAuthentication's out-of-process `NSRemoteView`,
+/// which then throws from `containingWindowWillOrderOnScreen:` as the window is
+/// ordered on screen — a SIGABRT the moment Settings opened.
 @MainActor
 enum BiometricAuthenticator {
-    /// Cached because the answer cannot change while the app is running, and
-    /// because probing it is exactly what must not happen during a body pass.
-    ///
-    /// `canEvaluatePolicy` is not a cheap accessor: it talks to `biometrickitd`
-    /// over XPC and can block for a noticeable fraction of a second on the first
-    /// call. Reading it straight from a SwiftUI body is what made opening
-    /// Settings stutter, so the probe runs once on a background queue and the
-    /// body only ever reads the resolved boolean.
-    nonisolated(unsafe) private static var cachedAvailability: Bool?
-    private static let availabilityLock = NSLock()
-
     /// Defaults to false until the background probe lands. Settings only uses it
     /// to enable the Touch ID toggle, which corrects itself as soon as the probe
     /// finishes — far better than blocking the window's first frame.
-    static var isAvailable: Bool {
-        availabilityLock.lock()
-        defer { availabilityLock.unlock() }
-        return cachedAvailability ?? false
-    }
+    ///
+    /// `canEvaluatePolicy` is not a cheap accessor: it talks to `biometrickitd`
+    /// over XPC and can block for a noticeable fraction of a second on the first
+    /// call, which is what made opening Settings stutter.
+    static var isAvailable: Bool { biometricAvailability.value ?? false }
 
     /// Resolves availability off the main thread. Called once at launch.
     static func prepare() {
-        availabilityLock.lock()
-        let alreadyResolved = cachedAvailability != nil
-        availabilityLock.unlock()
-        guard !alreadyResolved else { return }
+        guard biometricAvailability.value == nil else { return }
         DispatchQueue.global(qos: .utility).async {
             var error: NSError?
             let available = LAContext().canEvaluatePolicy(
                 .deviceOwnerAuthenticationWithBiometrics,
                 error: &error
             )
-            availabilityLock.lock()
-            cachedAvailability = available
-            availabilityLock.unlock()
+            biometricAvailability.resolve(available)
         }
     }
 
@@ -136,6 +148,16 @@ struct PINGateView: View {
 
     private var isSetup: Bool { gate == .needsSetup }
 
+    /// Too many wrong PINs: entry is refused for a while. Touch ID stays
+    /// available throughout — it proves the actual device owner is present and
+    /// cannot be guessed, so the anti-brute-force penalty does not apply to it.
+    private var isCoolingDown: Bool { !isSetup && lockStore.isCoolingDown }
+
+    private static func countdown(_ remaining: TimeInterval) -> String {
+        let total = Int(remaining.rounded(.up))
+        return String(format: "%d:%02d", total / 60, total % 60)
+    }
+
     private var biometricsEnabled: Bool {
         !isSetup && lockStore.settings.allowsBiometrics && BiometricAuthenticator.isAvailable
     }
@@ -152,8 +174,22 @@ struct PINGateView: View {
                 .font(.system(size: 11))
                 .foregroundStyle(.secondary)
 
-            PINDotsField(pin: $pin, isFocused: $pinFocused) {
-                if isSetup { confirmFocused = true } else { submitUnlock() }
+            if isCoolingDown {
+                // Ticks only while the penalty is running, so no timer is left
+                // alive once entry is available again.
+                TimelineView(.periodic(from: .now, by: 1)) { context in
+                    let remaining = AppLockPolicy.cooldownRemaining(
+                        until: lockStore.cooldownUntil,
+                        now: context.date
+                    )
+                    Text(L10n.format("PIN 冷却格式", Self.countdown(remaining)))
+                        .font(.system(size: 12, weight: .medium).monospacedDigit())
+                        .foregroundStyle(.red)
+                }
+            } else {
+                PINDotsField(pin: $pin, isFocused: $pinFocused) {
+                    if isSetup { confirmFocused = true } else { submitUnlock() }
+                }
             }
 
             if isSetup {
@@ -163,7 +199,7 @@ struct PINGateView: View {
                 PINDotsField(pin: $confirmation, isFocused: $confirmFocused) { submitSetup() }
             }
 
-            if let message {
+            if let message, !isCoolingDown {
                 Text(message)
                     .font(.system(size: 11))
                     .foregroundStyle(.red)
@@ -185,7 +221,7 @@ struct PINGateView: View {
         // and made the card resize twice while it settled.
         .frame(maxWidth: .infinity)
         .onAppear {
-            pinFocused = true
+            pinFocused = !isCoolingDown
             // Deliberately no automatic Touch ID prompt here. `evaluatePolicy`
             // presents its dialog as an out-of-process sheet on the containing
             // window; firing it from `onAppear` raced that window's own
@@ -204,9 +240,12 @@ struct PINGateView: View {
             pin = ""
             message = nil
         } else {
-            message = L10n.text("PIN 码不正确")
+            let left = AppLockPolicy.maxFailedAttempts - lockStore.failedAttempts
+            message = lockStore.isCoolingDown || left <= 0
+                ? L10n.text("PIN 码不正确")
+                : L10n.format("PIN 剩余次数格式", left)
             pin = ""
-            pinFocused = true
+            pinFocused = !lockStore.isCoolingDown
         }
     }
 

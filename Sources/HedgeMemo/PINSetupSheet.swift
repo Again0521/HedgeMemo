@@ -1,6 +1,32 @@
 import HedgeMemoCore
 import SwiftUI
 
+/// Proves the user knows the current PIN before Settings will let them change
+/// or remove it. Reuses the same gate the locked categories show, so the entry
+/// experience (dots, Touch ID, error copy) is identical everywhere.
+struct PINVerifySheet: View {
+    @ObservedObject var lockStore: AppLockStore
+    @Environment(\.dismiss) private var dismiss
+
+    var body: some View {
+        VStack(spacing: 10) {
+            PINGateView(
+                lockStore: lockStore,
+                gate: .needsUnlock,
+                surfaceName: L10n.text("设置")
+            )
+            Button(L10n.text("取消")) { dismiss() }
+        }
+        .padding(.vertical, 16)
+        .frame(width: 320)
+        // `unlockedAt` is the published signal; a successful PIN entry or Touch
+        // ID both set it, so this covers either route out of the sheet.
+        .onChange(of: lockStore.unlockedAt) { _, unlockedAt in
+            if unlockedAt != nil { dismiss() }
+        }
+    }
+}
+
 /// Creates or replaces the PIN from Settings. Requires the same four digits
 /// twice so a typo cannot silently lock the user out of their own content.
 struct PINSetupSheet: View {

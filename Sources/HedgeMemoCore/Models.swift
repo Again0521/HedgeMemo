@@ -882,7 +882,10 @@ public enum ClipboardHistoryPolicy {
 
     public static func quickEntry(in entries: [ClipboardEntry], number: Int) -> ClipboardEntry? {
         guard (1...9).contains(number) else { return nil }
-        let pinned = pinnedEntries(entries)
+        // The quick slots are reachable without opening any category, so they
+        // must never hand back a secret — that would be a copy of a password
+        // with no gate in front of it.
+        let pinned = pinnedEntries(entries).filter { !$0.isSecret }
         guard number <= pinned.count else { return nil }
         return pinned[number - 1]
     }

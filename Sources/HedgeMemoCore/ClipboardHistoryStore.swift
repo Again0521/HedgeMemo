@@ -225,7 +225,7 @@ public final class ClipboardHistoryStore: ObservableObject {
             origin: .concealedPassword
         )
         guard shouldRecord(candidate) else { return false }
-        if promoteExistingEntry(contentHash: hash, sourceApp: sourceApp) {
+        if promoteExistingEntry(contentHash: hash, sourceApp: sourceApp, isSecret: true) {
             persist()
             return false
         }
@@ -390,6 +390,10 @@ public final class ClipboardHistoryStore: ObservableObject {
     /// image assets are re-hashed and never overwrite an existing clipboard file.
     public func importArchive(_ snapshot: ClipboardHistorySnapshot, imagesURL: URL) {
         for entry in snapshot.entries {
+            // Export strips secrets, so any here came from a hand-made archive.
+            // Importing one would drop its origin and surface the ciphertext as
+            // an ordinary readable entry.
+            guard !entry.isSecret else { continue }
             switch entry.kind {
             case .text:
                 _ = addText(entry.text ?? "", sourceApp: entry.sourceApp)
@@ -430,6 +434,12 @@ public final class ClipboardHistoryStore: ObservableObject {
 
     public func toggleDesktopPinned(id: UUID) {
         guard let index = entries.firstIndex(where: { $0.id == id }) else { return }
+        // A desktop note is permanently visible and has no gate of its own, so
+        // pinning a secret would place it on screen forever — the exact thing
+        // the 密码 lock exists to prevent. (It would also render ciphertext,
+        // since a note shows the stored text verbatim.) Un-pinning stays
+        // allowed so an entry pinned by an older build can still be cleared.
+        if entries[index].isSecret, entries[index].isDesktopPinned != true { return }
         if entries[index].isDesktopPinned == true {
             entries[index].isDesktopPinned = false
             entries[index].desktopPinnedOrder = nil
@@ -519,15 +529,16 @@ public final class ClipboardHistoryStore: ObservableObject {
     private func promoteExistingEntry(
         contentHash: String,
         sourceApp: String?,
+        isSecret: Bool = false,
         now: Date = .now
     ) -> Bool {
-        let matches = entries.filter { $0.contentHash == contentHash }
+        let matches = entries.filter { $0.contentHash == contentHash && $0.isSecret == isSecret }
         guard !matches.isEmpty else { return false }
         var merged = mergedEntry(from: matches)
         merged.createdAt = now
         merged.updatedAt = now
         if let sourceApp { merged.sourceApp = sourceApp }
-        replaceEntries(matching: contentHash, with: merged)
+        replaceEntries(matching: contentHash, isSecret: isSecret, with: merged)
         normalizePinOrders()
         _ = normalizeDesktopPinnedOrders()
         return true
@@ -537,16 +548,22 @@ public final class ClipboardHistoryStore: ObservableObject {
     /// them once on load (and after edit/seed paths) without changing recency.
     @discardableResult
     private func collapsePersistedDuplicates() -> Bool {
-        let duplicateHashes = Dictionary(grouping: entries, by: \.contentHash)
+        // Grouped by secrecy as well as content: an encrypted password and an
+        // identical plain copy share a hash (the hash is over the plaintext),
+        // and collapsing them together would drop the secret in favour of the
+        // readable one.
+        let duplicates = Dictionary(grouping: entries) { DedupKey(hash: $0.contentHash, isSecret: $0.isSecret) }
             .filter { $0.value.count > 1 }
-        guard !duplicateHashes.isEmpty else { return false }
-        for (hash, matches) in duplicateHashes {
-            replaceEntries(matching: hash, with: mergedEntry(from: matches))
+        guard !duplicates.isEmpty else { return false }
+        for (key, matches) in duplicates {
+            replaceEntries(matching: key.hash, isSecret: key.isSecret, with: mergedEntry(from: matches))
         }
         normalizePinOrders()
         _ = normalizeDesktopPinnedOrders()
         return true
     }
+
+    private struct DedupKey: Hashable { let hash: String; let isSecret: Bool }
 
     private func mergedEntry(from matches: [ClipboardEntry]) -> ClipboardEntry {
         precondition(!matches.isEmpty)
@@ -563,14 +580,16 @@ public final class ClipboardHistoryStore: ObservableObject {
         return merged
     }
 
-    private func replaceEntries(matching contentHash: String, with merged: ClipboardEntry) {
-        let removed = entries.filter { $0.contentHash == contentHash && $0.id != merged.id }
+    private func replaceEntries(matching contentHash: String, isSecret: Bool, with merged: ClipboardEntry) {
+        let removed = entries.filter {
+            $0.contentHash == contentHash && $0.isSecret == isSecret && $0.id != merged.id
+        }
         for entry in removed where entry.kind == .image {
             guard let fileName = entry.imageFileName,
                   fileName != merged.imageFileName else { continue }
             try? repository.removeImage(named: fileName)
         }
-        entries.removeAll { $0.contentHash == contentHash }
+        entries.removeAll { $0.contentHash == contentHash && $0.isSecret == isSecret }
         entries.append(merged)
     }
 

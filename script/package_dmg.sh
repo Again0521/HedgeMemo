@@ -35,11 +35,23 @@ mkdir -p "$STAGING_DIR"
 ln -s /Applications "$STAGING_DIR/Applications"
 rm -f "$DMG_PATH"
 
-/usr/bin/hdiutil create \
-  -volname "$APP_NAME" \
-  -srcfolder "$STAGING_DIR" \
-  -ov \
-  -format UDZO \
-  "$DMG_PATH"
+# `hdiutil create` is deprecated in favour of `diskutil image create`, but that
+# subcommand only exists on newer systems. Prefer it when present so the build
+# is warning-free, and keep hdiutil for older build machines. Both produce the
+# same UDZO (compressed, read-only) image.
+if /usr/sbin/diskutil image create from --help >/dev/null 2>&1; then
+  /usr/sbin/diskutil image create from \
+    --format UDZO \
+    --volumeName "$APP_NAME" \
+    "$STAGING_DIR" \
+    "$DMG_PATH"
+else
+  /usr/bin/hdiutil create \
+    -volname "$APP_NAME" \
+    -srcfolder "$STAGING_DIR" \
+    -ov \
+    -format UDZO \
+    "$DMG_PATH"
+fi
 
 echo "Created $DMG_PATH"

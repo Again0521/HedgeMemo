@@ -38,17 +38,19 @@ public struct AppLockSettings: Codable, Equatable, Sendable {
     public var lockedCategoryKeys: [String]
     public var allowsBiometrics: Bool
     /// Whether concealed clipboard content (password managers mark copies with
-    /// `org.nspasteboard.ConcealedType`) is recorded at all. Default false keeps
-    /// the privacy behaviour introduced in 1.2.0: passwords are simply not
-    /// stored. Turning it on routes them into the locked 密码 category, where
-    /// their text is encrypted at rest.
+    /// `org.nspasteboard.ConcealedType`) is recorded at all.
+    ///
+    /// On by default: such copies land in the 密码 category, which is always
+    /// PIN-gated and whose text is encrypted at rest, so recording them does not
+    /// expose them the way an ordinary history entry would. Switching this off
+    /// restores the 1.2.0 behaviour of not storing them at all.
     public var capturesPasswords: Bool
 
     public init(
         timing: AppLockTiming = .onScreenLock,
         lockedCategoryKeys: [String]? = nil,
         allowsBiometrics: Bool = true,
-        capturesPasswords: Bool = false
+        capturesPasswords: Bool = true
     ) {
         self.timing = timing
         self.lockedCategoryKeys = lockedCategoryKeys
@@ -101,6 +103,33 @@ public struct AppLockSettings: Codable, Equatable, Sendable {
 /// Pure decisions about when a session should fall back to locked, kept out of
 /// the store so they can be exercised without a running app.
 public enum AppLockPolicy {
+    /// Wrong PINs tolerated before entry is refused for a while. A 4-digit PIN
+    /// is only ten thousand combinations, so without a penalty an attacker at an
+    /// unattended Mac could simply keep typing.
+    public static let maxFailedAttempts = 5
+    public static let cooldownDuration: TimeInterval = 10 * 60
+
+    /// How long PIN entry stays refused, or zero once the penalty has expired.
+    public static func cooldownRemaining(until: Date?, now: Date) -> TimeInterval {
+        guard let until else { return 0 }
+        return max(0, until.timeIntervalSince(now))
+    }
+
+    public static func isCoolingDown(until: Date?, now: Date) -> Bool {
+        cooldownRemaining(until: until, now: now) > 0
+    }
+
+    /// The state after a wrong PIN: either one more strike, or the start of a
+    /// cooldown with the counter reset so the next penalty needs five fresh
+    /// failures rather than triggering on every subsequent attempt.
+    public static func afterFailedAttempt(
+        failedAttempts: Int,
+        now: Date
+    ) -> (failedAttempts: Int, cooldownUntil: Date?) {
+        let attempts = failedAttempts + 1
+        guard attempts >= maxFailedAttempts else { return (attempts, nil) }
+        return (0, now.addingTimeInterval(cooldownDuration))
+    }
     /// Whether an unlocked session is still valid.
     public static func remainsUnlocked(
         settings: AppLockSettings,
@@ -114,17 +143,4 @@ public enum AppLockPolicy {
         return now.timeIntervalSince(reference) < interval
     }
 
-    /// A locked category must never leak its rows through search or the quick
-    /// ⌘1–9 slots either, so callers filter entries with this.
-    public static func hidesEntry(
-        _ entry: ClipboardEntry,
-        settings: AppLockSettings,
-        customCategories: [CustomClipboardCategory],
-        isUnlocked: Bool
-    ) -> Bool {
-        guard !isUnlocked else { return false }
-        return settings.lockedCategoryKeys
-            .compactMap(ClipboardCategoryKey.init(storageValue:))
-            .contains { entry.matches(key: $0, customCategories: customCategories) }
-    }
 }
