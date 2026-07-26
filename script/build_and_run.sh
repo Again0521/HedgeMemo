@@ -95,6 +95,12 @@ cat >"$INFO_PLIST" <<PLIST
 <key>CFBundleVersion</key><string>1.2.0</string>
 <key>LSMinimumSystemVersion</key><string>$MIN_SYSTEM_VERSION</string>
 <key>LSUIElement</key><true/>
+<key>CFBundleDisplayName</key><string>$APP_NAME</string>
+<!-- LocalAuthentication renders its Touch ID prompt through an out-of-process
+     view that reads these from the host bundle. A bundle missing them made the
+     remote view throw from containingWindowWillOrderOnScreen:, aborting the
+     app the moment a window carrying that view was ordered on screen. -->
+<key>NSFaceIDUsageDescription</key><string>HedgeMemo uses Touch ID to unlock protected clipboard categories.</string>
 <key>NSPrincipalClass</key><string>NSApplication</string>
 <key>LSEnvironment</key>
 <dict>
