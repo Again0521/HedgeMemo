@@ -20,7 +20,7 @@
 
 HedgeMemo lives in the macOS menu bar. Clipboard history, memes, and screenshot tools stay in one place—ready when you need them and quietly out of the way when you don’t.
 
-Your content is stored on this Mac by default. HedgeMemo asks for system permission only when a screenshot or automatic paste needs it.
+Your content is stored on this Mac by default. HedgeMemo asks for system permission only when a screenshot or automatic paste needs it. Copied passwords are stored encrypted and locked away in their own category.
 
 One app, three everyday tools: **Clipboard · Memes · Screenshots**.
 
@@ -81,6 +81,23 @@ Any clipboard item can become a desktop note, keeping code, to-do lists, and ref
 - Code notes retain syntax highlighting.
 - Desktop-pinned items begin at position 10 in clipboard history. When several are pinned, the first one pinned appears first.
 - Press <kbd>⌥</kbd><kbd>P</kbd> to pin or unpin the selected item.
+
+## Passwords and Locking
+
+### Kept apart, unlocked only when you need them
+
+<img src="Assets/feature-password_en.svg" width="100%" alt="Passwords category with PIN unlock" />
+
+Anything copied from a password manager or a browser password field goes into its own Passwords category. That category always asks for a PIN, which you can create the first time you open it.
+
+- Password text is sealed with AES-GCM before it reaches the disk. The key lives in the system keychain and the text is decrypted only at the moment you copy it.
+- Lists, search, and previews only ever show “Hidden password” — never the value itself.
+- Beyond passwords, you can lock text, code, screenshots, other categories, and the meme panel.
+- Choose when it re-locks: when the Mac locks, or after 5, 15, or 30 minutes unused.
+- Unlock with Touch ID (with the system password as a fallback). Five wrong PINs start a 10-minute cooldown.
+- Prefer not to keep them at all? Turn off “Record Password Copies” in Settings and they are never stored.
+
+Password entries are never pinned to the desktop, and never leave this Mac in an exported ZIP.
 
 ## Settings and Personalization
 
