@@ -189,6 +189,63 @@ final class StoreBehaviorTests: XCTestCase {
         XCTAssertFalse(store.orderedEntries().first?.isPinned == true, "recency promotion is not pinning")
     }
 
+    func testSourceApplicationIdentityPersistsAndUpdatesWhenDuplicateIsRecopied() {
+        let root = tempRoot("clip-source-identity")
+        let repository = ClipboardHistoryRepository(rootURL: root)
+        let store = ClipboardHistoryStore(repository: repository)
+        let safari = ClipboardSourceApplication(
+            bundleIdentifier: "com.apple.Safari",
+            displayName: "Safari",
+            bundleURLPath: "/Applications/Safari.app"
+        )
+        let notes = ClipboardSourceApplication(
+            bundleIdentifier: "com.apple.Notes",
+            displayName: "Notes",
+            bundleURLPath: "/System/Applications/Notes.app"
+        )
+
+        XCTAssertTrue(store.addText("same content", source: safari))
+        XCTAssertFalse(store.addText("same content", source: notes))
+
+        let reloaded = ClipboardHistoryStore(repository: repository)
+        XCTAssertEqual(reloaded.entries.count, 1)
+        XCTAssertEqual(reloaded.entries.first?.sourceApp, "Notes")
+        XCTAssertEqual(reloaded.entries.first?.sourceBundleIdentifier, "com.apple.Notes")
+        XCTAssertEqual(
+            reloaded.entries.first?.sourceBundleURLPath,
+            "/System/Applications/Notes.app"
+        )
+    }
+
+    func testPasteboardCaptureHonorsBlocklistAndAllowlistBeforeRecording() {
+        let source = ClipboardSourceApplication(
+            bundleIdentifier: "com.example.private",
+            displayName: "Private App"
+        )
+        let pasteboard = NSPasteboard.withUniqueName()
+        pasteboard.declareTypes([.string], owner: nil)
+        pasteboard.setString("must be filtered", forType: .string)
+
+        let blocked = makeClipboardStore()
+        blocked.settings.appFilterMode = .blocklist
+        blocked.settings.appFilterApplications = [source]
+        blocked.capturePasteboardContents(pasteboard, source: source)
+        XCTAssertTrue(blocked.entries.isEmpty)
+
+        let notAllowed = makeClipboardStore()
+        notAllowed.settings.appFilterMode = .allowlist
+        notAllowed.settings.appFilterApplications = []
+        notAllowed.capturePasteboardContents(pasteboard, source: source)
+        XCTAssertTrue(notAllowed.entries.isEmpty)
+
+        let allowed = makeClipboardStore()
+        allowed.settings.appFilterMode = .allowlist
+        allowed.settings.appFilterApplications = [source]
+        allowed.capturePasteboardContents(pasteboard, source: source)
+        XCTAssertEqual(allowed.entries.map(\.text), ["must be filtered"])
+        XCTAssertEqual(allowed.entries.first?.sourceBundleIdentifier, "com.example.private")
+    }
+
     func testReCopyingPinnedContentPreservesExplicitPinState() {
         let store = makeClipboardStore()
         XCTAssertTrue(store.addText("固定内容"))

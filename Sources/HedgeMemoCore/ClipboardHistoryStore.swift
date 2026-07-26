@@ -202,13 +202,30 @@ public final class ClipboardHistoryStore: ObservableObject {
 
     @discardableResult
     public func addText(_ text: String, sourceApp: String? = nil) -> Bool {
+        addText(
+            text,
+            source: sourceApp.map {
+                ClipboardSourceApplication(bundleIdentifier: nil, displayName: $0)
+            }
+        )
+    }
+
+    @discardableResult
+    public func addText(_ text: String, source: ClipboardSourceApplication?) -> Bool {
         let cleaned = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !cleaned.isEmpty else { return false }
         guard text.utf8.count <= Self.maxTextByteCount else { return false }
         let hash = Data(cleaned.utf8).clipboardContentHash
-        let entry = ClipboardEntry(kind: .text, text: text, contentHash: hash, sourceApp: sourceApp)
+        let entry = ClipboardEntry(
+            kind: .text,
+            text: text,
+            contentHash: hash,
+            sourceApp: source?.displayName,
+            sourceBundleIdentifier: source?.bundleIdentifier,
+            sourceBundleURLPath: source?.bundleURLPath
+        )
         guard shouldRecord(entry) else { return false }
-        if promoteExistingEntry(contentHash: hash, sourceApp: sourceApp) {
+        if promoteExistingEntry(contentHash: hash, source: source) {
             persist()
             return false
         }
@@ -226,16 +243,28 @@ public final class ClipboardHistoryStore: ObservableObject {
     /// ciphertext would defeat that, since AES-GCM uses a fresh nonce each time.
     @discardableResult
     public func addPassword(_ secret: String, sourceApp: String? = nil) -> Bool {
+        addPassword(
+            secret,
+            source: sourceApp.map {
+                ClipboardSourceApplication(bundleIdentifier: nil, displayName: $0)
+            }
+        )
+    }
+
+    @discardableResult
+    public func addPassword(_ secret: String, source: ClipboardSourceApplication?) -> Bool {
         guard !secret.isEmpty, secret.utf8.count <= Self.maxTextByteCount else { return false }
         let hash = Data(secret.utf8).clipboardContentHash
         let candidate = ClipboardEntry(
             kind: .text,
             contentHash: hash,
-            sourceApp: sourceApp,
+            sourceApp: source?.displayName,
+            sourceBundleIdentifier: source?.bundleIdentifier,
+            sourceBundleURLPath: source?.bundleURLPath,
             origin: .concealedPassword
         )
         guard shouldRecord(candidate) else { return false }
-        if promoteExistingEntry(contentHash: hash, sourceApp: sourceApp, isSecret: true) {
+        if promoteExistingEntry(contentHash: hash, source: source, isSecret: true) {
             persist()
             return false
         }
@@ -247,7 +276,9 @@ public final class ClipboardHistoryStore: ObservableObject {
             kind: .text,
             text: ciphertext,
             contentHash: hash,
-            sourceApp: sourceApp,
+            sourceApp: source?.displayName,
+            sourceBundleIdentifier: source?.bundleIdentifier,
+            sourceBundleURLPath: source?.bundleURLPath,
             origin: .concealedPassword
         ))
         trimToLimit()
@@ -273,6 +304,23 @@ public final class ClipboardHistoryStore: ObservableObject {
         sourceApp: String? = nil,
         origin: ClipboardEntryOrigin? = nil
     ) -> Bool {
+        addImageData(
+            payload,
+            note: note,
+            source: sourceApp.map {
+                ClipboardSourceApplication(bundleIdentifier: nil, displayName: $0)
+            },
+            origin: origin
+        )
+    }
+
+    @discardableResult
+    public func addImageData(
+        _ payload: ImageAssetData,
+        note: String? = nil,
+        source: ClipboardSourceApplication?,
+        origin: ClipboardEntryOrigin? = nil
+    ) -> Bool {
         guard settings.savesImages else { return false }
         guard payload.data.count <= Self.maxImageByteCount else { return false }
         do {
@@ -280,11 +328,13 @@ public final class ClipboardHistoryStore: ObservableObject {
                 kind: .image,
                 text: note,
                 contentHash: payload.data.clipboardContentHash,
-                sourceApp: sourceApp,
+                sourceApp: source?.displayName,
+                sourceBundleIdentifier: source?.bundleIdentifier,
+                sourceBundleURLPath: source?.bundleURLPath,
                 origin: origin
             )
             guard shouldRecord(candidate) else { return false }
-            if promoteExistingEntry(contentHash: candidate.contentHash, sourceApp: sourceApp) {
+            if promoteExistingEntry(contentHash: candidate.contentHash, source: source) {
                 persist()
                 return false
             }
@@ -294,7 +344,9 @@ public final class ClipboardHistoryStore: ObservableObject {
                 text: note,
                 imageFileName: stored.fileName,
                 contentHash: stored.contentHash,
-                sourceApp: sourceApp,
+                sourceApp: source?.displayName,
+                sourceBundleIdentifier: source?.bundleIdentifier,
+                sourceBundleURLPath: source?.bundleURLPath,
                 origin: origin
             ))
             trimToLimit()
@@ -314,7 +366,7 @@ public final class ClipboardHistoryStore: ObservableObject {
         let changeCount = NSPasteboard.general.changeCount
         observedChangeCount = changeCount
         suppressedChangeCount = changeCount
-        return addImageData(payload, sourceApp: "HedgeMemo", origin: .hedgeMemoScreenshot)
+        return addImageData(payload, source: .hedgeMemo, origin: .hedgeMemoScreenshot)
     }
 
     /// Marks the pasteboard's current change as one the app made itself (e.g. a
@@ -406,12 +458,12 @@ public final class ClipboardHistoryStore: ObservableObject {
             guard !entry.isSecret else { continue }
             switch entry.kind {
             case .text:
-                _ = addText(entry.text ?? "", sourceApp: entry.sourceApp)
+                _ = addText(entry.text ?? "", source: entry.sourceApplication)
             case .image:
                 guard let fileName = entry.imageFileName,
                       let url = MemeArchiveService.safeContainedURL(base: imagesURL, fileName: fileName),
                       let payload = ImageAssetData(fileURL: url) else { continue }
-                _ = addImageData(payload, note: entry.text, sourceApp: entry.sourceApp, origin: entry.origin)
+                _ = addImageData(payload, note: entry.text, source: entry.sourceApplication, origin: entry.origin)
             }
         }
     }
@@ -595,7 +647,7 @@ public final class ClipboardHistoryStore: ObservableObject {
     @discardableResult
     private func promoteExistingEntry(
         contentHash: String,
-        sourceApp: String?,
+        source: ClipboardSourceApplication?,
         isSecret: Bool = false,
         now: Date = .now
     ) -> Bool {
@@ -604,7 +656,11 @@ public final class ClipboardHistoryStore: ObservableObject {
         var merged = mergedEntry(from: matches)
         merged.createdAt = now
         merged.updatedAt = now
-        if let sourceApp { merged.sourceApp = sourceApp }
+        if let source {
+            merged.sourceApp = source.displayName
+            merged.sourceBundleIdentifier = source.bundleIdentifier
+            merged.sourceBundleURLPath = source.bundleURLPath
+        }
         replaceEntries(matching: contentHash, isSecret: isSecret, with: merged)
         normalizePinOrders()
         _ = normalizeDesktopPinnedOrders()
@@ -704,7 +760,21 @@ public final class ClipboardHistoryStore: ObservableObject {
         guard !isRecordingPaused else { return }
         // The copy happened within the last polling interval, so the frontmost
         // app is a good approximation of where the content came from.
-        let sourceApp = NSWorkspace.shared.frontmostApplication?.localizedName
+        let source = Self.sourceApplication(from: NSWorkspace.shared.frontmostApplication)
+        capturePasteboardContents(pasteboard, source: source)
+    }
+
+    /// The deterministic capture half of `inspectPasteboard`, separated so
+    /// policy and pasteboard-type behavior can be tested without touching the
+    /// user's general clipboard or relying on the polling timer.
+    func capturePasteboardContents(
+        _ pasteboard: NSPasteboard,
+        source: ClipboardSourceApplication?
+    ) {
+        // Apply the policy before asking the pasteboard to materialize any
+        // representation. Excluded content therefore never enters app memory,
+        // classification, encryption or persistence.
+        guard settings.allowsCapture(from: source) else { return }
         // Content a password manager (or a browser password field) marked
         // concealed. Unless the user has explicitly opted in, it is dropped
         // exactly as before — that stays the default. When opted in it is
@@ -713,7 +783,7 @@ public final class ClipboardHistoryStore: ObservableObject {
             guard capturesPasswords,
                   pasteboard.types?.contains(.string) == true,
                   let secret = pasteboard.string(forType: .string) else { return }
-            _ = addPassword(secret, sourceApp: sourceApp)
+            _ = addPassword(secret, source: source)
             return
         }
         // Require an explicitly declared text payload. Asking AppKit to convert
@@ -721,10 +791,23 @@ public final class ClipboardHistoryStore: ObservableObject {
         // a broad Documents permission prompt during background monitoring.
         if pasteboard.types?.contains(.string) == true,
            let text = pasteboard.string(forType: .string),
-           addText(text, sourceApp: sourceApp) { return }
+           addText(text, source: source) { return }
         if settings.savesImages, let image = ImageAssetData.read(from: pasteboard, allowFileURLs: false) {
-            _ = addImageData(image, sourceApp: sourceApp)
+            _ = addImageData(image, source: source)
         }
+    }
+
+    private static func sourceApplication(from application: NSRunningApplication?) -> ClipboardSourceApplication? {
+        guard let application else { return nil }
+        let name = application.localizedName
+            ?? application.bundleURL?.deletingPathExtension().lastPathComponent
+            ?? application.bundleIdentifier
+            ?? L10n.text("未知")
+        return ClipboardSourceApplication(
+            bundleIdentifier: application.bundleIdentifier,
+            displayName: name,
+            bundleURLPath: application.bundleURL?.standardizedFileURL.path
+        )
     }
 
     private func shouldRecord(_ entry: ClipboardEntry) -> Bool {

@@ -585,6 +585,10 @@ public struct ClipboardHistorySettings: Codable, Equatable, Sendable {
     /// Optional preserves decoding of settings saved before syntax themes
     /// existed. Nil maps to the original system palette.
     public var codeHighlightTheme: CodeHighlightTheme?
+    /// Optional fields preserve snapshots written before per-application
+    /// capture policy existed.
+    public var appFilterMode: ClipboardAppFilterMode?
+    public var appFilterApplications: [ClipboardSourceApplication]?
 
     public init(
         maxEntries: Int = 100,
@@ -596,7 +600,9 @@ public struct ClipboardHistorySettings: Codable, Equatable, Sendable {
         categoryOrder: [String]? = nil,
         customCategories: [CustomClipboardCategory]? = nil,
         disabledCategoryKeys: [String]? = nil,
-        codeHighlightTheme: CodeHighlightTheme? = .system
+        codeHighlightTheme: CodeHighlightTheme? = .system,
+        appFilterMode: ClipboardAppFilterMode? = .disabled,
+        appFilterApplications: [ClipboardSourceApplication]? = nil
     ) {
         self.maxEntries = Self.normalizedMaxEntries(maxEntries)
         self.savesImages = savesImages
@@ -608,11 +614,36 @@ public struct ClipboardHistorySettings: Codable, Equatable, Sendable {
         self.customCategories = customCategories
         self.disabledCategoryKeys = disabledCategoryKeys
         self.codeHighlightTheme = codeHighlightTheme
+        self.appFilterMode = appFilterMode
+        self.appFilterApplications = appFilterApplications
         normalize()
     }
 
     public var resolvedCodeHighlightTheme: CodeHighlightTheme {
         codeHighlightTheme ?? .system
+    }
+
+    public var resolvedAppFilterMode: ClipboardAppFilterMode {
+        appFilterMode ?? .disabled
+    }
+
+    public func allowsCapture(from source: ClipboardSourceApplication?) -> Bool {
+        ClipboardAppCapturePolicy.allows(
+            source: source,
+            mode: resolvedAppFilterMode,
+            applications: appFilterApplications ?? []
+        )
+    }
+
+    public mutating func addAppFilterApplication(_ application: ClipboardSourceApplication) {
+        var applications = appFilterApplications ?? []
+        guard !applications.contains(where: { $0.matches(application) }) else { return }
+        applications.append(application)
+        appFilterApplications = applications
+    }
+
+    public mutating func removeAppFilterApplication(id: String) {
+        appFilterApplications?.removeAll { $0.stableIdentifier == id }
     }
 
     public var activeCategoryKey: ClipboardCategoryKey {
@@ -651,6 +682,11 @@ public struct ClipboardHistorySettings: Codable, Equatable, Sendable {
         if hotKey == nil || hotKey == .legacyClipboard { hotKey = .defaultClipboard }
         let customs = customCategories ?? []
         customCategories = customs
+        appFilterMode = resolvedAppFilterMode
+        var seenApplications = Set<String>()
+        appFilterApplications = (appFilterApplications ?? []).filter {
+            !$0.displayName.isEmpty && seenApplications.insert($0.stableIdentifier).inserted
+        }
 
         func isValid(_ key: ClipboardCategoryKey) -> Bool {
             switch key {
@@ -697,6 +733,10 @@ public struct ClipboardEntry: Codable, Hashable, Identifiable, Sendable {
     public var lastUsedAt: Date?
     public var useCount: Int?
     public var sourceApp: String?
+    /// Stable source identity added after `sourceApp`. Optional fields keep old
+    /// clipboard-history snapshots source-compatible.
+    public var sourceBundleIdentifier: String?
+    public var sourceBundleURLPath: String?
     public var isPinned: Bool
     public var pinnedOrder: Int?
     /// Independent from clipboard ordering/quick-slot pinning. Optional keeps
@@ -723,6 +763,8 @@ public struct ClipboardEntry: Codable, Hashable, Identifiable, Sendable {
         lastUsedAt: Date? = nil,
         useCount: Int? = nil,
         sourceApp: String? = nil,
+        sourceBundleIdentifier: String? = nil,
+        sourceBundleURLPath: String? = nil,
         isPinned: Bool = false,
         pinnedOrder: Int? = nil,
         isDesktopPinned: Bool? = false,
@@ -740,6 +782,8 @@ public struct ClipboardEntry: Codable, Hashable, Identifiable, Sendable {
         self.lastUsedAt = lastUsedAt
         self.useCount = useCount
         self.sourceApp = sourceApp
+        self.sourceBundleIdentifier = sourceBundleIdentifier
+        self.sourceBundleURLPath = sourceBundleURLPath
         self.isPinned = isPinned
         self.pinnedOrder = pinnedOrder
         self.isDesktopPinned = isDesktopPinned
@@ -753,6 +797,17 @@ public struct ClipboardEntry: Codable, Hashable, Identifiable, Sendable {
     /// plaintext for display; the stored model, search index and archive
     /// snapshot remain encrypted or masked.
     public var isSecret: Bool { origin == .concealedPassword }
+
+    public var sourceApplication: ClipboardSourceApplication? {
+        guard sourceApp != nil || sourceBundleIdentifier != nil || sourceBundleURLPath != nil else {
+            return nil
+        }
+        return ClipboardSourceApplication(
+            bundleIdentifier: sourceBundleIdentifier,
+            displayName: sourceApp ?? L10n.text("未知"),
+            bundleURLPath: sourceBundleURLPath
+        )
+    }
 
     public var manualCategoryKey: ClipboardCategoryKey? {
         manualCategoryStorageValue.flatMap(ClipboardCategoryKey.init(storageValue:))

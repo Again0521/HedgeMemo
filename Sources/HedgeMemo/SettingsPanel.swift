@@ -2,7 +2,7 @@ import AppKit
 import HedgeMemoCore
 import SwiftUI
 
-private enum SettingsLayout {
+enum SettingsLayout {
     static let panelWidth: CGFloat = 720
     static let panelHeight: CGFloat = 620
     static let sidebarWidth: CGFloat = 184
@@ -252,6 +252,7 @@ struct SettingsPanelView: View {
     @ViewBuilder
     private var clipboardTab: some View {
         clipboardSection
+        ClipboardAppFilterSettingsView(store: clipboardStore)
         codeAppearanceSection
         categorySection
     }
@@ -1057,7 +1058,7 @@ private struct SettingsTabRow: View {
 /// Settings deliberately use the window's single vibrancy surface. Section
 /// structure comes from typography and separators, not a second translucent
 /// card layered on top of the window material.
-private struct SettingsSection<Content: View>: View {
+struct SettingsSection<Content: View>: View {
     let title: String
     var footer: String?
     let content: Content
@@ -1082,7 +1083,7 @@ private struct SettingsSection<Content: View>: View {
     }
 }
 
-private struct SettingsRow<Content: View>: View {
+struct SettingsRow<Content: View>: View {
     let content: Content
 
     init(@ViewBuilder content: () -> Content) {
@@ -1097,7 +1098,7 @@ private struct SettingsRow<Content: View>: View {
 
 /// Buttons perform a discrete action, so they share the same right control
 /// column as menus, switches and shortcut recorders instead of floating left.
-private struct SettingsActionRow<Content: View>: View {
+struct SettingsActionRow<Content: View>: View {
     let content: Content
 
     init(@ViewBuilder content: () -> Content) {
@@ -1116,7 +1117,7 @@ private struct SettingsActionRow<Content: View>: View {
 
 /// Fixed label column for every form-like setting.  This prevents switches,
 /// shortcuts, pickers and values from drifting horizontally between sections.
-private struct SettingsFormRow<Content: View>: View {
+struct SettingsFormRow<Content: View>: View {
     let title: String
     let content: Content
 
@@ -1137,7 +1138,7 @@ private struct SettingsFormRow<Content: View>: View {
     }
 }
 
-private struct SettingsDivider: View {
+struct SettingsDivider: View {
     var body: some View { Divider() }
 }
 
