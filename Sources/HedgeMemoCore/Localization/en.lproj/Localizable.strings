@@ -268,3 +268,6 @@
 "开启后，密码管理器等标记为隐私的复制内容会记录到「密码」分类，并加密保存。关闭时（默认）这类内容不会被记录。" = "When on, copies marked private by password managers are recorded into the Passwords category and stored encrypted. When off (the default) they are not recorded at all.";
 "需要先设置 PIN 码" = "Set a PIN first";
 "没有密码记录" = "No Passwords";
+"为「密码」设置 PIN 码" = "Set a PIN for Passwords";
+"设置 4 位 PIN 码以保护此分类" = "Choose a 4-digit PIN to protect this category";
+"PIN 码需为 4 位数字" = "The PIN must be 4 digits";

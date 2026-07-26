@@ -489,6 +489,31 @@ await MainActor.run {
     // The cipher envelope must be recognisable and must not be plain text.
     expect(SecretVault.isEncrypted("hmenc.v1:abc"), "the cipher envelope is detectable")
     expect(!SecretVault.isEncrypted("hunter2"), "plain text is not mistaken for ciphertext")
+
+    // The meme panel is lockable through a reserved key that can never be
+    // mistaken for a clipboard category.
+    expect(
+        ClipboardCategoryKey(storageValue: AppLockSettings.memePanelStorageKey) == nil,
+        "the meme panel key must not parse as a clipboard category"
+    )
+    var panelSettings = AppLockSettings(isEnabled: true, lockedCategoryKeys: [])
+    expect(!panelSettings.locksMemePanel, "the meme panel starts unlocked")
+    panelSettings.setMemePanelLocked(true)
+    expect(panelSettings.locksMemePanel, "the meme panel can be locked")
+    expect(
+        !panelSettings.isCategoryLocked(.builtin(.text)),
+        "locking the meme panel must not lock a clipboard category"
+    )
+    panelSettings.setMemePanelLocked(false)
+    expect(!panelSettings.locksMemePanel, "and unlocked again")
+
+    // Duplicate lock targets must collapse rather than accumulate.
+    var duplicated = AppLockSettings(
+        isEnabled: true,
+        lockedCategoryKeys: ["password", "password", AppLockSettings.memePanelStorageKey]
+    )
+    duplicated.normalize()
+    expect(duplicated.lockedCategoryKeys.count == 2, "normalize de-duplicates lock targets")
 }
 
 print("HedgeMemo whitebox checks passed (\(assertionCount) assertions).")
