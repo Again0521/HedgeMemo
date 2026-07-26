@@ -142,6 +142,7 @@ struct SettingsPanelView: View {
     @State private var selectedTab: SettingsTab = .clipboard
     @State private var isSettingPIN = false
     @State private var isVerifyingPIN = false
+    @State private var biometricsAvailable = BiometricAuthenticator.isAvailable
     @StateObject private var launchAtLogin = LaunchAtLoginController()
     @AppStorage(AppPreferences.showsScrollIndicatorsKey) private var showsScrollIndicators = true
     @AppStorage(AppPreferences.interfaceOpacityKey)
@@ -161,6 +162,10 @@ struct SettingsPanelView: View {
         .onAppear {
             refreshAccessibilityTrust()
             launchAtLogin.refresh()
+            biometricsAvailable = BiometricAuthenticator.isAvailable
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .hedgeMemoBiometricAvailabilityDidChange)) { _ in
+            biometricsAvailable = BiometricAuthenticator.isAvailable
         }
         .sheet(item: $customDraft) { draft in
             CustomCategoryEditorSheet(draft: draft) { saveCustomCategory($0) }
@@ -308,7 +313,7 @@ struct SettingsPanelView: View {
             SettingsFormRow(L10n.text("允许触控 ID 解锁")) {
                 Toggle(L10n.text("允许触控 ID 解锁"), isOn: biometricsBinding)
                     .labelsHidden()
-                    .disabled(!BiometricAuthenticator.isAvailable)
+                    .disabled(!biometricsAvailable)
             }
             SettingsDivider()
             SettingsFormRow(L10n.text("记录密码类内容")) {
@@ -581,10 +586,10 @@ struct SettingsPanelView: View {
         HStack(spacing: 8) {
             switch key {
             case .builtin(let category):
-                Label(L10n.text(category.displayName), systemImage: category.systemImage)
+                categoryLabel(title: L10n.text(category.displayName), systemImage: category.systemImage)
             case .custom(let id):
                 let custom = clipboardStore.settings.customCategory(id: id)
-                Label(custom?.name ?? L10n.text("自定义"), systemImage: "tag")
+                categoryLabel(title: custom?.name ?? L10n.text("自定义"), systemImage: "tag")
                 if let pattern = custom?.pattern {
                     Text(pattern)
                         .font(.system(size: 10, design: .monospaced))
@@ -593,14 +598,6 @@ struct SettingsPanelView: View {
                 }
             }
             Spacer(minLength: 12)
-            Toggle(L10n.text("启用"), isOn: Binding(
-                get: { clipboardStore.settings.isCategoryEnabled(key) },
-                set: { clipboardStore.setCategory(key, enabled: $0) }
-            ))
-            .toggleStyle(.switch)
-            .controlSize(.small)
-            .labelsHidden()
-            .help(L10n.text("关闭会清除该分类现有记录，并停止展示及记录此分类"))
             if case .custom(let id) = key {
                 HoverIconButton(systemImage: "pencil", help: L10n.text("编辑")) {
                     if let custom = clipboardStore.settings.customCategory(id: id) {
@@ -621,7 +618,26 @@ struct SettingsPanelView: View {
             }
             .disabled(index == total - 1)
             .opacity(index == total - 1 ? 0.3 : 1)
+            Toggle(L10n.text("启用"), isOn: Binding(
+                get: { clipboardStore.settings.isCategoryEnabled(key) },
+                set: { clipboardStore.setCategory(key, enabled: $0) }
+            ))
+            .toggleStyle(.switch)
+            .controlSize(.small)
+            .labelsHidden()
+            .help(L10n.text("关闭会清除该分类现有记录，并停止展示及记录此分类"))
         }
+    }
+
+    private func categoryLabel(title: String, systemImage: String) -> some View {
+        HStack(spacing: 8) {
+            Image(systemName: systemImage)
+                .font(.system(size: 14))
+                .frame(width: 28, height: 20, alignment: .center)
+                .accessibilityHidden(true)
+            Text(title)
+        }
+        .accessibilityElement(children: .combine)
     }
 
     private func moveCategory(_ key: ClipboardCategoryKey, delta: Int) {

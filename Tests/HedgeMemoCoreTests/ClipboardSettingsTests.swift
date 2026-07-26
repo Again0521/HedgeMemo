@@ -19,7 +19,7 @@ final class ClipboardSettingsTests: XCTestCase {
     func testDefaultCategoryOrderIncludesEveryBuiltin() {
         var settings = ClipboardHistorySettings()
         settings.normalize()
-        XCTAssertEqual(settings.categoryOrder, ["text", "code", "link", "image", "screenshot"])
+        XCTAssertEqual(settings.categoryOrder, ClipboardContentCategory.allCases.map(\.rawValue))
     }
 
     func testMaxEntriesSnapsToNearestChoice() {

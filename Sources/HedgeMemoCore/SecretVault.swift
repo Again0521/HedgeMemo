@@ -189,21 +189,52 @@ public enum SecretVault {
     }
 
     private static func store(_ data: Data, account: String, dataProtection: Bool) throws {
-        var query = baseQuery(account: account, dataProtection: dataProtection)
-        SecItemDelete(query as CFDictionary)
-        query[kSecValueData as String] = data
+        let query = baseQuery(account: account, dataProtection: dataProtection)
+        var addition = query
+        addition[kSecValueData as String] = data
         // The vault is only meaningful while this Mac is unlocked, and it must
         // never sync to another device.
-        query[kSecAttrAccessible as String] = kSecAttrAccessibleWhenUnlockedThisDeviceOnly
-        let status = SecItemAdd(query as CFDictionary, nil)
-        guard status == errSecSuccess else { throw VaultError.keychainFailure(status) }
+        addition[kSecAttrAccessible as String] = kSecAttrAccessibleWhenUnlockedThisDeviceOnly
+        let status = SecItemAdd(addition as CFDictionary, nil)
+        if status == errSecDuplicateItem {
+            // Update in place. Deleting the old verifier/key before adding its
+            // replacement created a failure window where a transient Keychain
+            // error could permanently remove the PIN or orphan encrypted
+            // clipboard entries.
+            let attributes: [String: Any] = [
+                kSecValueData as String: data,
+                kSecAttrAccessible as String: kSecAttrAccessibleWhenUnlockedThisDeviceOnly,
+            ]
+            let updateStatus = SecItemUpdate(query as CFDictionary, attributes as CFDictionary)
+            guard updateStatus == errSecSuccess else {
+                throw VaultError.keychainFailure(updateStatus)
+            }
+        } else if status != errSecSuccess {
+            throw VaultError.keychainFailure(status)
+        }
     }
 
     private static func loadData(account: String) throws -> Data {
-        do { return try loadData(account: account, dataProtection: usesDataProtection) }
-        catch VaultError.keychainFailure(let status) where isEntitlementFailure(status) && usesDataProtection {
-            usesDataProtection = false
+        guard usesDataProtection else {
             return try loadData(account: account, dataProtection: false)
+        }
+        do {
+            return try loadData(account: account, dataProtection: true)
+        } catch VaultError.keychainFailure(let status)
+            where isEntitlementFailure(status) || status == errSecItemNotFound {
+            // A locally signed build may have created the item in the legacy
+            // keychain, then a later release may gain the entitlement required
+            // for the data-protection keychain. Probe the legacy location before
+            // treating "not found" as a fresh vault; otherwise a new content key
+            // would be generated and every existing encrypted entry orphaned.
+            do {
+                let data = try loadData(account: account, dataProtection: false)
+                usesDataProtection = false
+                return data
+            } catch {
+                if isEntitlementFailure(status) { usesDataProtection = false }
+                throw error
+            }
         }
     }
 
@@ -221,10 +252,15 @@ public enum SecretVault {
 
     private static func delete(account: String) throws {
         // Clear both keychains so a fallback never leaves a stale copy behind.
-        _ = SecItemDelete(baseQuery(account: account, dataProtection: false) as CFDictionary)
-        let status = SecItemDelete(baseQuery(account: account, dataProtection: true) as CFDictionary)
-        guard status == errSecSuccess || status == errSecItemNotFound else {
-            throw VaultError.keychainFailure(status)
+        let legacyStatus = SecItemDelete(baseQuery(account: account, dataProtection: false) as CFDictionary)
+        guard legacyStatus == errSecSuccess || legacyStatus == errSecItemNotFound else {
+            throw VaultError.keychainFailure(legacyStatus)
+        }
+        let protectedStatus = SecItemDelete(baseQuery(account: account, dataProtection: true) as CFDictionary)
+        guard protectedStatus == errSecSuccess
+                || protectedStatus == errSecItemNotFound
+                || isEntitlementFailure(protectedStatus) else {
+            throw VaultError.keychainFailure(protectedStatus)
         }
     }
 }

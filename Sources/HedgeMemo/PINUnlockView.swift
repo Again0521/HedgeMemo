@@ -3,6 +3,11 @@ import HedgeMemoCore
 import LocalAuthentication
 import SwiftUI
 
+extension Notification.Name {
+    static let hedgeMemoBiometricAvailabilityDidChange =
+        Notification.Name("HedgeMemo.BiometricAvailabilityDidChange")
+}
+
 /// Thread-safe home for the resolved Touch ID availability.
 ///
 /// It lives outside `BiometricAuthenticator` on purpose: that enum is
@@ -24,6 +29,9 @@ private final class BiometricAvailabilityBox: @unchecked Sendable {
         lock.lock()
         resolved = newValue
         lock.unlock()
+        DispatchQueue.main.async {
+            NotificationCenter.default.post(name: .hedgeMemoBiometricAvailabilityDidChange, object: nil)
+        }
     }
 }
 
@@ -125,6 +133,11 @@ struct PINDotsField: View {
     private var dotsWidth: CGFloat { CGFloat(length) * 13 + CGFloat(length - 1) * 14 }
 }
 
+enum PINSetupStep {
+    case newPIN
+    case confirmation
+}
+
 public enum PINPolicy {
     /// Fixed four digits: the entry is a dot row, so a variable length would
     /// have no way to show how much is left.
@@ -143,6 +156,8 @@ struct PINGateView: View {
     @State private var confirmation = ""
     @State private var message: String?
     @State private var isAuthenticating = false
+    @State private var setupStep: PINSetupStep = .newPIN
+    @State private var biometricsAvailable = BiometricAuthenticator.isAvailable
     @FocusState private var pinFocused: Bool
     @FocusState private var confirmFocused: Bool
 
@@ -159,7 +174,7 @@ struct PINGateView: View {
     }
 
     private var biometricsEnabled: Bool {
-        !isSetup && lockStore.settings.allowsBiometrics && BiometricAuthenticator.isAvailable
+        !isSetup && lockStore.settings.allowsBiometrics && biometricsAvailable
     }
 
     var body: some View {
@@ -168,9 +183,9 @@ struct PINGateView: View {
                 .font(.system(size: 22, weight: .medium))
                 .foregroundStyle(.secondary)
 
-            Text(isSetup ? L10n.text("为「密码」设置 PIN 码") : L10n.format("分类已锁定格式", surfaceName))
+            Text(title)
                 .font(.system(size: 13, weight: .semibold))
-            Text(isSetup ? L10n.text("设置 4 位 PIN 码以保护此分类") : L10n.text("输入 PIN 码以查看此分类"))
+            Text(subtitle)
                 .font(.system(size: 11))
                 .foregroundStyle(.secondary)
 
@@ -186,17 +201,19 @@ struct PINGateView: View {
                         .font(.system(size: 12, weight: .medium).monospacedDigit())
                         .foregroundStyle(.red)
                 }
-            } else {
+            } else if !isSetup {
                 PINDotsField(pin: $pin, isFocused: $pinFocused) {
-                    if isSetup { confirmFocused = true } else { submitUnlock() }
+                    submitUnlock()
                 }
-            }
-
-            if isSetup {
-                Text(L10n.text("确认 PIN 码"))
-                    .font(.system(size: 11))
-                    .foregroundStyle(.secondary)
+            } else if setupStep == .newPIN {
+                PINDotsField(pin: $pin, isFocused: $pinFocused) {}
+                Button(L10n.text("继续")) { showConfirmation() }
+                    .disabled(pin.count != PINPolicy.length)
+            } else {
                 PINDotsField(pin: $confirmation, isFocused: $confirmFocused) { submitSetup() }
+                Button(L10n.text("返回")) { showNewPIN() }
+                    .buttonStyle(.plain)
+                    .foregroundStyle(Color.accentColor)
             }
 
             if let message, !isCoolingDown {
@@ -221,7 +238,7 @@ struct PINGateView: View {
         // and made the card resize twice while it settled.
         .frame(maxWidth: .infinity)
         .onAppear {
-            pinFocused = !isCoolingDown
+            focusCurrentField()
             // Deliberately no automatic Touch ID prompt here. `evaluatePolicy`
             // presents its dialog as an out-of-process sheet on the containing
             // window; firing it from `onAppear` raced that window's own
@@ -230,8 +247,71 @@ struct PINGateView: View {
             // aborted the process. The user taps 使用触控 ID instead, which is
             // always after the window is fully on screen.
         }
-        .onChange(of: pin) { _, _ in message = nil }
-        .onChange(of: confirmation) { _, _ in message = nil }
+        .onChange(of: gate) { _, _ in resetSetup() }
+        // Keep a failed-attempt message visible while the field is cleared.
+        // Clear it only when the user actually starts the next attempt.
+        .onChange(of: pin) { _, value in
+            if !value.isEmpty { message = nil }
+        }
+        .onChange(of: confirmation) { _, value in
+            if !value.isEmpty { message = nil }
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .hedgeMemoBiometricAvailabilityDidChange)) { _ in
+            biometricsAvailable = BiometricAuthenticator.isAvailable
+        }
+    }
+
+    private var title: String {
+        if !isSetup { return L10n.format("分类已锁定格式", surfaceName) }
+        return setupStep == .newPIN
+            ? L10n.text("为「密码」设置 PIN 码")
+            : L10n.text("确认 PIN 码")
+    }
+
+    private var subtitle: String {
+        if !isSetup { return L10n.text("输入 PIN 码以查看此分类") }
+        return setupStep == .newPIN
+            ? L10n.text("设置 4 位 PIN 码以保护此分类")
+            : L10n.text("再次输入刚才的 PIN 码")
+    }
+
+    private func focusCurrentField() {
+        guard !isCoolingDown else {
+            pinFocused = false
+            confirmFocused = false
+            return
+        }
+        DispatchQueue.main.async {
+            if isSetup, setupStep == .confirmation {
+                confirmFocused = true
+            } else {
+                pinFocused = true
+            }
+        }
+    }
+
+    private func showConfirmation() {
+        guard pin.count == PINPolicy.length else { return }
+        setupStep = .confirmation
+        message = nil
+        pinFocused = false
+        DispatchQueue.main.async { confirmFocused = true }
+    }
+
+    private func showNewPIN() {
+        setupStep = .newPIN
+        confirmation = ""
+        message = nil
+        confirmFocused = false
+        DispatchQueue.main.async { pinFocused = true }
+    }
+
+    private func resetSetup() {
+        pin = ""
+        confirmation = ""
+        message = nil
+        setupStep = .newPIN
+        focusCurrentField()
     }
 
     private func submitUnlock() {
@@ -253,8 +333,10 @@ struct PINGateView: View {
         guard pin.count == PINPolicy.length, confirmation.count == PINPolicy.length else { return }
         guard pin == confirmation else {
             message = L10n.text("两次输入的 PIN 码不一致")
+            pin = ""
             confirmation = ""
-            confirmFocused = true
+            setupStep = .newPIN
+            DispatchQueue.main.async { pinFocused = true }
             return
         }
         do {

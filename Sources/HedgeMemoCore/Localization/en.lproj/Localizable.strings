@@ -262,6 +262,9 @@
 "睡眠或退出后锁定" = "Mac sleeps or app quits";
 "新建 PIN 码" = "New PIN";
 "确认 PIN 码" = "Confirm PIN";
+"再次输入刚才的 PIN 码" = "Enter the same PIN again";
+"继续" = "Continue";
+"返回" = "Back";
 "两次输入的 PIN 码不一致" = "The two PINs do not match";
 "PIN 码至少 4 位" = "A PIN must be at least 4 digits";
 "密码内容会加密保存，仅在复制时解密；列表中始终以隐藏形式显示。" = "Password entries are stored encrypted and decrypted only when copied; the list always shows them masked.";

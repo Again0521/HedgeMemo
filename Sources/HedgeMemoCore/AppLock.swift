@@ -60,6 +60,27 @@ public struct AppLockSettings: Codable, Equatable, Sendable {
         normalize()
     }
 
+    private enum CodingKeys: String, CodingKey {
+        case timing
+        case lockedCategoryKeys
+        case allowsBiometrics
+        case capturesPasswords
+    }
+
+    /// Decode each preference independently so adding a setting in a later
+    /// release does not make the whole saved security configuration unreadable.
+    /// Synthesized `Decodable` rejects an older payload as soon as one new,
+    /// non-optional key is absent and would silently reset every lock choice.
+    public init(from decoder: Decoder) throws {
+        let values = try decoder.container(keyedBy: CodingKeys.self)
+        timing = try values.decodeIfPresent(AppLockTiming.self, forKey: .timing) ?? .onScreenLock
+        lockedCategoryKeys = try values.decodeIfPresent([String].self, forKey: .lockedCategoryKeys)
+            ?? [ClipboardCategoryKey.builtin(.password).storageValue]
+        allowsBiometrics = try values.decodeIfPresent(Bool.self, forKey: .allowsBiometrics) ?? true
+        capturesPasswords = try values.decodeIfPresent(Bool.self, forKey: .capturesPasswords) ?? true
+        normalize()
+    }
+
     public mutating func normalize() {
         // De-duplicate while keeping order stable for the settings list.
         var seen = Set<String>()

@@ -38,12 +38,13 @@ struct PINSetupSheet: View {
     @State private var pin = ""
     @State private var confirmation = ""
     @State private var errorMessage: String?
+    @State private var step: PINSetupStep = .newPIN
     @FocusState private var pinFocused: Bool
     @FocusState private var confirmFocused: Bool
     @Environment(\.dismiss) private var dismiss
 
     private var canSave: Bool {
-        pin.count == PINPolicy.length && pin == confirmation
+        confirmation.count == PINPolicy.length
     }
 
     var body: some View {
@@ -51,15 +52,14 @@ struct PINSetupSheet: View {
             Text(L10n.text(lockStore.hasPIN ? "修改 PIN 码…" : "设置 PIN 码…"))
                 .font(.headline)
 
-            Text(L10n.text("新建 PIN 码"))
+            Text(L10n.text(step == .newPIN ? "新建 PIN 码" : "确认 PIN 码"))
                 .font(.system(size: 11))
                 .foregroundStyle(.secondary)
-            PINDotsField(pin: $pin, isFocused: $pinFocused) { confirmFocused = true }
-
-            Text(L10n.text("确认 PIN 码"))
-                .font(.system(size: 11))
-                .foregroundStyle(.secondary)
-            PINDotsField(pin: $confirmation, isFocused: $confirmFocused) { save() }
+            if step == .newPIN {
+                PINDotsField(pin: $pin, isFocused: $pinFocused) {}
+            } else {
+                PINDotsField(pin: $confirmation, isFocused: $confirmFocused) {}
+            }
 
             if let errorMessage {
                 Label(errorMessage, systemImage: "exclamationmark.triangle")
@@ -79,16 +79,46 @@ struct PINSetupSheet: View {
                     onFinished(false)
                     dismiss()
                 }
-                Button(L10n.text("保存"), action: save)
-                    .keyboardShortcut(.defaultAction)
-                    .disabled(!canSave)
+                if step == .newPIN {
+                    Button(L10n.text("继续"), action: showConfirmation)
+                        .keyboardShortcut(.defaultAction)
+                        .disabled(pin.count != PINPolicy.length)
+                } else {
+                    Button(L10n.text("返回"), action: showNewPIN)
+                    Button(L10n.text("保存"), action: save)
+                        .keyboardShortcut(.defaultAction)
+                        .disabled(!canSave)
+                }
             }
         }
         .padding(20)
         .frame(width: 320)
         .onAppear { pinFocused = true }
-        .onChange(of: pin) { _, _ in errorMessage = nil }
-        .onChange(of: confirmation) { _, _ in errorMessage = nil }
+        .onChange(of: pin) { _, value in
+            if !value.isEmpty { errorMessage = nil }
+        }
+        .onChange(of: confirmation) { _, value in
+            if !value.isEmpty { errorMessage = nil }
+        }
+    }
+
+    private func showConfirmation() {
+        guard pin.count == PINPolicy.length else {
+            errorMessage = L10n.text("PIN 码需为 4 位数字")
+            return
+        }
+        step = .confirmation
+        errorMessage = nil
+        pinFocused = false
+        DispatchQueue.main.async { confirmFocused = true }
+    }
+
+    private func showNewPIN() {
+        step = .newPIN
+        confirmation = ""
+        errorMessage = nil
+        confirmFocused = false
+        DispatchQueue.main.async { pinFocused = true }
     }
 
     private func save() {
@@ -98,8 +128,10 @@ struct PINSetupSheet: View {
         }
         guard pin == confirmation else {
             errorMessage = L10n.text("两次输入的 PIN 码不一致")
+            pin = ""
             confirmation = ""
-            confirmFocused = true
+            step = .newPIN
+            DispatchQueue.main.async { pinFocused = true }
             return
         }
         do {
