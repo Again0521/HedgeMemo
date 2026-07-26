@@ -1283,6 +1283,11 @@ struct ClipboardHistoryPanelView: View {
     @State private var hoveredID: UUID?
     @State private var keyboardSelectedID: UUID?
     @State private var keyboardSelection = false
+    /// A contextual menu owns selection until its complete native tracking
+    /// session ends. Without this lock, moving through the menu can cross rows
+    /// underneath it and make actions appear to target a different entry.
+    @State private var contextMenuEntryID: UUID?
+    @State private var contextMenuTrackingDepth = 0
     @State private var hoverPreviewDelay = ClipboardHoverPreviewDelay()
     @State private var pendingCommandCopyID: UUID?
     /// The entry currently open for in-place editing, if any. Non-nil forces
@@ -1347,7 +1352,9 @@ struct ClipboardHistoryPanelView: View {
         guard ClipboardPanelPagination.pageSize(for: activeKey) != nil else { return entries }
         return Array(entries.prefix(min(visibleEntryLimit, entries.count)))
     }
-    private var activeSelectionID: UUID? { hoveredID ?? keyboardSelectedID }
+    private var activeSelectionID: UUID? {
+        contextMenuEntryID ?? hoveredID ?? keyboardSelectedID
+    }
 
     var body: some View {
         GeometryReader { proxy in
@@ -1490,8 +1497,16 @@ struct ClipboardHistoryPanelView: View {
         .onChange(of: detailPresentation.isVisible) { _, visible in
             if !visible { editorClosing = false }
         }
+        .onReceive(NotificationCenter.default.publisher(for: NSMenu.didBeginTrackingNotification)) { _ in
+            contextMenuTrackingBegan()
+        }
+        .onReceive(NotificationCenter.default.publisher(for: NSMenu.didEndTrackingNotification)) { _ in
+            contextMenuTrackingEnded()
+        }
         .onDisappear {
             cancelPendingPreview()
+            contextMenuEntryID = nil
+            contextMenuTrackingDepth = 0
             revealedSecretTexts.removeAll(keepingCapacity: false)
         }
     }
@@ -1774,6 +1789,11 @@ struct ClipboardHistoryPanelView: View {
         } label: {
             Label(L10n.text("手动分类"), systemImage: "folder")
         }
+        // Context-menu content is created lazily for the row that received the
+        // secondary click. This top-level item appears with the root menu, so
+        // it captures the exact row even if the manual-category submenu is
+        // never opened.
+        .onAppear { pinContextMenuSelection(to: entry) }
         Divider()
         Button(L10n.text(entry.isPinned ? "取消置顶" : "置顶")) { store.togglePinned(id: entry.id) }
         Button(L10n.text(entry.isDesktopPinned == true ? "取消桌面固定" : "固定到桌面")) { onTogglePin(entry) }
@@ -1804,7 +1824,7 @@ struct ClipboardHistoryPanelView: View {
         // brief close animation right after an edit — must not touch the
         // preview: `beginEditing` already moved this entry's selection out of
         // `hoveredID`, so no exit timer targeting it is pending here to cancel.
-        guard editingEntryID == nil, !editorClosing else { return }
+        guard editingEntryID == nil, !editorClosing, contextMenuEntryID == nil else { return }
         if isHovered {
             keyboardSelection = false
             keyboardSelectedID = nil
@@ -1823,6 +1843,30 @@ struct ClipboardHistoryPanelView: View {
                 onDetailEntry(nil)
             }
         }
+    }
+
+    private func contextMenuTrackingBegan() {
+        contextMenuTrackingDepth += 1
+        if contextMenuEntryID == nil {
+            contextMenuEntryID = hoveredID ?? keyboardSelectedID
+        }
+        // An exit scheduled just before AppKit began tracking must not clear
+        // the frozen row while the pointer moves from that row into the menu.
+        cancelPendingPreview()
+    }
+
+    private func pinContextMenuSelection(to entry: ClipboardEntry) {
+        contextMenuEntryID = entry.id
+        hoveredID = entry.id
+        keyboardSelectedID = nil
+        keyboardSelection = false
+        cancelPendingPreview()
+    }
+
+    private func contextMenuTrackingEnded() {
+        contextMenuTrackingDepth = max(0, contextMenuTrackingDepth - 1)
+        guard contextMenuTrackingDepth == 0 else { return }
+        contextMenuEntryID = nil
     }
 
     private func schedulePreview(for entry: ClipboardEntry) {
