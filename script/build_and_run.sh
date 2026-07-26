@@ -134,20 +134,27 @@ xattr -d com.apple.FinderInfo "$APP_BUNDLE" 2>/dev/null || true
 xattr -d com.apple.fileprovider.fpfs#P "$APP_BUNDLE" 2>/dev/null || true
 codesign --verify --deep --strict "$APP_BUNDLE"
 
+# Export the conventional dist artifact directly from the verified temporary
+# bundle. Package mode stops here: it never installs or launches the app, so it
+# is safe for unattended builds and cannot trigger an administrator prompt.
+mkdir -p "$DIST_DIR"
+rm -rf "$DIST_APP"
+/usr/bin/ditto --noextattr --noqtn "$APP_BUNDLE" "$DIST_APP"
+xattr -d com.apple.FinderInfo "$DIST_APP" 2>/dev/null || true
+xattr -d com.apple.fileprovider.fpfs#P "$DIST_APP" 2>/dev/null || true
+codesign --verify --deep --strict "$DIST_APP"
+
+if [[ "$MODE" == "--package" || "$MODE" == "package" ]]; then
+  echo "Prepared $DIST_APP without installing or launching it"
+  exit 0
+fi
+
 mkdir -p "$INSTALL_DIR"
 rm -rf "$INSTALLED_APP"
-/usr/bin/ditto --noextattr --noqtn "$APP_BUNDLE" "$INSTALLED_APP"
+/usr/bin/ditto --noextattr --noqtn "$DIST_APP" "$INSTALLED_APP"
 xattr -d com.apple.FinderInfo "$INSTALLED_APP" 2>/dev/null || true
 xattr -d com.apple.fileprovider.fpfs#P "$INSTALLED_APP" 2>/dev/null || true
 codesign --verify --deep --strict "$INSTALLED_APP"
-
-# Keep the conventional dist artifact for manual distribution, but only after
-# the installed bundle has passed strict verification.
-mkdir -p "$DIST_DIR"
-rm -rf "$DIST_APP"
-/usr/bin/ditto --noextattr --noqtn "$INSTALLED_APP" "$DIST_APP"
-xattr -d com.apple.FinderInfo "$DIST_APP" 2>/dev/null || true
-xattr -d com.apple.fileprovider.fpfs#P "$DIST_APP" 2>/dev/null || true
 
 open_app() {
   # LaunchServices should not inherit the repository's Documents working
@@ -180,7 +187,7 @@ case "$MODE" in
     pgrep -x "$APP_NAME" >/dev/null
     ;;
   *)
-    echo "usage: $0 [run|--debug|--logs|--telemetry|--verify]" >&2
+    echo "usage: $0 [run|--debug|--logs|--telemetry|--verify|--package]" >&2
     exit 2
     ;;
 esac

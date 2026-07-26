@@ -9,29 +9,29 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 APP_NAME="HedgeMemo"
 VERSION="1.2.0"
 DIST_DIR="$ROOT_DIR/dist"
+DIST_APP="$DIST_DIR/$APP_NAME.app"
 DMG_PATH="$DIST_DIR/$APP_NAME-$VERSION.dmg"
 STAGING_DIR="/private/tmp/hedgememo-dmg-$$"
-INSTALLED_APP="$HOME/Applications/$APP_NAME.app"
 
 cleanup() {
   rm -rf "$STAGING_DIR"
 }
 trap cleanup EXIT
 
-"$ROOT_DIR/script/build_and_run.sh" --verify
+"$ROOT_DIR/script/build_and_run.sh" --package
 
-if [[ ! -d "$INSTALLED_APP" ]]; then
-  echo "Expected signed app bundle at $INSTALLED_APP" >&2
+if [[ ! -d "$DIST_APP" ]]; then
+  echo "Expected signed app bundle at $DIST_APP" >&2
   exit 1
 fi
 
 # The project lives in a File Provider-backed Documents folder, which may
-# reattach Finder metadata to a copied `dist/*.app` at any time. Package from
-# the verified installation copy outside Documents instead; build_and_run.sh
-# has already completed strict verification for this exact bundle.
-codesign --verify --deep --strict "$INSTALLED_APP"
+# reattach Finder metadata to `dist/*.app` at any time. Copy without extended
+# attributes into a private staging directory and verify the exact staged
+# bundle before creating the image.
 mkdir -p "$STAGING_DIR"
-/usr/bin/ditto --noextattr --noqtn "$INSTALLED_APP" "$STAGING_DIR/$APP_NAME.app"
+/usr/bin/ditto --noextattr --noqtn "$DIST_APP" "$STAGING_DIR/$APP_NAME.app"
+codesign --verify --deep --strict "$STAGING_DIR/$APP_NAME.app"
 ln -s /Applications "$STAGING_DIR/Applications"
 rm -f "$DMG_PATH"
 
