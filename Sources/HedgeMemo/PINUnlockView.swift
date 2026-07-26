@@ -167,8 +167,13 @@ struct PINGateView: View {
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .onAppear {
             pinFocused = true
-            // Biometrics are the fast path, but only when a PIN already exists.
-            if biometricsEnabled { Task { await authenticateWithBiometrics() } }
+            // Deliberately no automatic Touch ID prompt here. `evaluatePolicy`
+            // presents its dialog as an out-of-process sheet on the containing
+            // window; firing it from `onAppear` raced that window's own
+            // presentation, and the remote view then threw from
+            // `containingWindowWillOrderOnScreen:` — an ObjC exception that
+            // aborted the process. The user taps 使用触控 ID instead, which is
+            // always after the window is fully on screen.
         }
         .onChange(of: pin) { _, _ in message = nil }
         .onChange(of: confirmation) { _, _ in message = nil }
