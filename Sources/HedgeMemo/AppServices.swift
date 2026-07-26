@@ -13,6 +13,7 @@ final class AppServices: ObservableObject {
     let screenshotSettingsStore = ScreenshotSettingsStore()
     let memePanelSettingsStore = MemePanelSettingsStore()
     let updateCheckStore = UpdateCheckStore()
+    let lockStore = AppLockStore()
     @Published private(set) var hotKeyWarnings: [String] = []
 
     /// Assigned by the status-item owner after it has built the native popover.
@@ -51,6 +52,24 @@ final class AppServices: ObservableObject {
             self?.clipboardStore.suppressCurrentPasteboardChange()
         }
         updateCheckStore.checkAutomaticallyIfNeeded()
+        // The capture path needs to know whether concealed copies are wanted,
+        // without the history store having to depend on the lock store.
+        clipboardStore.capturesPasswords = lockStore.settings.capturesPasswords
+        lockStore.$settings
+            .map(\.capturesPasswords)
+            .removeDuplicates()
+            .sink { [weak self] captures in
+                self?.clipboardStore.capturesPasswords = captures
+            }
+            .store(in: &cancellables)
+        // Sleeping the Mac is one of the configurable re-lock triggers.
+        NSWorkspace.shared.notificationCenter.addObserver(
+            forName: NSWorkspace.willSleepNotification,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            Task { @MainActor in self?.lockStore.handleSystemSleep() }
+        }
         if !CommandLine.arguments.contains(where: { $0.hasPrefix("--preview-") }) {
             // Seed first-run content before monitoring writes any history, so the
             // fresh-install check sees a genuinely empty state.
@@ -58,7 +77,11 @@ final class AppServices: ObservableObject {
             clipboardStore.startMonitoring()
         }
 
-        let panelController = ClipboardHistoryPanelController(store: clipboardStore, memeStore: memeStore)
+        let panelController = ClipboardHistoryPanelController(
+            store: clipboardStore,
+            lockStore: lockStore,
+            memeStore: memeStore
+        )
         let hotKey = GlobalHotKeyController()
         updateHotKeyWarning(.clipboard, status: hotKey.registerClipboardHotKey(clipboardStore.settings.hotKey ?? .defaultClipboard) {
             panelController.toggle()

@@ -169,8 +169,8 @@ migratedSettings.normalize()
 expect(migratedSettings.hotKey == .defaultClipboard, "legacy Option + Space hotkey must migrate to the new default")
 expect(migratedSettings.activeCategoryKey == .builtin(.text), "missing last category must default to text")
 expect(
-    migratedSettings.categoryOrder == ["text", "code", "link", "image", "screenshot"],
-    "default category order must include the dedicated screenshot category"
+    migratedSettings.categoryOrder == ["text", "code", "link", "image", "screenshot", "password"],
+    "default category order must include the dedicated screenshot and password categories"
 )
 var rememberedSettings = ClipboardHistorySettings()
 rememberedSettings.activeCategoryKey = .builtin(.code)
@@ -395,6 +395,100 @@ await MainActor.run {
     let pausedStore = ClipboardHistoryStore(repository: ClipboardHistoryRepository(rootURL: clipRoot))
     pausedStore.isRecordingPaused = true
     expect(pausedStore.isRecordingPaused, "recording pause flag must be settable for meme capture")
+
+    // MARK: Password category & PIN lock
+
+    let secretRoot = FileManager.default.temporaryDirectory
+        .appendingPathComponent("hedgememo-whitebox-secret-\(UUID().uuidString)", isDirectory: true)
+    defer { try? FileManager.default.removeItem(at: secretRoot) }
+    let secretStore = ClipboardHistoryStore(repository: ClipboardHistoryRepository(rootURL: secretRoot))
+
+    let secretEntry = ClipboardEntry(
+        kind: .text,
+        text: "hmenc.v1:ZmFrZQ==",
+        contentHash: "hash-secret",
+        origin: .concealedPassword
+    )
+    expect(secretEntry.contentCategory == .password, "a concealed copy must land in the password category")
+    expect(secretEntry.isSecret, "a concealed copy must be flagged secret")
+    expect(
+        !secretEntry.previewText.contains("hmenc"),
+        "a secret must never render its stored value, not even the ciphertext"
+    )
+    expect(
+        !secretEntry.matches(query: "hmenc"),
+        "search must not reach a secret's stored value"
+    )
+
+    // Export must drop secrets; persistence must keep them.
+    secretStore.addSeedEntries([secretEntry])
+    expect(secretStore.entries.contains(where: { $0.isSecret }), "the store keeps the secret in memory")
+    expect(
+        !secretStore.snapshot().entries.contains(where: { $0.isSecret }),
+        "ZIP export must never carry password entries off this Mac"
+    )
+
+    // Editing must not overwrite ciphertext with plain text.
+    secretStore.updateText(id: secretEntry.id, text: "plain")
+    expect(
+        secretStore.entries.first(where: { $0.id == secretEntry.id })?.text == "hmenc.v1:ZmFrZQ==",
+        "editing must leave a secret's ciphertext untouched"
+    )
+
+    // Lock policy.
+    var lockSettings = AppLockSettings(isEnabled: true, timing: .afterIdle, idleMinutes: 5)
+    expect(
+        lockSettings.isCategoryLocked(.builtin(.password)),
+        "the password category is locked by default once the lock is on"
+    )
+    expect(!lockSettings.isCategoryLocked(.builtin(.text)), "other categories stay unlocked by default")
+    let now = Date()
+    expect(
+        AppLockPolicy.remainsUnlocked(settings: lockSettings, unlockedAt: now, lastUsedAt: now, now: now),
+        "a fresh unlock is valid"
+    )
+    expect(
+        !AppLockPolicy.remainsUnlocked(
+            settings: lockSettings,
+            unlockedAt: now.addingTimeInterval(-600),
+            lastUsedAt: now.addingTimeInterval(-600),
+            now: now
+        ),
+        "idle beyond the configured window must re-lock"
+    )
+    expect(
+        !AppLockPolicy.remainsUnlocked(settings: lockSettings, unlockedAt: nil, lastUsedAt: nil, now: now),
+        "never unlocked means locked"
+    )
+    var disabled = lockSettings
+    disabled.isEnabled = false
+    expect(
+        AppLockPolicy.remainsUnlocked(settings: disabled, unlockedAt: nil, lastUsedAt: nil, now: now),
+        "a disabled lock never withholds content"
+    )
+    lockSettings.timing = .onPanelClose
+    expect(AppLockPolicy.locksOnPanelClose(lockSettings), "panel-close timing re-locks on close")
+    expect(!AppLockPolicy.locksOnSleep(lockSettings), "panel-close timing does not also wait for sleep")
+    lockSettings.timing = .onSleepOrQuit
+    expect(AppLockPolicy.locksOnSleep(lockSettings), "sleep timing re-locks on sleep")
+
+    lockSettings.setCategory(.builtin(.text), locked: true)
+    expect(lockSettings.isCategoryLocked(.builtin(.text)), "an extra category can be locked")
+    lockSettings.setCategory(.builtin(.text), locked: false)
+    expect(!lockSettings.isCategoryLocked(.builtin(.text)), "and unlocked again")
+
+    expect(
+        AppLockPolicy.hidesEntry(secretEntry, settings: lockSettings, customCategories: [], isUnlocked: false),
+        "a locked category's entry stays hidden while locked"
+    )
+    expect(
+        !AppLockPolicy.hidesEntry(secretEntry, settings: lockSettings, customCategories: [], isUnlocked: true),
+        "and becomes visible once unlocked"
+    )
+
+    // The cipher envelope must be recognisable and must not be plain text.
+    expect(SecretVault.isEncrypted("hmenc.v1:abc"), "the cipher envelope is detectable")
+    expect(!SecretVault.isEncrypted("hunter2"), "plain text is not mistaken for ciphertext")
 }
 
 print("HedgeMemo whitebox checks passed (\(assertionCount) assertions).")

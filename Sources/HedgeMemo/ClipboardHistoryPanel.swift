@@ -158,6 +158,7 @@ private final class ClipboardHoverPreviewDelay {
 @MainActor
 final class ClipboardHistoryPanelController: NSObject, NSWindowDelegate {
     private let store: ClipboardHistoryStore
+    private let lockStore: AppLockStore
     private let memeStore: MemeStore
     private let pinnedWindows: PinnedClipboardWindowsController
     private var panel: NSPanel?
@@ -175,8 +176,9 @@ final class ClipboardHistoryPanelController: NSObject, NSWindowDelegate {
     /// that notification to replace the list's anchor.
     private var pendingProgrammaticFrame: NSRect?
 
-    init(store: ClipboardHistoryStore, memeStore: MemeStore) {
+    init(store: ClipboardHistoryStore, lockStore: AppLockStore, memeStore: MemeStore) {
         self.store = store
+        self.lockStore = lockStore
         self.memeStore = memeStore
         pinnedWindows = PinnedClipboardWindowsController(store: store)
     }
@@ -208,6 +210,8 @@ final class ClipboardHistoryPanelController: NSObject, NSWindowDelegate {
         pendingProgrammaticFrame = nil
         store.releaseTransientCaches()
         ImageThumbnailCache.shared.scheduleIdlePurge()
+        // One of the configurable re-lock triggers.
+        lockStore.handlePanelClosed()
     }
 
     private func show() {
@@ -216,6 +220,7 @@ final class ClipboardHistoryPanelController: NSObject, NSWindowDelegate {
         self.panel = panel
         let content = ClipboardHistoryPanelView(
             store: store,
+            lockStore: lockStore,
             detailPresentation: detailPresentation,
             onDone: { [weak self] in self?.hide() },
             onContentChange: { [weak self] contentHeight in
@@ -1232,6 +1237,7 @@ private struct ClipboardDetailPointer: Shape {
 
 struct ClipboardHistoryPanelView: View {
     @ObservedObject var store: ClipboardHistoryStore
+    @ObservedObject var lockStore: AppLockStore
     @ObservedObject private var detailPresentation: ClipboardDetailPresentation
     let onDone: () -> Void
     let onContentChange: (CGFloat) -> Void
@@ -1264,6 +1270,7 @@ struct ClipboardHistoryPanelView: View {
 
     fileprivate init(
         store: ClipboardHistoryStore,
+        lockStore: AppLockStore,
         detailPresentation: ClipboardDetailPresentation,
         onDone: @escaping () -> Void,
         onContentChange: @escaping (CGFloat) -> Void,
@@ -1272,6 +1279,7 @@ struct ClipboardHistoryPanelView: View {
         onTogglePin: @escaping (ClipboardEntry) -> Void
     ) {
         self.store = store
+        self.lockStore = lockStore
         _detailPresentation = ObservedObject(wrappedValue: detailPresentation)
         self.onDone = onDone
         self.onContentChange = onContentChange
@@ -1282,7 +1290,14 @@ struct ClipboardHistoryPanelView: View {
     }
 
     private var activeKey: ClipboardCategoryKey { store.settings.activeCategoryKey }
-    private var entries: [ClipboardEntry] { store.orderedEntries(query: query, key: activeKey) }
+    /// True while the active category requires unlocking. Everything downstream
+    /// (`entries`, the height math, ⌘1–9, Return) reads an empty list in this
+    /// state, so a locked category cannot leak rows through any path.
+    private var isActiveCategoryLocked: Bool { lockStore.isCategoryLocked(activeKey) }
+    private var entries: [ClipboardEntry] {
+        guard !isActiveCategoryLocked else { return [] }
+        return store.orderedEntries(query: query, key: activeKey)
+    }
     private var visibleEntries: [ClipboardEntry] {
         guard ClipboardPanelPagination.pageSize(for: activeKey) != nil else { return entries }
         return Array(entries.prefix(min(visibleEntryLimit, entries.count)))
@@ -1355,6 +1370,9 @@ struct ClipboardHistoryPanelView: View {
                 .frame(height: ClipboardPanelLayout.headerHeight)
             categoryBar
                 .frame(height: ClipboardPanelLayout.segmentedHeight)
+            if isActiveCategoryLocked {
+                PINUnlockView(lockStore: lockStore, categoryName: title(for: activeKey))
+            } else {
             ScrollViewReader { proxy in
                 ScrollView {
                     content
@@ -1377,6 +1395,7 @@ struct ClipboardHistoryPanelView: View {
                 if entries.isEmpty {
                     ContentUnavailableView(emptyTitle, systemImage: emptySymbol)
                 }
+            }
             }
         }
         .padding(ClipboardPanelLayout.outerPadding)
@@ -1446,6 +1465,7 @@ struct ClipboardHistoryPanelView: View {
             case .text: L10n.text("没有文本记录")
             case .code: L10n.text("没有代码记录")
             case .link: L10n.text("没有链接记录")
+            case .password: L10n.text("没有密码记录")
             }
         case .custom:
             L10n.text("没有匹配的记录")
@@ -1871,8 +1891,6 @@ private struct TextEntryRow: View, Equatable {
     let onTogglePin: () -> Void
     let onToggleClipboardPin: () -> Void
 
-    @State private var isHovered = false
-
     /// One truncated line displays only a screenful of characters; running
     /// `replacingOccurrences` over an entire large clipboard text on every row
     /// render was a per-frame scroll cost. The prefix is far beyond what
@@ -1884,14 +1902,13 @@ private struct TextEntryRow: View, Equatable {
     }
 
     var body: some View {
-        let displaysSelection = isSelected || isHovered
         HStack(spacing: 6) {
             Text(previewLine)
                 .font(.system(size: 12))
                 .lineLimit(1)
-                .foregroundStyle(displaysSelection ? Color.white : Color.primary)
+                .foregroundStyle(isSelected ? Color.white : Color.primary)
             Spacer(minLength: 0)
-            if displaysSelection {
+            if isSelected {
                 Button(action: onToggleClipboardPin) {
                     Image(systemName: entry.isPinned ? "pin.fill" : "pin")
                         .font(.system(size: 10, weight: .medium))
@@ -1905,8 +1922,9 @@ private struct TextEntryRow: View, Equatable {
             } else {
                 // Unselected: the desktop-pin badge leads and the copy shortcut
                 // trails, so a pinned item's persistent indicator sits left of
-                // the ⌘-number.
-                if isHovered || entry.isDesktopPinned == true {
+                // the ⌘-number. A hovered row is always `isSelected` (the panel
+                // owns hover), so this branch only ever runs for un-hovered rows.
+                if entry.isDesktopPinned == true {
                     ClipboardPinButton(entry: entry, isSelected: false, action: onTogglePin)
                 }
                 if let index, index < 9 {
@@ -1926,9 +1944,8 @@ private struct TextEntryRow: View, Equatable {
                 // explicit; a near-white fallback fill here used to become
                 // visible during AppKit hover compositing and made the panel
                 // flash white under the pointer.
-                .fill(displaysSelection ? AnyShapeStyle(Color.accentColor) : AnyShapeStyle(.clear))
+                .fill(isSelected ? AnyShapeStyle(Color.accentColor) : AnyShapeStyle(.clear))
         )
-        .onHover { isHovered = $0 }
     }
 }
 
@@ -1947,21 +1964,18 @@ private struct CodeEntryRow: View, Equatable {
     let onTogglePin: () -> Void
     let onToggleClipboardPin: () -> Void
 
-    @State private var isHovered = false
-
     var body: some View {
         // One lazy scan supplies both the preview text and the row height;
         // the previous two separate computed properties each split the text.
         let previewLines = ClipboardPanelLayout.codePreviewLines(entry.text)
-        let displaysSelection = isSelected || isHovered
         return HStack(alignment: .center, spacing: 6) {
             Text(CodeHighlighter.highlight(previewLines.joined(separator: "\n"), theme: codeHighlightTheme))
                 .font(.system(size: 11, design: .monospaced))
                 .lineLimit(ClipboardPanelLayout.codePreviewMaxLines)
                 .lineSpacing(1)
-                .foregroundStyle(displaysSelection ? Color.white : Color.primary)
+                .foregroundStyle(isSelected ? Color.white : Color.primary)
             Spacer(minLength: 0)
-            if displaysSelection {
+            if isSelected {
                 Button(action: onToggleClipboardPin) {
                     Image(systemName: entry.isPinned ? "pin.fill" : "pin")
                         .font(.system(size: 10, weight: .medium))
@@ -1973,8 +1987,9 @@ private struct CodeEntryRow: View, Equatable {
                 .help(L10n.text(entry.isPinned ? "取消剪切板内固定" : "固定到剪切板"))
                 ClipboardPinButton(entry: entry, isSelected: true, action: onTogglePin)
             } else {
-                // Unselected: desktop-pin badge leads, ⌘-number trails.
-                if isHovered || entry.isDesktopPinned == true {
+                // Unselected: desktop-pin badge leads, ⌘-number trails. A hovered
+                // row is always `isSelected`, so this branch is un-hovered only.
+                if entry.isDesktopPinned == true {
                     ClipboardPinButton(entry: entry, isSelected: false, action: onTogglePin)
                 }
                 if let index, index < 9 {
@@ -1990,9 +2005,8 @@ private struct CodeEntryRow: View, Equatable {
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(
             RoundedRectangle(cornerRadius: 7, style: .continuous)
-                .fill(displaysSelection ? AnyShapeStyle(Color.accentColor) : AnyShapeStyle(.clear))
+                .fill(isSelected ? AnyShapeStyle(Color.accentColor) : AnyShapeStyle(.clear))
         )
-        .onHover { isHovered = $0 }
     }
 }
 
@@ -2011,12 +2025,9 @@ private struct ImageEntryCell: View, Equatable {
     let onTogglePin: () -> Void
     let onToggleClipboardPin: () -> Void
 
-    @State private var isHovered = false
-
     private var side: CGFloat { ClipboardPanelLayout.imageCellSide }
 
     var body: some View {
-        let displaysSelection = isSelected || isHovered
         ZStack {
             RoundedRectangle(cornerRadius: 8, style: .continuous)
                 .fill(.quinary)
@@ -2033,7 +2044,7 @@ private struct ImageEntryCell: View, Equatable {
         .frame(width: side, height: side)
         .overlay(alignment: .topTrailing) {
             HStack(spacing: 4) {
-                if displaysSelection {
+                if isSelected {
                     Button(action: onToggleClipboardPin) {
                         Image(systemName: entry.isPinned ? "pin.fill" : "pin")
                             .font(.system(size: 10, weight: .medium))
@@ -2047,8 +2058,9 @@ private struct ImageEntryCell: View, Equatable {
                     ClipboardPinButton(entry: entry, isSelected: true, action: onTogglePin)
                         .background(Circle().fill(.black.opacity(0.4)))
                 } else {
-                    // Unselected: desktop-pin badge leads, ⌘-number trails.
-                    if isHovered || entry.isDesktopPinned == true {
+                    // Unselected: desktop-pin badge leads, ⌘-number trails. A
+                    // hovered cell is always `isSelected`, so this is un-hovered.
+                    if entry.isDesktopPinned == true {
                         ClipboardPinButton(entry: entry, isSelected: true, action: onTogglePin)
                             .background(Circle().fill(.black.opacity(0.4)))
                     }
@@ -2068,9 +2080,8 @@ private struct ImageEntryCell: View, Equatable {
         .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
         .overlay {
             RoundedRectangle(cornerRadius: 8, style: .continuous)
-                .stroke(displaysSelection ? Color.accentColor : Color.clear, lineWidth: 2)
+                .stroke(isSelected ? Color.accentColor : Color.clear, lineWidth: 2)
         }
-        .onHover { isHovered = $0 }
     }
 }
 

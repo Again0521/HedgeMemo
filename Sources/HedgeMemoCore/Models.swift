@@ -131,6 +131,7 @@ public enum ClipboardContentCategory: String, Codable, CaseIterable, Sendable {
     case link
     case image
     case screenshot
+    case password
 
     public var displayName: String {
         switch self {
@@ -139,6 +140,7 @@ public enum ClipboardContentCategory: String, Codable, CaseIterable, Sendable {
         case .link: L10n.text("链接")
         case .image: L10n.text("图片")
         case .screenshot: L10n.text("截图")
+        case .password: L10n.text("密码")
         }
     }
 
@@ -149,6 +151,7 @@ public enum ClipboardContentCategory: String, Codable, CaseIterable, Sendable {
         case .link: "link"
         case .image: "photo"
         case .screenshot: "camera.viewfinder"
+        case .password: "key.fill"
         }
     }
 }
@@ -160,6 +163,11 @@ public enum ClipboardEntryOrigin: String, Codable, Sendable {
     // it keeps the pre-rename (MemeMemo era) spelling so existing snapshots
     // and archives continue to decode after the HedgeMemo rename.
     case hedgeMemoScreenshot = "memeMemoScreenshot"
+    /// Copied from a source that marked the pasteboard concealed (password
+    /// managers, browser password fields). Category comes from this marker
+    /// rather than from the text, because a strong password is
+    /// indistinguishable from random text by inspection.
+    case concealedPassword
 }
 
 /// User-defined category that filters text entries with a regular expression.
@@ -734,7 +742,14 @@ public struct ClipboardEntry: Codable, Hashable, Identifiable, Sendable {
         self.origin = origin
     }
 
+    /// A password entry never renders its own value. Its text is stored
+    /// encrypted, and even once decrypted it is only ever written to the
+    /// pasteboard — the list, the search index and the detail card all see this
+    /// mask instead, so a shoulder-surfer cannot read a secret off the screen.
+    public var isSecret: Bool { origin == .concealedPassword }
+
     public var previewText: String {
+        if isSecret { return L10n.text("已隐藏的密码") }
         switch kind {
         case .text:
             let cleaned = (text ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
@@ -757,6 +772,7 @@ public struct ClipboardEntry: Codable, Hashable, Identifiable, Sendable {
     }()
 
     public var contentCategory: ClipboardContentCategory {
+        if origin == .concealedPassword { return .password }
         if origin == .hedgeMemoScreenshot { return .screenshot }
         switch kind {
         case .image:

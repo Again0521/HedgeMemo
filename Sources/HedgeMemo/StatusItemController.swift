@@ -29,6 +29,7 @@ final class StatusItemController: NSObject {
         screenshotSettingsStore: services.screenshotSettingsStore,
         memePanelSettingsStore: services.memePanelSettingsStore,
         updateCheckStore: services.updateCheckStore,
+        lockStore: services.lockStore,
         hotKeyWarnings: { [services] in services.hotKeyWarnings }
     )
 

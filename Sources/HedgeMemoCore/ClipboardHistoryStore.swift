@@ -32,6 +32,10 @@ public final class ClipboardHistoryStore: ObservableObject {
     /// While the meme library is capturing clipboard images, history recording is
     /// paused so the captured content doesn't also pile up in the clipboard list.
     public var isRecordingPaused = false
+    /// Mirrors `AppLockSettings.capturesPasswords`. Owned by the lock store but
+    /// read on the capture path, so the app keeps it in sync rather than making
+    /// the history store depend on the lock store.
+    public var capturesPasswords = false
 
     public let repository: ClipboardHistoryRepository
 
@@ -204,6 +208,43 @@ public final class ClipboardHistoryStore: ObservableObject {
         return true
     }
 
+    /// Records a concealed copy as an encrypted 密码 entry.
+    ///
+    /// The stored `text` is ciphertext, so the on-disk history never contains
+    /// the secret in the clear. The content hash is taken over the *plaintext*
+    /// so re-copying the same password still de-duplicates — hashing the
+    /// ciphertext would defeat that, since AES-GCM uses a fresh nonce each time.
+    @discardableResult
+    public func addPassword(_ secret: String, sourceApp: String? = nil) -> Bool {
+        guard !secret.isEmpty, secret.utf8.count <= Self.maxTextByteCount else { return false }
+        let hash = Data(secret.utf8).clipboardContentHash
+        let candidate = ClipboardEntry(
+            kind: .text,
+            contentHash: hash,
+            sourceApp: sourceApp,
+            origin: .concealedPassword
+        )
+        guard shouldRecord(candidate) else { return false }
+        if promoteExistingEntry(contentHash: hash, sourceApp: sourceApp) {
+            persist()
+            return false
+        }
+        guard let ciphertext = try? SecretVault.encrypt(secret) else {
+            lastError = L10n.text("无法加密密码，已跳过记录。")
+            return false
+        }
+        entries.append(ClipboardEntry(
+            kind: .text,
+            text: ciphertext,
+            contentHash: hash,
+            sourceApp: sourceApp,
+            origin: .concealedPassword
+        ))
+        trimToLimit()
+        persist()
+        return true
+    }
+
     @discardableResult
     public func addImage(
         _ image: NSImage,
@@ -319,7 +360,17 @@ public final class ClipboardHistoryStore: ObservableObject {
         persist()
     }
 
+    /// The snapshot handed to ZIP export. Password entries are deliberately
+    /// excluded: their ciphertext is bound to a content key that lives in this
+    /// Mac's keychain, so exporting them would only ever produce data no machine
+    /// (including this one, after a keychain reset) could decrypt — while still
+    /// shipping the user's secrets off the device.
     public func snapshot() -> ClipboardHistorySnapshot {
+        ClipboardHistorySnapshot(entries: entries.filter { !$0.isSecret }, settings: settings)
+    }
+
+    /// The full in-memory state, secrets included. Only persistence uses this.
+    private func persistableSnapshot() -> ClipboardHistorySnapshot {
         ClipboardHistorySnapshot(entries: entries, settings: settings)
     }
 
@@ -398,6 +449,10 @@ public final class ClipboardHistoryStore: ObservableObject {
     /// have no editable text body.
     public func updateText(id: UUID, text: String) {
         guard let index = entries.firstIndex(where: { $0.id == id }), entries[index].kind == .text else { return }
+        // A secret is stored encrypted and never shown, so there is nothing
+        // meaningful to edit — and writing the draft back would replace the
+        // ciphertext with plain text.
+        guard !entries[index].isSecret else { return }
         entries[index].text = text
         entries[index].contentHash = Data(text.utf8).clipboardContentHash
         entries[index].updatedAt = .now
@@ -412,7 +467,22 @@ public final class ClipboardHistoryStore: ObservableObject {
         switch entry.kind {
         case .text:
             guard let text = entry.text else { return false }
-            pasteboard.setString(text, forType: .string)
+            if entry.isSecret {
+                // Decrypt only at the moment of use, and re-declare the copy
+                // concealed so other clipboard managers (and our own monitor)
+                // treat it as a secret rather than as ordinary text.
+                guard let secret = try? SecretVault.decrypt(text) else {
+                    lastError = L10n.text("无法解密密码。")
+                    return false
+                }
+                pasteboard.declareTypes(
+                    [.string, NSPasteboard.PasteboardType("org.nspasteboard.ConcealedType")],
+                    owner: nil
+                )
+                pasteboard.setString(secret, forType: .string)
+            } else {
+                pasteboard.setString(text, forType: .string)
+            }
         case .image:
             guard let url = repository.imageURL(for: entry),
                   let payload = ImageAssetData(fileURL: url) else { return false }
@@ -546,12 +616,20 @@ public final class ClipboardHistoryStore: ObservableObject {
         // Keep observedChangeCount current (done above) so resuming won't capture
         // whatever was copied while the meme library was grabbing images.
         guard !isRecordingPaused else { return }
-        // Never record content a password manager or other tool marked private;
-        // the change is already consumed above so it stays out of the history.
-        guard !Self.isPrivatePasteboard(pasteboard) else { return }
         // The copy happened within the last polling interval, so the frontmost
         // app is a good approximation of where the content came from.
         let sourceApp = NSWorkspace.shared.frontmostApplication?.localizedName
+        // Content a password manager (or a browser password field) marked
+        // concealed. Unless the user has explicitly opted in, it is dropped
+        // exactly as before — that stays the default. When opted in it is
+        // recorded only as an encrypted 密码 entry, never as ordinary text.
+        if Self.isPrivatePasteboard(pasteboard) {
+            guard capturesPasswords,
+                  pasteboard.types?.contains(.string) == true,
+                  let secret = pasteboard.string(forType: .string) else { return }
+            _ = addPassword(secret, sourceApp: sourceApp)
+            return
+        }
         // Require an explicitly declared text payload. Asking AppKit to convert
         // a Finder file URL to `.string` can resolve the external file and cause
         // a broad Documents permission prompt during background monitoring.
@@ -666,7 +744,7 @@ public final class ClipboardHistoryStore: ObservableObject {
     private func writeSnapshot() {
         guard !isPersistenceDisabled else { return }
         do {
-            try repository.save(ClipboardHistorySnapshot(entries: entries, settings: settings))
+            try repository.save(persistableSnapshot())
         } catch {
             lastError = error.localizedDescription
         }

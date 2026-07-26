@@ -52,6 +52,7 @@ final class SettingsWindowController: NSObject, NSWindowDelegate {
     private let screenshotSettingsStore: ScreenshotSettingsStore
     private let memePanelSettingsStore: MemePanelSettingsStore
     private let updateCheckStore: UpdateCheckStore
+    private let lockStore: AppLockStore
     private let hotKeyWarnings: () -> [String]
     private var panel: NSPanel?
 
@@ -60,12 +61,14 @@ final class SettingsWindowController: NSObject, NSWindowDelegate {
         screenshotSettingsStore: ScreenshotSettingsStore,
         memePanelSettingsStore: MemePanelSettingsStore,
         updateCheckStore: UpdateCheckStore,
+        lockStore: AppLockStore,
         hotKeyWarnings: @escaping () -> [String]
     ) {
         self.clipboardStore = clipboardStore
         self.screenshotSettingsStore = screenshotSettingsStore
         self.memePanelSettingsStore = memePanelSettingsStore
         self.updateCheckStore = updateCheckStore
+        self.lockStore = lockStore
         self.hotKeyWarnings = hotKeyWarnings
     }
 
@@ -112,6 +115,7 @@ final class SettingsWindowController: NSObject, NSWindowDelegate {
             screenshotSettingsStore: screenshotSettingsStore,
             memePanelSettingsStore: memePanelSettingsStore,
             updateCheckStore: updateCheckStore,
+            lockStore: lockStore,
             hotKeyWarnings: hotKeyWarnings()
         )
         PanelMaterialHost.install(content, in: panel, cornerRadius: 16)
@@ -131,10 +135,12 @@ struct SettingsPanelView: View {
     @ObservedObject var screenshotSettingsStore: ScreenshotSettingsStore
     @ObservedObject var memePanelSettingsStore: MemePanelSettingsStore
     @ObservedObject var updateCheckStore: UpdateCheckStore
+    @ObservedObject var lockStore: AppLockStore
     let hotKeyWarnings: [String]
     @State private var accessibilityTrusted = AXIsProcessTrusted()
     @State private var customDraft: CustomCategoryDraft?
     @State private var selectedTab: SettingsTab = .clipboard
+    @State private var isSettingPIN = false
     @StateObject private var launchAtLogin = LaunchAtLoginController()
     @AppStorage(AppPreferences.showsScrollIndicatorsKey) private var showsScrollIndicators = true
     @AppStorage(AppPreferences.interfaceOpacityKey)
@@ -157,6 +163,13 @@ struct SettingsPanelView: View {
         }
         .sheet(item: $customDraft) { draft in
             CustomCategoryEditorSheet(draft: draft) { saveCustomCategory($0) }
+        }
+        .sheet(isPresented: $isSettingPIN) {
+            PINSetupSheet(lockStore: lockStore) { created in
+                // Creating the first PIN is only useful if the lock also turns
+                // on, so do both in the one gesture.
+                if created, !lockStore.settings.isEnabled { lockStore.settings.isEnabled = true }
+            }
         }
     }
 
@@ -225,6 +238,144 @@ struct SettingsPanelView: View {
         clipboardSection
         codeAppearanceSection
         categorySection
+        securitySection
+    }
+
+    /// PIN lock lives with the clipboard because that is the only content it
+    /// protects today.
+    private var securitySection: some View {
+        SettingsSection(
+            title: L10n.text("安全"),
+            footer: L10n.text("开启后，密码管理器等标记为隐私的复制内容会记录到「密码」分类，并加密保存。关闭时（默认）这类内容不会被记录。")
+        ) {
+            SettingsFormRow(L10n.text("PIN 码锁定")) {
+                Toggle(L10n.text("PIN 码锁定"), isOn: lockEnabledBinding)
+                    .labelsHidden()
+                    .disabled(!lockStore.hasPIN)
+                    .help(L10n.text(lockStore.hasPIN ? "PIN 码锁定" : "需要先设置 PIN 码"))
+            }
+            SettingsDivider()
+            SettingsActionRow {
+                HStack(spacing: 8) {
+                    Button(L10n.text(lockStore.hasPIN ? "修改 PIN 码…" : "设置 PIN 码…")) {
+                        isSettingPIN = true
+                    }
+                    if lockStore.hasPIN {
+                        Button(L10n.text("移除 PIN 码"), role: .destructive) {
+                            try? lockStore.removePIN()
+                        }
+                    }
+                }
+            }
+            if lockStore.settings.isEnabled {
+                SettingsDivider()
+                SettingsFormRow(L10n.text("锁定时机")) {
+                    Picker(L10n.text("锁定时机"), selection: lockTimingBinding) {
+                        ForEach(AppLockTiming.allCases, id: \.self) { timing in
+                            Text(timing.displayName).tag(timing)
+                        }
+                    }
+                    .labelsHidden()
+                    .pickerStyle(.menu)
+                    .frame(width: 190, alignment: .trailing)
+                }
+                if lockStore.settings.timing == .afterIdle {
+                    SettingsDivider()
+                    SettingsFormRow(L10n.text("闲置时长")) {
+                        Picker(L10n.text("闲置时长"), selection: idleMinutesBinding) {
+                            ForEach(AppLockSettings.idleMinuteChoices, id: \.self) { minutes in
+                                Text(L10n.format("闲置分钟数格式", minutes)).tag(minutes)
+                            }
+                        }
+                        .labelsHidden()
+                        .pickerStyle(.menu)
+                        .frame(width: 190, alignment: .trailing)
+                    }
+                }
+                SettingsDivider()
+                SettingsFormRow(L10n.text("允许触控 ID 解锁")) {
+                    Toggle(L10n.text("允许触控 ID 解锁"), isOn: biometricsBinding)
+                        .labelsHidden()
+                        .disabled(!BiometricAuthenticator.isAvailable)
+                }
+                SettingsDivider()
+                SettingsRow {
+                    VStack(alignment: .leading, spacing: 6) {
+                        Text(L10n.text("需要锁定的分类"))
+                        ForEach(lockableCategoryKeys, id: \.storageValue) { key in
+                            Toggle(categoryDisplayName(key), isOn: lockedCategoryBinding(key))
+                                .toggleStyle(.checkbox)
+                        }
+                    }
+                    .padding(.vertical, 4)
+                }
+            }
+            SettingsDivider()
+            SettingsFormRow(L10n.text("记录密码类内容")) {
+                Toggle(L10n.text("记录密码类内容"), isOn: capturesPasswordsBinding)
+                    .labelsHidden()
+            }
+        }
+    }
+
+    private var lockableCategoryKeys: [ClipboardCategoryKey] {
+        clipboardStore.settings.orderedCategoryKeys
+    }
+
+    private func categoryDisplayName(_ key: ClipboardCategoryKey) -> String {
+        switch key {
+        case .builtin(let category): return category.displayName
+        case .custom(let id): return clipboardStore.settings.customCategory(id: id)?.name ?? L10n.text("自定义")
+        }
+    }
+
+    private func lockedCategoryBinding(_ key: ClipboardCategoryKey) -> Binding<Bool> {
+        Binding(
+            get: { lockStore.settings.lockedCategoryKeys.contains(key.storageValue) },
+            set: { lockStore.settings.setCategory(key, locked: $0) }
+        )
+    }
+
+    private var lockEnabledBinding: Binding<Bool> {
+        Binding(
+            get: { lockStore.settings.isEnabled },
+            set: { lockStore.settings.isEnabled = $0 }
+        )
+    }
+
+    private var lockTimingBinding: Binding<AppLockTiming> {
+        Binding(
+            get: { lockStore.settings.timing },
+            set: { lockStore.settings.timing = $0 }
+        )
+    }
+
+    private var idleMinutesBinding: Binding<Int> {
+        Binding(
+            get: { lockStore.settings.idleMinutes },
+            set: { lockStore.settings.idleMinutes = $0 }
+        )
+    }
+
+    private var biometricsBinding: Binding<Bool> {
+        Binding(
+            get: { lockStore.settings.allowsBiometrics },
+            set: { lockStore.settings.allowsBiometrics = $0 }
+        )
+    }
+
+    private var capturesPasswordsBinding: Binding<Bool> {
+        Binding(
+            get: { lockStore.settings.capturesPasswords },
+            set: { enabled in
+                lockStore.settings.capturesPasswords = enabled
+                // Turning capture on with the 密码 category switched off would
+                // record entries the user could never reach. Turning it back off
+                // deliberately does *not* disable the category, because that
+                // path is destructive — it would delete passwords already saved.
+                if enabled { clipboardStore.setCategory(.builtin(.password), enabled: true) }
+            }
+        )
     }
 
     @ViewBuilder

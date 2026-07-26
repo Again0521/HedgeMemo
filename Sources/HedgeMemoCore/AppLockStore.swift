@@ -1,0 +1,125 @@
+import Combine
+import Foundation
+
+@MainActor
+public final class AppLockStore: ObservableObject {
+    private var isNormalizingSettings = false
+    @Published public var settings: AppLockSettings {
+        didSet {
+            guard !isNormalizingSettings else { return }
+            isNormalizingSettings = true
+            settings.normalize()
+            isNormalizingSettings = false
+            // Losing the PIN, or turning the lock off, must never leave a
+            // half-locked state behind.
+            if !settings.isEnabled { unlockedAt = nil }
+            persist()
+        }
+    }
+
+    /// When the current session was unlocked; nil means locked. Published so the
+    /// panel can swap between the list and the unlock screen.
+    @Published public private(set) var unlockedAt: Date?
+    /// Last interaction with unlocked content, used by the idle timing.
+    private var lastUsedAt: Date?
+    @Published public private(set) var failedAttempts = 0
+
+    private let defaults: UserDefaults
+    private let key = "HedgeMemo.AppLockSettings"
+    private static let persistentSuite = "com.hedgememo.app"
+
+    public init(defaults: UserDefaults? = nil) {
+        let resolved = defaults ?? UserDefaults(suiteName: Self.persistentSuite) ?? .standard
+        self.defaults = resolved
+        if let data = resolved.data(forKey: key),
+           var decoded = try? JSONDecoder().decode(AppLockSettings.self, from: data) {
+            decoded.normalize()
+            settings = decoded
+        } else {
+            settings = AppLockSettings()
+        }
+        // A lock with no PIN behind it would strand the user, so refuse to come
+        // up enabled unless a PIN really exists.
+        if settings.isEnabled, !SecretVault.hasPIN {
+            settings.isEnabled = false
+        }
+    }
+
+    public var hasPIN: Bool { SecretVault.hasPIN }
+
+    /// True when locked content should be withheld right now.
+    public var isLocked: Bool {
+        guard settings.isEnabled else { return false }
+        return !AppLockPolicy.remainsUnlocked(
+            settings: settings,
+            unlockedAt: unlockedAt,
+            lastUsedAt: lastUsedAt,
+            now: .now
+        )
+    }
+
+    public func isCategoryLocked(_ key: ClipboardCategoryKey) -> Bool {
+        settings.isCategoryLocked(key) && isLocked
+    }
+
+    // MARK: - PIN lifecycle
+
+    /// Sets or replaces the PIN. Enabling the lock is left to the caller so the
+    /// settings toggle stays the single place that turns the feature on.
+    public func setPIN(_ pin: String) throws {
+        try SecretVault.setPIN(pin)
+        failedAttempts = 0
+    }
+
+    /// Removes the PIN and disables the lock together — one without the other is
+    /// never a valid state.
+    public func removePIN() throws {
+        try SecretVault.removePIN()
+        settings.isEnabled = false
+        unlockedAt = nil
+        failedAttempts = 0
+    }
+
+    @discardableResult
+    public func unlock(pin: String) -> Bool {
+        guard SecretVault.verifyPIN(pin) else {
+            failedAttempts += 1
+            return false
+        }
+        markUnlocked()
+        return true
+    }
+
+    /// Used by the biometric path, which has already been verified by
+    /// LocalAuthentication against the user's own Touch ID / password.
+    public func markUnlocked() {
+        failedAttempts = 0
+        unlockedAt = .now
+        lastUsedAt = .now
+    }
+
+    public func noteActivity() {
+        guard unlockedAt != nil else { return }
+        lastUsedAt = .now
+    }
+
+    public func lock() {
+        unlockedAt = nil
+        lastUsedAt = nil
+    }
+
+    public func handlePanelClosed() {
+        guard AppLockPolicy.locksOnPanelClose(settings) else { return }
+        lock()
+    }
+
+    public func handleSystemSleep() {
+        guard AppLockPolicy.locksOnSleep(settings) else { return }
+        lock()
+    }
+
+    private func persist() {
+        guard let data = try? JSONEncoder().encode(settings) else { return }
+        defaults.set(data, forKey: key)
+    }
+}
