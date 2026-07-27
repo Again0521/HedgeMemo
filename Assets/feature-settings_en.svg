@@ -88,5 +88,5 @@
   <!-- footer -->
   <rect x="452" y="626" width="120" height="34" rx="10" fill="#FF6B57"/>
   <text x="512" y="648" font-size="15" font-weight="600" fill="#FFFFFF" text-anchor="middle">Check</text>
-  <text x="592" y="648" font-size="15" fill="#A7A9B0">Version 1.2.0 · Up to date</text>
+  <text x="592" y="648" font-size="15" fill="#A7A9B0">Version 1.2.5 · Up to date</text>
 </svg>

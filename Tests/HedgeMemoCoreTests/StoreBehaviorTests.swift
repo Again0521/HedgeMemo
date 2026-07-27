@@ -633,6 +633,58 @@ final class StoreBehaviorTests: XCTestCase {
         XCTAssertEqual(store.orderedEntries(key: .builtin(.code)).count, 1)
     }
 
+    /// Typing narrows the previous result instead of rescanning the category.
+    /// Every step must still produce exactly what a full pass would.
+    func testIncrementalSearchMatchesAFullPassAtEveryStep() {
+        let store = makeClipboardStore()
+        let texts = [
+            "invoice 2026 approved",
+            "invoice 2025 pending",
+            "在发票 invoice 上签字",
+            "无关的普通内容",
+            "INVOICE-2026-FINAL",
+        ]
+        for text in texts { XCTAssertTrue(store.addText(text)) }
+
+        func expectedResult(_ query: String) -> [UUID] {
+            ClipboardHistoryPolicy.ordered(
+                store.entries,
+                query: query,
+                key: .builtin(.text)
+            ).map(\.id)
+        }
+        func assertMatchesFullPass(_ query: String, _ message: String = "") {
+            XCTAssertEqual(
+                store.orderedEntries(query: query, key: .builtin(.text)).map(\.id),
+                expectedResult(query),
+                message.isEmpty ? "query \(query)" : message
+            )
+        }
+
+        // Typing forward, the case the chain is built for.
+        for length in 1..."invoice 2026".count {
+            assertMatchesFullPass(String("invoice 2026".prefix(length)))
+        }
+        // Backspacing widens the result again, which the chain cannot reuse.
+        for length in stride(from: "invoice 2026".count, through: 1, by: -1) {
+            assertMatchesFullPass(String("invoice 2026".prefix(length)))
+        }
+        // Wildcards match through a different comparison, so a plain query must
+        // never be narrowed into a wildcard one or the reverse.
+        assertMatchesFullPass("invoice")
+        assertMatchesFullPass("invoice%2026")
+        assertMatchesFullPass("invoice%2026%final")
+        assertMatchesFullPass("invoice")
+        assertMatchesFullPass("")
+        assertMatchesFullPass("%")
+        assertMatchesFullPass("%invoice")
+        assertMatchesFullPass("在发票")
+
+        // A new entry must reach an already-narrowed query.
+        XCTAssertTrue(store.addText("invoice 2026 追加"))
+        assertMatchesFullPass("invoice 2026", "a capture during a search must appear")
+    }
+
     /// The panel observes this counter instead of comparing history snapshots.
     func testEntriesRevisionAdvancesOnEveryChange() {
         let store = makeClipboardStore()

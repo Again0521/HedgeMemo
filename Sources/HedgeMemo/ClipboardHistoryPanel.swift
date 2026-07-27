@@ -1539,8 +1539,7 @@ struct ClipboardHistoryPanelView: View {
         }
     }
     private var visibleEntries: [ClipboardEntry] {
-        guard ClipboardPanelPagination.pageSize(for: activeKey) != nil else { return entries }
-        return Array(entries.prefix(min(visibleEntryLimit, entries.count)))
+        Array(entries.prefix(min(visibleEntryLimit, entries.count)))
     }
     private var activeSelectionID: UUID? {
         contextMenuEntryID ?? hoveredID ?? keyboardSelectedID
@@ -1904,10 +1903,10 @@ struct ClipboardHistoryPanelView: View {
         visibleEntryLimit = ClipboardPanelPagination.initialLimit(for: activeKey)
     }
 
-    private func loadNextPageIfNeeded(atIndex index: Int) {
-        // `entries` is memoized, so `.count` is O(1); avoid allocating the
-        // `visibleEntries` prefix array on every cell's onAppear.
-        let total = entries.count
+    /// `total` is passed in rather than read from `entries`: this runs from
+    /// every cell's `onAppear`, and resolving the ordered list again per cell
+    /// made a page of rows quadratic in the category size.
+    private func loadNextPageIfNeeded(atIndex index: Int, total: Int) {
         let visibleCount = min(visibleEntryLimit, total)
         guard visibleCount < total else { return }
         // Grow when a cell within the prefetch window near the tail appears,
@@ -1922,8 +1921,8 @@ struct ClipboardHistoryPanelView: View {
     }
 
     private func ensurePageContains(index: Int) {
-        guard let pageSize = ClipboardPanelPagination.pageSize(for: activeKey),
-              index >= visibleEntryLimit else { return }
+        guard index >= visibleEntryLimit else { return }
+        let pageSize = ClipboardPanelPagination.pageSize(for: activeKey)
         visibleEntryLimit = min(entries.count, ((index / pageSize) + 1) * pageSize)
     }
 
@@ -2115,6 +2114,11 @@ struct ClipboardHistoryPanelView: View {
 
     @ViewBuilder
     private var content: some View {
+        // Resolved once per pass. `entries` is not free — for the password
+        // category it projects the revealed text over the whole list — and it
+        // was previously reached again from every row's `onAppear`.
+        let all = entries
+        let rows = Array(all.prefix(min(visibleEntryLimit, all.count)))
         switch activeKey {
         case .builtin(.image), .builtin(.screenshot):
             LazyVGrid(
@@ -2125,7 +2129,7 @@ struct ClipboardHistoryPanelView: View {
                 alignment: .leading,
                 spacing: ClipboardPanelLayout.imageCellSpacing
             ) {
-                ForEach(Array(visibleEntries.enumerated()), id: \.element.id) { index, entry in
+                ForEach(Array(rows.enumerated()), id: \.element.id) { index, entry in
                     ImageEntryCell(
                         entry: entry,
                         index: index,
@@ -2141,14 +2145,10 @@ struct ClipboardHistoryPanelView: View {
                         EntryHoverTrackingOverlay { updateHover($0, entry: entry) }
                     }
                     .contextMenu { entryMenu(entry) }
-                    .onAppear { loadNextPageIfNeeded(atIndex: index) }
+                    .onAppear { loadNextPageIfNeeded(atIndex: index, total: all.count) }
                 }
             }
         default:
-            // Resolved once per pass: `visibleEntries` builds a prefix array,
-            // and reading it from inside the row builder rebuilt that array
-            // for every single row.
-            let rows = visibleEntries
             LazyVStack(spacing: ClipboardPanelLayout.listSpacing) {
                 ForEach(Array(rows.enumerated()), id: \.element.id) { index, entry in
                     VStack(spacing: 0) {
@@ -2200,7 +2200,7 @@ struct ClipboardHistoryPanelView: View {
                         EntryHoverTrackingOverlay { updateHover($0, entry: entry) }
                     }
                     .contextMenu { entryMenu(entry) }
-                    .onAppear { loadNextPageIfNeeded(atIndex: index) }
+                    .onAppear { loadNextPageIfNeeded(atIndex: index, total: all.count) }
                 }
             }
         }

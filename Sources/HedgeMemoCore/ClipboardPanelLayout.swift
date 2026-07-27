@@ -200,7 +200,7 @@ public enum ClipboardPanelPagination {
     /// catches up with the loaded tail.
     public static let textPageSize = 300
 
-    public static func pageSize(for key: ClipboardCategoryKey?) -> Int? {
+    public static func pageSize(for key: ClipboardCategoryKey?) -> Int {
         switch key {
         case .builtin(.code): codePageSize
         case .builtin(.image), .builtin(.screenshot): imagePageSize
@@ -209,19 +209,17 @@ public enum ClipboardPanelPagination {
     }
 
     public static func initialLimit(for key: ClipboardCategoryKey?) -> Int {
-        pageSize(for: key) ?? Int.max
+        pageSize(for: key)
     }
 
     public static func nextLimit(current: Int, total: Int, key: ClipboardCategoryKey?) -> Int {
-        guard let pageSize = pageSize(for: key) else { return total }
-        return min(total, max(current, 0) + pageSize)
+        min(total, max(current, 0) + pageSize(for: key))
     }
 
     /// How many cells before the loaded tail should trigger the next page.
     /// Prefetching a quarter-page early means the scroll never pauses at a page
     /// boundary waiting for the list to grow, so paging stays invisible.
     public static func prefetchDistance(for key: ClipboardCategoryKey?) -> Int {
-        guard let pageSize = pageSize(for: key) else { return 0 }
-        return max(1, pageSize / 4)
+        max(1, pageSize(for: key) / 4)
     }
 }

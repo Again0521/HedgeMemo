@@ -760,18 +760,21 @@ public enum ClipboardCodeDetector {
 final class TextCategoryCache: @unchecked Sendable {
     static let shared = TextCategoryCache()
 
-    private struct Value { let byteCount: Int; let category: ClipboardContentCategory }
+    /// A composite key rather than a hash key validated against the length:
+    /// with a single slot per hash, two texts that share one would evict each
+    /// other on every lookup and never be cached at all.
+    private struct Key: Hashable { let contentHash: String; let byteCount: Int }
 
     private let lock = NSLock()
-    private var storage: [String: Value] = [:]
+    private var storage: [Key: ClipboardContentCategory] = [:]
     private static let capacity = 24_000
 
     func category(contentHash: String, text: String) -> ClipboardContentCategory {
-        let byteCount = text.utf8.count
+        let key = Key(contentHash: contentHash, byteCount: text.utf8.count)
         lock.lock()
-        let cached = storage[contentHash]
+        let cached = storage[key]
         lock.unlock()
-        if let cached, cached.byteCount == byteCount { return cached.category }
+        if let cached { return cached }
 
         let category: ClipboardContentCategory
         if ClipboardLinkDetector.isLink(text) {
@@ -784,7 +787,7 @@ final class TextCategoryCache: @unchecked Sendable {
 
         lock.lock()
         if storage.count >= Self.capacity { storage.removeAll(keepingCapacity: true) }
-        storage[contentHash] = Value(byteCount: byteCount, category: category)
+        storage[key] = category
         lock.unlock()
         return category
     }
@@ -1428,13 +1431,13 @@ public enum ClipboardHistoryPolicy {
         customCategories: [CustomClipboardCategory],
         advancedOptions: ClipboardAdvancedOptions?
     ) -> SortedPartitions {
+        // Nothing to reject: hand back the same storage instead of copying
+        // every element into a new array.
+        if key == nil, advancedOptions?.sourceIdentifier == nil { return partitions }
         func matches(_ entry: ClipboardEntry) -> Bool {
             entry.matches(key: key, customCategories: customCategories)
                 && (advancedOptions?.matchesSource(entry) ?? true)
         }
-        // Nothing to reject: hand back the same storage instead of copying
-        // every element into a new array.
-        if key == nil, advancedOptions?.sourceIdentifier == nil { return partitions }
         return SortedPartitions(
             ordinary: partitions.ordinary.filter(matches),
             desktopPinned: partitions.desktopPinned.filter(matches)

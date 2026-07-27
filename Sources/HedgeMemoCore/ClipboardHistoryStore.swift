@@ -1401,16 +1401,20 @@ public final class ClipboardHistoryStore: ObservableObject {
     /// `@Published`: every element write republishes the entire list and can
     /// copy its whole buffer.
     private func normalizePinOrders() {
+        // Read the list once. `entries` is a published property, so touching it
+        // from inside a sort comparator repeats that access for every
+        // comparison.
+        let current = entries
         var pinnedIndices: [Int] = []
-        for (index, entry) in entries.enumerated() where entry.isPinned {
+        for (index, entry) in current.enumerated() where entry.isPinned {
             pinnedIndices.append(index)
         }
         if !pinnedIndices.isEmpty {
             pinnedIndices.sort { lhs, rhs in
-                let left = entries[lhs].pinnedOrder ?? Int.max
-                let right = entries[rhs].pinnedOrder ?? Int.max
+                let left = current[lhs].pinnedOrder ?? Int.max
+                let right = current[rhs].pinnedOrder ?? Int.max
                 if left != right { return left < right }
-                return entries[lhs].createdAt < entries[rhs].createdAt
+                return current[lhs].createdAt < current[rhs].createdAt
             }
             applyOrders(pinnedIndices) { entry, order in
                 guard entry.pinnedOrder != order else { return false }
@@ -1426,19 +1430,20 @@ public final class ClipboardHistoryStore: ObservableObject {
     /// best available approximation of first-pin time for legacy snapshots.
     @discardableResult
     private func normalizeDesktopPinnedOrders() -> Bool {
+        let current = entries
         var pinnedIndices: [Int] = []
-        for (index, entry) in entries.enumerated() where entry.isDesktopPinned == true {
+        for (index, entry) in current.enumerated() where entry.isDesktopPinned == true {
             pinnedIndices.append(index)
         }
         guard !pinnedIndices.isEmpty else { return false }
         pinnedIndices.sort { lhs, rhs in
-            let left = entries[lhs].desktopPinnedOrder ?? Int.max
-            let right = entries[rhs].desktopPinnedOrder ?? Int.max
+            let left = current[lhs].desktopPinnedOrder ?? Int.max
+            let right = current[rhs].desktopPinnedOrder ?? Int.max
             if left != right { return left < right }
-            if entries[lhs].updatedAt != entries[rhs].updatedAt {
-                return entries[lhs].updatedAt < entries[rhs].updatedAt
+            if current[lhs].updatedAt != current[rhs].updatedAt {
+                return current[lhs].updatedAt < current[rhs].updatedAt
             }
-            return entries[lhs].createdAt < entries[rhs].createdAt
+            return current[lhs].createdAt < current[rhs].createdAt
         }
         return applyOrders(pinnedIndices) { entry, order in
             guard entry.desktopPinnedOrder != order else { return false }
