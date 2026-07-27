@@ -205,6 +205,7 @@ expect(
 )
 expect(ClipboardPanelPagination.pageSize(for: .builtin(.code)) == 60, "code rows must render in bounded pages")
 expect(ClipboardPanelPagination.pageSize(for: .builtin(.image)) == 48, "image rows must render in bounded pages")
+expect(ClipboardPanelPagination.pageSize(for: .builtin(.text)) == 300, "plain rows must render in bounded pages")
 expect(ClipboardPanelLayout.previewLineCount("single line") == 1, "single-line code must count one preview line")
 expect(ClipboardPanelLayout.previewLineCount("a\nb\nc\nd\ne") == 3, "long snippets must clamp to three preview lines")
 expect(

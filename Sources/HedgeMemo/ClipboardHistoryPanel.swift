@@ -1658,7 +1658,11 @@ struct ClipboardHistoryPanelView: View {
             // is already handled above; reacting to both fired two resizes.
             .onChange(of: activeGate) { _, _ in protectedGateChanged() }
             .onChange(of: activeKey.storageValue) { _, _ in noteProtectedActivity() }
-            .onChange(of: store.entries) { _, _ in
+            // Observing the revision rather than `entries` itself: SwiftUI
+            // compares the old and new value of whatever it is given, and
+            // comparing two copies of a long history element by element runs
+            // on every clipboard capture.
+            .onChange(of: store.entriesRevision) { _, _ in
                 refreshRevealedSecrets()
                 validateAdvancedSourceSelection()
                 selectionAndSizeChanged(resetPage: false)
@@ -2141,8 +2145,12 @@ struct ClipboardHistoryPanelView: View {
                 }
             }
         default:
+            // Resolved once per pass: `visibleEntries` builds a prefix array,
+            // and reading it from inside the row builder rebuilt that array
+            // for every single row.
+            let rows = visibleEntries
             LazyVStack(spacing: ClipboardPanelLayout.listSpacing) {
-                ForEach(Array(visibleEntries.enumerated()), id: \.element.id) { index, entry in
+                ForEach(Array(rows.enumerated()), id: \.element.id) { index, entry in
                     VStack(spacing: 0) {
                         if entry.kind == .image {
                             CompactImageEntryRow(
@@ -2174,7 +2182,7 @@ struct ClipboardHistoryPanelView: View {
                             )
                             .equatable()
                         }
-                        if activeKey == .builtin(.code), index < visibleEntries.count - 1 {
+                        if activeKey == .builtin(.code), index < rows.count - 1 {
                             Divider()
                                 .padding(.horizontal, 10)
                         }

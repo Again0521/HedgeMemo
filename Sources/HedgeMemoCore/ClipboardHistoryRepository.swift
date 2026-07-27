@@ -9,6 +9,8 @@ public final class ClipboardHistoryRepository: @unchecked Sendable {
     private let snapshotURL: URL
     private let fileManager: FileManager
     private let snapshotIO: RepositoryIOCoordinator
+    private let pendingGenerationLock = NSLock()
+    private var latestQueuedGeneration = 0
 
     public static let `default` = ClipboardHistoryRepository()
 
@@ -39,7 +41,10 @@ public final class ClipboardHistoryRepository: @unchecked Sendable {
         try snapshotIO.sync {
             try prepare()
             guard fileManager.fileExists(atPath: snapshotURL.path) else { return ClipboardHistorySnapshot() }
-            let data = try Data(contentsOf: snapshotURL)
+            // A long history is a large file, and this read happens during
+            // launch. Mapping it hands the pages to the decoder without first
+            // copying the whole document into the heap.
+            let data = try Data(contentsOf: snapshotURL, options: .mappedIfSafe)
             var snapshot = try JSONDecoder.clipboardDecoder.decode(ClipboardHistorySnapshot.self, from: data)
             snapshot.settings.normalize()
             return snapshot
@@ -50,11 +55,31 @@ public final class ClipboardHistoryRepository: @unchecked Sendable {
         try snapshotIO.sync { try saveImmediately(snapshot) }
     }
 
+    /// Enqueues a snapshot write, skipping generations that a newer enqueued
+    /// snapshot has already superseded.
+    ///
+    /// Writes are serialized, so a burst of mutations — a paste queue being
+    /// filled, an import, a run of quick copies — used to queue one complete
+    /// re-encode of the entire history per mutation, each one obsolete by the
+    /// time it ran. Only the newest pending snapshot is actually encoded; the
+    /// superseded ones report success without doing the work, so callers (and
+    /// the reload-as-barrier contract) still see the latest state on disk.
     public func saveAsync(
         _ snapshot: ClipboardHistorySnapshot,
         completion: @escaping @Sendable (String?) -> Void
     ) {
+        let generation = pendingGenerationLock.withLock { () -> Int in
+            latestQueuedGeneration += 1
+            return latestQueuedGeneration
+        }
         snapshotIO.async { [self] in
+            let isSuperseded = pendingGenerationLock.withLock {
+                generation < latestQueuedGeneration
+            }
+            guard !isSuperseded else {
+                completion(nil)
+                return
+            }
             do {
                 try saveImmediately(snapshot)
                 completion(nil)
@@ -205,10 +230,14 @@ public extension Data {
 }
 
 private extension JSONEncoder {
+    /// Compact output on purpose. This document is rewritten whenever the
+    /// history changes and can hold thousands of entries; pretty-printing and
+    /// key sorting inflated it by roughly a third and added a per-object sort,
+    /// for indentation nothing reads. The format is otherwise unchanged, so
+    /// existing snapshots keep decoding.
     static let clipboardEncoder: JSONEncoder = {
         let encoder = JSONEncoder()
         encoder.dateEncodingStrategy = .iso8601
-        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
         return encoder
     }()
 }

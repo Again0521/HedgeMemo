@@ -487,7 +487,12 @@ public enum ClipboardCategoryKey: Hashable, Sendable {
 
 public enum ClipboardLinkDetector {
     public static func isLink(_ raw: String) -> Bool {
-        let text = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        isLink(trimmed: raw.trimmingCharacters(in: .whitespacesAndNewlines))
+    }
+
+    /// For callers that have already trimmed. Trimming copies the whole string,
+    /// and the code detector consults this on text it has just trimmed itself.
+    static func isLink(trimmed text: String) -> Bool {
         guard !text.isEmpty, !text.contains(where: \.isNewline), !text.contains(" ") else { return false }
         let lowered = text.lowercased()
         let prefixes = ["http://", "https://", "ftp://", "magnet:", "mailto:", "file://", "www."]
@@ -533,31 +538,40 @@ public enum ClipboardCodeDetector {
         guard text.count >= 6 else { return false }
         guard !isLikelyLink(text) else { return false }
         guard cjkRatio(text) <= 0.3 else { return false }
+        // The passes below each used to re-split the text into lines, re-lower
+        // it and re-measure its symbol density. Deriving those once is what
+        // makes classifying a large history affordable; the heuristics
+        // themselves are unchanged.
+        let lines = text.components(separatedBy: .newlines)
         // A technical work log, README or issue description can contain many
         // identifiers, parentheses and even short statements without itself
         // being source code. Judge long multi-line input by line composition
         // before allowing one embedded snippet to dominate the whole paste.
-        if looksLikeLongFormDocument(text) { return false }
-        let prose = looksLikeProse(text)
-        let structureStrength = hardStructureStrength(text)
+        if looksLikeLongFormDocument(text, lines: lines) { return false }
+        let lowered = text.lowercased()
+        let symbols = symbolRatio(text)
+        let prose = looksLikeProse(lowered: lowered)
+        let structureStrength = hardStructureStrength(text, lines: lines, symbolRatio: symbols)
         if prose, structureStrength < 2 { return false }
         // Unambiguous structure (braces, terminators, comments, operators, high
         // symbol density) is code regardless of any incidental English words.
-        if structureStrength > 0 { return score(text) >= 3 }
+        if structureStrength > 0 {
+            return score(text, lowered: lowered, lines: lines, symbolRatio: symbols) >= 3
+        }
         // Without that structure, a keyword or a stray parenthesis is not enough
         // on its own: long English prose borrows words like "return", "public"
         // and "where". If the text reads as sentences, treat it as prose.
         if prose { return false }
-        return score(text) >= 3
+        return score(text, lowered: lowered, lines: lines, symbolRatio: symbols) >= 3
     }
 
     /// Long natural-language documents often discuss code and quote a few code
     /// fragments. Similar clipboard managers bias ambiguous mixed content toward
     /// text because that avoids applying syntax color to an entire email/README;
     /// only a code-dominant line mix crosses back into the code bucket.
-    private static func looksLikeLongFormDocument(_ text: String) -> Bool {
+    private static func looksLikeLongFormDocument(_ text: String, lines rawLines: [String]) -> Bool {
         guard text.count >= 240 else { return false }
-        let lines = text.components(separatedBy: .newlines)
+        let lines = rawLines
             .map { $0.trimmingCharacters(in: .whitespaces) }
             .filter { !$0.isEmpty }
         guard lines.count >= 6 else { return false }
@@ -630,8 +644,8 @@ public enum ClipboardCodeDetector {
     /// English is dense with common function words ("the", "is", "to", …) that
     /// code almost never uses; several distinct ones, or a high proportion of
     /// them across a longer run, is a decisive prose signal.
-    private static func looksLikeProse(_ text: String) -> Bool {
-        let words = text.lowercased().split { !$0.isLetter }.map(String.init)
+    private static func looksLikeProse(lowered: String) -> Bool {
+        let words = lowered.split { !$0.isLetter }.map(String.init)
         guard words.count >= 4 else { return false }
         var distinct = Set<String>()
         var hits = 0
@@ -647,8 +661,11 @@ public enum ClipboardCodeDetector {
     /// terminators/braces, code operators, comments, a brace pair, or a high
     /// symbol density. Deliberately omits weaker signals that do appear in prose
     /// — a `word(` call (English writes "item(s)", "file(s)") and `[...]` pairs.
-    private static func hardStructureStrength(_ text: String) -> Int {
-        let lines = text.components(separatedBy: .newlines)
+    private static func hardStructureStrength(
+        _ text: String,
+        lines: [String],
+        symbolRatio symbols: Double
+    ) -> Int {
         var strength = 0
         if lines.contains(where: { line in
             let trimmed = line.trimmingCharacters(in: .whitespaces)
@@ -658,13 +675,16 @@ public enum ClipboardCodeDetector {
         if text.contains("//") || text.contains("/*") || text.contains("*/") || text.contains("#!") { strength += 1 }
         if text.contains("{") && text.contains("}") { strength += 1 }
         if lines.contains(where: isStrongCodeLine) { strength += 1 }
-        if symbolRatio(text) > 0.15 { strength += 1 }
+        if symbols > 0.15 { strength += 1 }
         return strength
     }
 
-    private static func score(_ text: String) -> Int {
-        let lowered = text.lowercased()
-        let lines = text.components(separatedBy: .newlines)
+    private static func score(
+        _ text: String,
+        lowered: String,
+        lines: [String],
+        symbolRatio symbols: Double
+    ) -> Int {
         var score = 0
 
         if keywords.contains(where: { lowered.contains($0) }) { score += 2 }
@@ -680,27 +700,93 @@ public enum ClipboardCodeDetector {
             let trimmed = line.trimmingCharacters(in: .whitespaces)
             return trimmed.hasPrefix("//") || trimmed.hasPrefix("/*") || trimmed.hasPrefix("* ") || trimmed.hasPrefix("#!")
         }) { score += 1 }
-        if symbolRatio(text) > 0.08 { score += 1 }
+        if symbols > 0.08 { score += 1 }
         return score
     }
 
     private static func isLikelyLink(_ text: String) -> Bool {
-        ClipboardLinkDetector.isLink(text)
+        ClipboardLinkDetector.isLink(trimmed: text)
     }
 
+    // Hoisted out of the ratio helpers below. Both previously built a
+    // `CharacterSet` (one of them from a string literal) on every call, i.e.
+    // once per entry per classification.
+    private static let alphanumerics = CharacterSet.alphanumerics
+    private static let whitespacesAndNewlines = CharacterSet.whitespacesAndNewlines
+    private static let symbolCharacters = CharacterSet(charactersIn: "{}()[];<>=+*/%&|!$#@\\_")
+
+    /// Counted in one pass. The previous form materialized an array of every
+    /// matching scalar, then a second array of the CJK subset.
     private static func cjkRatio(_ text: String) -> Double {
-        let letters = text.unicodeScalars.filter { CharacterSet.alphanumerics.contains($0) }
-        guard !letters.isEmpty else { return 0 }
-        let cjk = letters.filter { (0x4E00...0x9FFF).contains(Int($0.value)) }
-        return Double(cjk.count) / Double(letters.count)
+        var letters = 0
+        var cjk = 0
+        for scalar in text.unicodeScalars where alphanumerics.contains(scalar) {
+            letters += 1
+            if (0x4E00...0x9FFF).contains(Int(scalar.value)) { cjk += 1 }
+        }
+        guard letters > 0 else { return 0 }
+        return Double(cjk) / Double(letters)
     }
 
     private static func symbolRatio(_ text: String) -> Double {
-        let symbols = CharacterSet(charactersIn: "{}()[];<>=+*/%&|!$#@\\_")
-        let meaningful = text.unicodeScalars.filter { !CharacterSet.whitespacesAndNewlines.contains($0) }
-        guard !meaningful.isEmpty else { return 0 }
-        let hits = meaningful.filter { symbols.contains($0) }
-        return Double(hits.count) / Double(meaningful.count)
+        var meaningful = 0
+        var hits = 0
+        for scalar in text.unicodeScalars where !whitespacesAndNewlines.contains(scalar) {
+            meaningful += 1
+            if symbolCharacters.contains(scalar) { hits += 1 }
+        }
+        guard meaningful > 0 else { return 0 }
+        return Double(hits) / Double(meaningful)
+    }
+}
+
+/// Memoizes the link/code classification of a text entry.
+///
+/// Detection scans the whole text several times, and the category is consulted
+/// constantly: every list filter asks every entry for it, so a 10,000-item
+/// history re-derives it thousands of times per panel open. The key is the
+/// content hash — it always tracks the text, since edits recompute it — plus
+/// the byte length, which guards against a reused hand-written hash across
+/// differently sized texts.
+///
+/// A plain dictionary behind a lock replaces the previous `NSCache`: the cache
+/// key had to be interpolated into a fresh `NSString` on every single lookup,
+/// which allocated once per entry per filter pass and dominated the classifier
+/// itself once the results were warm. The capacity comfortably exceeds the
+/// largest history the app will keep (10,000 entries), and the whole table is
+/// dropped rather than evicted one by one when it is exceeded — a full reload
+/// costs one classification pass, while per-item eviction would keep a large
+/// history permanently thrashing.
+final class TextCategoryCache: @unchecked Sendable {
+    static let shared = TextCategoryCache()
+
+    private struct Value { let byteCount: Int; let category: ClipboardContentCategory }
+
+    private let lock = NSLock()
+    private var storage: [String: Value] = [:]
+    private static let capacity = 24_000
+
+    func category(contentHash: String, text: String) -> ClipboardContentCategory {
+        let byteCount = text.utf8.count
+        lock.lock()
+        let cached = storage[contentHash]
+        lock.unlock()
+        if let cached, cached.byteCount == byteCount { return cached.category }
+
+        let category: ClipboardContentCategory
+        if ClipboardLinkDetector.isLink(text) {
+            category = .link
+        } else if ClipboardCodeDetector.isCode(text) {
+            category = .code
+        } else {
+            category = .text
+        }
+
+        lock.lock()
+        if storage.count >= Self.capacity { storage.removeAll(keepingCapacity: true) }
+        storage[contentHash] = Value(byteCount: byteCount, category: category)
+        lock.unlock()
+        return category
     }
 }
 
@@ -1170,18 +1256,6 @@ public struct ClipboardEntry: Codable, Hashable, Identifiable, Sendable {
         return projection
     }
 
-    /// Code/link detection scans the whole text with several passes, and the
-    /// category is consulted constantly (every list filter asks it for every
-    /// entry). Memoized by content hash — the hash always tracks the text
-    /// (edits recompute it) — with the text length mixed in to guard against an
-    /// accidentally reused hand-written hash across differently sized texts.
-    /// NSCache is thread-safe, so this does not affect Sendable-ability.
-    nonisolated(unsafe) private static let textCategoryCache: NSCache<NSString, NSString> = {
-        let cache = NSCache<NSString, NSString>()
-        cache.countLimit = 4096
-        return cache
-    }()
-
     public var contentCategory: ClipboardContentCategory {
         if origin == .concealedPassword { return .password }
         if case .builtin(let category) = manualCategoryKey { return category }
@@ -1190,22 +1264,7 @@ public struct ClipboardEntry: Codable, Hashable, Identifiable, Sendable {
         case .image:
             return .image
         case .text:
-            let content = text ?? ""
-            let key = "\(contentHash)|\(content.utf8.count)" as NSString
-            if let cached = Self.textCategoryCache.object(forKey: key),
-               let category = ClipboardContentCategory(rawValue: cached as String) {
-                return category
-            }
-            let category: ClipboardContentCategory
-            if ClipboardLinkDetector.isLink(content) {
-                category = .link
-            } else if ClipboardCodeDetector.isCode(content) {
-                category = .code
-            } else {
-                category = .text
-            }
-            Self.textCategoryCache.setObject(category.rawValue as NSString, forKey: key)
-            return category
+            return TextCategoryCache.shared.category(contentHash: contentHash, text: text ?? "")
         }
     }
 
@@ -1214,7 +1273,36 @@ public struct ClipboardEntry: Codable, Hashable, Identifiable, Sendable {
     }
 
     public func matches(matcher: PercentFuzzyMatcher) -> Bool {
-        matcher.matches(previewText)
+        matchesQuery(matcher)
+    }
+
+    /// Query matching without materializing `previewText`.
+    ///
+    /// `previewText` trims the stored text, which allocates a full copy of
+    /// every candidate — over a large history that is a second copy of the
+    /// entire text corpus, produced again whenever the list changes. The
+    /// matcher's own pattern is already trimmed, so leading/trailing
+    /// whitespace in the candidate cannot change a match; searching the stored
+    /// text directly is equivalent everywhere except for the placeholder text
+    /// shown in place of blank or unlabelled content, which is checked
+    /// explicitly below.
+    public func matchesQuery(_ matcher: PercentFuzzyMatcher) -> Bool {
+        if matcher.matchesEveryCandidate { return true }
+        if isSecret { return matcher.matches(L10n.text("已隐藏的密码")) }
+        switch kind {
+        case .text:
+            guard let text, let first = text.first else {
+                return matcher.matches(L10n.text("空白文字"))
+            }
+            if matcher.matches(text) { return true }
+            // Only a candidate that starts with whitespace can be blank all
+            // the way through, so the full scan stays off the common path.
+            guard first.isWhitespace, text.allSatisfy(\.isWhitespace) else { return false }
+            return matcher.matches(L10n.text("空白文字"))
+        case .image:
+            if let text, !text.isEmpty { return matcher.matches(text) }
+            return matcher.matches(L10n.text("图片"))
+        }
     }
 
     public func matches(key: ClipboardCategoryKey?, customCategories: [CustomClipboardCategory] = []) -> Bool {
@@ -1313,31 +1401,64 @@ public enum ClipboardHistoryPolicy {
         query: String,
         key: ClipboardCategoryKey?,
         customCategories: [CustomClipboardCategory],
-        advancedOptions: ClipboardAdvancedOptions?,
-        searchTextByID: [UUID: String]? = nil
+        advancedOptions: ClipboardAdvancedOptions?
     ) -> [ClipboardEntry] {
-        let matcher = PercentFuzzyMatcher(query: query)
-        var desktopPinned: [ClipboardEntry] = []
-        var ordinary: [ClipboardEntry] = []
-        desktopPinned.reserveCapacity(partitions.desktopPinned.count)
-        ordinary.reserveCapacity(partitions.ordinary.count)
+        assembled(
+            queryFiltered(
+                categoryFiltered(
+                    partitions,
+                    key: key,
+                    customCategories: customCategories,
+                    advancedOptions: advancedOptions
+                ),
+                matcher: PercentFuzzyMatcher(query: query)
+            )
+        )
+    }
 
+    /// The category/source half of filtering, which does not depend on the
+    /// search query. It is the expensive half — a built-in category asks every
+    /// entry to classify itself, and a custom one runs its rules (including
+    /// regular expressions) over every entry. Stores keep this result for the
+    /// open category so that typing in the search field re-runs only the
+    /// matcher, instead of re-classifying the whole history per keystroke.
+    package static func categoryFiltered(
+        _ partitions: SortedPartitions,
+        key: ClipboardCategoryKey?,
+        customCategories: [CustomClipboardCategory],
+        advancedOptions: ClipboardAdvancedOptions?
+    ) -> SortedPartitions {
         func matches(_ entry: ClipboardEntry) -> Bool {
-            // Cheap structural predicates go first so category/source filters
-            // can reject an entry before query matching prepares preview text.
-            guard entry.matches(key: key, customCategories: customCategories),
-                  advancedOptions?.matchesSource(entry) ?? true else { return false }
-            if matcher.matchesEveryCandidate { return true }
-            return matcher.matches(searchTextByID?[entry.id] ?? entry.previewText)
+            entry.matches(key: key, customCategories: customCategories)
+                && (advancedOptions?.matchesSource(entry) ?? true)
         }
+        // Nothing to reject: hand back the same storage instead of copying
+        // every element into a new array.
+        if key == nil, advancedOptions?.sourceIdentifier == nil { return partitions }
+        return SortedPartitions(
+            ordinary: partitions.ordinary.filter(matches),
+            desktopPinned: partitions.desktopPinned.filter(matches)
+        )
+    }
 
-        for entry in partitions.ordinary where matches(entry) {
-            ordinary.append(entry)
-        }
-        for entry in partitions.desktopPinned where matches(entry) {
-            desktopPinned.append(entry)
-        }
+    package static func queryFiltered(
+        _ partitions: SortedPartitions,
+        matcher: PercentFuzzyMatcher
+    ) -> SortedPartitions {
+        guard !matcher.matchesEveryCandidate else { return partitions }
+        return SortedPartitions(
+            ordinary: partitions.ordinary.filter { $0.matchesQuery(matcher) },
+            desktopPinned: partitions.desktopPinned.filter { $0.matchesQuery(matcher) }
+        )
+    }
 
+    /// Splices the desktop-note section into its fixed position. The insertion
+    /// index is recomputed from the filtered ordinary list, so a search result
+    /// places the section exactly where an unfiltered list would.
+    package static func assembled(_ partitions: SortedPartitions) -> [ClipboardEntry] {
+        let ordinary = partitions.ordinary
+        let desktopPinned = partitions.desktopPinned
+        guard !desktopPinned.isEmpty else { return ordinary }
         let insertion = min(desktopPinnedInsertionIndex, ordinary.count)
         var result: [ClipboardEntry] = []
         result.reserveCapacity(ordinary.count + desktopPinned.count)
@@ -1382,12 +1503,41 @@ public enum ClipboardHistoryPolicy {
         // Both pin modes are user promises, so automatic history trimming must
         // never silently delete either kind. If protected entries alone exceed
         // the configured limit, retain them and trim every ordinary entry.
+        func isRemovable(_ entry: ClipboardEntry) -> Bool {
+            !entry.isPinned && entry.isDesktopPinned != true
+        }
+        var removableCount = 0
+        for entry in entries where isRemovable(entry) { removableCount += 1 }
+        let overflow = min(entries.count - maxEntries, removableCount)
+        guard overflow > 0 else { return [] }
+
+        // A history sitting at its limit trims one entry per capture. Selecting
+        // the few oldest with a bounded scan keeps that path linear, where
+        // sorting every removable entry made each copy cost O(n log n) over the
+        // whole history.
+        guard overflow > Self.boundedTrimSelectionLimit else {
+            var oldest: [(date: Date, id: UUID)] = []
+            oldest.reserveCapacity(overflow)
+            for entry in entries where isRemovable(entry) {
+                if oldest.count == overflow {
+                    guard let newest = oldest.last, newest.date > entry.createdAt else { continue }
+                    oldest.removeLast()
+                }
+                let position = oldest.firstIndex { $0.date > entry.createdAt } ?? oldest.endIndex
+                oldest.insert((entry.createdAt, entry.id), at: position)
+            }
+            return oldest.map(\.id)
+        }
+
         let removable = entries
-            .filter { !$0.isPinned && $0.isDesktopPinned != true }
+            .filter(isRemovable)
             .sorted { $0.createdAt < $1.createdAt }
-        let overflow = min(entries.count - maxEntries, removable.count)
         return removable.prefix(overflow).map(\.id)
     }
+
+    /// Above this many entries at once (a limit change, an import), a single
+    /// sort beats repeated bounded insertion.
+    private static let boundedTrimSelectionLimit = 32
 }
 
 public enum ScreenshotMode: String, Codable, CaseIterable, Sendable {

@@ -191,4 +191,50 @@ final class ClipboardHistoryPolicyTests: XCTestCase {
         XCTAssertTrue(entry.matches(query: "%invoice"))
         XCTAssertFalse(entry.matches(query: "approved%invoice"), "fragments must still appear in order")
     }
+
+    /// Search reads the stored text directly rather than building a trimmed
+    /// copy of every candidate. Surrounding whitespace must stay irrelevant,
+    /// and the placeholders shown for blank, unlabelled and masked entries must
+    /// still be searchable.
+    func testQueryFilterMatchesStoredTextAndDisplayPlaceholders() {
+        XCTAssertTrue(Fixture.text("\n\t  发票报销  \n", hash: "pad").matches(query: "发票"))
+        XCTAssertTrue(Fixture.text("   \n  ", hash: "blank").matches(query: "空白文字"))
+        XCTAssertFalse(Fixture.text("   \n  ", hash: "blank2").matches(query: "发票"))
+        XCTAssertTrue(Fixture.image(hash: "unlabelled").matches(query: "图片"))
+
+        var labelled = Fixture.image(hash: "labelled")
+        labelled.text = "会议截图"
+        XCTAssertTrue(labelled.matches(query: "会议"))
+        XCTAssertFalse(labelled.matches(query: "图片"), "a labelled image searches its own note")
+
+        let secret = Fixture.text("ciphertext-abcdef", hash: "secret", origin: .concealedPassword)
+        XCTAssertTrue(secret.matches(query: "已隐藏"))
+        XCTAssertFalse(secret.matches(query: "ciphertext"), "search must never reach stored ciphertext")
+    }
+
+    /// Desktop notes occupy a fixed slot in the list. A search shortens the
+    /// ordinary results, so the section has to be placed against the filtered
+    /// list rather than the unfiltered one.
+    func testDesktopNoteSectionKeepsItsSlotInSearchResults() {
+        var desktop = Fixture.text("会议纪要 desktop", hash: "desk", at: 100)
+        desktop.isDesktopPinned = true
+        desktop.desktopPinnedOrder = 0
+        let matching = (0..<3).map { Fixture.text("会议纪要 \($0)", hash: "m\($0)", at: Double($0)) }
+        let other = (0..<20).map { Fixture.text("无关内容 \($0)", hash: "o\($0)", at: Double(50 + $0)) }
+
+        let unfiltered = ClipboardHistoryPolicy.ordered(matching + other + [desktop])
+        XCTAssertEqual(
+            unfiltered[ClipboardHistoryPolicy.desktopPinnedInsertionIndex].id,
+            desktop.id,
+            "with a full list the note sits at its fixed index"
+        )
+
+        let filtered = ClipboardHistoryPolicy.ordered(matching + other + [desktop], query: "会议纪要")
+        XCTAssertEqual(filtered.count, 4)
+        XCTAssertEqual(
+            filtered.last?.id,
+            desktop.id,
+            "fewer than nine other results places the section right after them"
+        )
+    }
 }

@@ -8,13 +8,30 @@ final class ClipboardPanelLayoutTests: XCTestCase {
         XCTAssertEqual(ClipboardPanelPagination.pageSize(for: .builtin(.code)), 60)
         XCTAssertEqual(ClipboardPanelPagination.pageSize(for: .builtin(.image)), 48)
         XCTAssertEqual(ClipboardPanelPagination.pageSize(for: .builtin(.screenshot)), 48)
-        XCTAssertNil(ClipboardPanelPagination.pageSize(for: .builtin(.text)))
         XCTAssertEqual(ClipboardPanelPagination.nextLimit(current: 48, total: 130, key: .builtin(.image)), 96)
         XCTAssertEqual(ClipboardPanelPagination.nextLimit(current: 96, total: 100, key: .builtin(.image)), 100)
-        // Paged categories prefetch a quarter-page before the tail; unpaged ones never do.
         XCTAssertEqual(ClipboardPanelPagination.prefetchDistance(for: .builtin(.image)), 12)
         XCTAssertEqual(ClipboardPanelPagination.prefetchDistance(for: .builtin(.code)), 15)
-        XCTAssertEqual(ClipboardPanelPagination.prefetchDistance(for: .builtin(.text)), 0)
+    }
+
+    /// Plain rows are individually cheap, but a history of several thousand is
+    /// not free to hand to SwiftUI at once. They page in batches far taller
+    /// than the panel, so the first page still fixes the same window height.
+    func testPlainClipboardCategoriesPageInScreenfuls() {
+        XCTAssertEqual(ClipboardPanelPagination.pageSize(for: .builtin(.text)), 300)
+        XCTAssertEqual(ClipboardPanelPagination.pageSize(for: .builtin(.link)), 300)
+        XCTAssertEqual(ClipboardPanelPagination.pageSize(for: .custom(UUID())), 300)
+        XCTAssertEqual(ClipboardPanelPagination.prefetchDistance(for: .builtin(.text)), 75)
+        XCTAssertEqual(ClipboardPanelPagination.nextLimit(current: 300, total: 10_000, key: .builtin(.text)), 600)
+        XCTAssertGreaterThan(
+            ClipboardPanelLayout.contentHeight(
+                for: Array(repeating: Fixture.text("行"), count: ClipboardPanelPagination.textPageSize),
+                key: .builtin(.text)
+            ),
+            // Taller than any plausible screen, so the panel clamps to its
+            // maximum height exactly as it did before paging was introduced.
+            2_000
+        )
     }
 
     // MARK: - Row metrics

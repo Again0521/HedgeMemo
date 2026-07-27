@@ -599,6 +599,56 @@ final class StoreBehaviorTests: XCTestCase {
         XCTAssertTrue(store.entries.isEmpty)
     }
 
+    /// Category filtering is cached independently of the search query so that
+    /// typing does not re-classify the history. Every mutation that can change
+    /// what a category contains must therefore drop that cache.
+    func testCategoryResultsRefreshAfterEveryMutation() {
+        let store = makeClipboardStore()
+        XCTAssertTrue(store.addText("普通中文内容"))
+        XCTAssertTrue(store.addText("另一段普通内容"))
+        // Prime the caches for both an unfiltered and a searched view.
+        XCTAssertEqual(store.orderedEntries(key: .builtin(.text)).count, 2)
+        XCTAssertEqual(store.orderedEntries(query: "另一段", key: .builtin(.text)).count, 1)
+        XCTAssertTrue(store.orderedEntries(key: .builtin(.code)).isEmpty)
+
+        XCTAssertTrue(store.addText("let answer = 42;"))
+        XCTAssertEqual(
+            store.orderedEntries(key: .builtin(.code)).compactMap(\.text),
+            ["let answer = 42;"],
+            "a new entry must appear in an already-consulted category"
+        )
+        XCTAssertEqual(store.orderedEntries(key: .builtin(.text)).count, 2)
+
+        let id = store.orderedEntries(key: .builtin(.text)).first!.id
+        store.updateText(id: id, text: "另一段普通内容 已编辑")
+        XCTAssertEqual(store.orderedEntries(query: "已编辑", key: .builtin(.text)).count, 1)
+
+        store.delete(id: id)
+        XCTAssertEqual(store.orderedEntries(key: .builtin(.text)).count, 1)
+        XCTAssertTrue(store.orderedEntries(query: "已编辑", key: .builtin(.text)).isEmpty)
+
+        // Releasing presentation caches must not change what the store reports.
+        store.releaseTransientCaches()
+        XCTAssertEqual(store.orderedEntries(key: .builtin(.text)).count, 1)
+        XCTAssertEqual(store.orderedEntries(key: .builtin(.code)).count, 1)
+    }
+
+    /// The panel observes this counter instead of comparing history snapshots.
+    func testEntriesRevisionAdvancesOnEveryChange() {
+        let store = makeClipboardStore()
+        let start = store.entriesRevision
+        XCTAssertTrue(store.addText("甲"))
+        let afterAdd = store.entriesRevision
+        XCTAssertGreaterThan(afterAdd, start)
+
+        store.togglePinned(id: store.entries.first!.id)
+        XCTAssertGreaterThan(store.entriesRevision, afterAdd)
+
+        let afterPin = store.entriesRevision
+        XCTAssertFalse(store.addText("甲"), "a duplicate is promoted rather than added")
+        XCTAssertGreaterThan(store.entriesRevision, afterPin, "promotion still changes the list")
+    }
+
     func testClearHistoryCanTargetSelectedCategories() {
         let store = makeClipboardStore()
         XCTAssertTrue(store.addText("普通中文内容"))

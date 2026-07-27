@@ -7,39 +7,65 @@ import Foundation
 public final class ClipboardHistoryStore: ObservableObject {
     @Published public private(set) var entries: [ClipboardEntry] = [] {
         didSet {
-            orderedMemo.removeAll(keepingCapacity: true)
-            sortedPartitionMemo = nil
-            searchTextMemo.removeAll(keepingCapacity: true)
-            hasBuiltSearchTextMemo = false
-            sourceApplicationMemos.removeAll(keepingCapacity: true)
-            hasUnknownSourceMemos.removeAll(keepingCapacity: true)
+            entriesRevision &+= 1
+            invalidateDerivedState()
         }
     }
+    /// Monotonic counter bumped whenever `entries` changes.
+    ///
+    /// Views need to react to list changes, but comparing two snapshots of a
+    /// large history element by element — which is what observing `entries`
+    /// itself costs — runs on every clipboard capture. Observing this instead
+    /// is a single integer comparison.
+    @Published public private(set) var entriesRevision: Int = 0
     /// `orderedEntries` is asked several times per UI pass (rows, key handling,
     /// height math), and every miss filters and sorts the entire history.
     /// Results are memoized per (category, query) until entries or settings
     /// change. Not published: reads during view rendering must stay silent.
     private var orderedMemo: [String: [ClipboardEntry]] = [:]
+    /// Bounded because each value can hold the whole history: over a large
+    /// history an unbounded table of past queries is real memory, and a miss
+    /// is cheap now that category filtering is cached separately.
+    private static let orderedMemoCapacity = 8
     private var sortedPartitionMemo: (
         key: String,
         value: ClipboardHistoryPolicy.SortedPartitions
     )?
-    private var searchTextMemo: [UUID: String] = [:]
-    private var hasBuiltSearchTextMemo = false
+    /// Category/source filtering keyed independently of the search query, so
+    /// typing re-runs only the text matcher. Classifying (or regex-matching)
+    /// every entry is by far the most expensive part of building a category.
+    private var categoryPartitionMemo: [String: ClipboardHistoryPolicy.SortedPartitions] = [:]
+    /// The most recent query result, kept so the next keystroke can narrow it
+    /// instead of rescanning the category. One entry is enough: search text is
+    /// typed one character at a time.
+    private var incrementalQueryChain: (
+        categoryKey: String,
+        query: String,
+        partitions: ClipboardHistoryPolicy.SortedPartitions
+    )?
     private var sourceApplicationMemos: [String: [ClipboardSourceApplication]] = [:]
     private var hasUnknownSourceMemos: [String: Bool] = [:]
+    /// Validated paste-queue identifiers. `pasteQueueCount` is read from the
+    /// category bar on every render pass, and resolving it walks the whole
+    /// history; the memo keeps that off the render path.
+    private var validPasteQueueMemo: [UUID]?
+
+    private func invalidateDerivedState() {
+        orderedMemo.removeAll(keepingCapacity: true)
+        sortedPartitionMemo = nil
+        categoryPartitionMemo.removeAll(keepingCapacity: true)
+        incrementalQueryChain = nil
+        sourceApplicationMemos.removeAll(keepingCapacity: true)
+        hasUnknownSourceMemos.removeAll(keepingCapacity: true)
+        validPasteQueueMemo = nil
+    }
     // Mutating `settings` inside its own didSet re-enters the @Published setter;
     // without this guard normalize() recurses until the stack overflows.
     private var isNormalizingSettings = false
     @Published public var settings: ClipboardHistorySettings {
         didSet {
             // Category enable/order/custom-pattern changes all affect ordering.
-            orderedMemo.removeAll(keepingCapacity: true)
-            sortedPartitionMemo = nil
-            searchTextMemo.removeAll(keepingCapacity: true)
-            hasBuiltSearchTextMemo = false
-            sourceApplicationMemos.removeAll(keepingCapacity: true)
-            hasUnknownSourceMemos.removeAll(keepingCapacity: true)
+            invalidateDerivedState()
             guard !isNormalizingSettings else { return }
             isNormalizingSettings = true
             settings.normalize()
@@ -220,53 +246,107 @@ public final class ClipboardHistoryStore: ObservableObject {
             + "\u{1}" + (advancedOptions?.cacheKey ?? "standard")
         if let cached = orderedMemo[memoKey] { return cached }
         let result = HedgeMemoPerformance.measure("ClipboardOrdering") {
-            let sortKey: String
-            let sortOptions: ClipboardAdvancedOptions?
-            if let advancedOptions {
-                sortKey = advancedOptions.sortField.rawValue
-                    + "\u{2}" + advancedOptions.sortDirection.rawValue
-                sortOptions = ClipboardAdvancedOptions(
-                    sourceIdentifier: nil,
-                    sortField: advancedOptions.sortField,
-                    sortDirection: advancedOptions.sortDirection
+            ClipboardHistoryPolicy.assembled(
+                queryFilteredPartitions(
+                    query: canonicalQuery,
+                    key: key,
+                    advancedOptions: advancedOptions
                 )
-            } else {
-                sortKey = "standard"
-                sortOptions = nil
-            }
-            let partitions: ClipboardHistoryPolicy.SortedPartitions
-            if let memo = sortedPartitionMemo, memo.key == sortKey {
-                partitions = memo.value
-            } else {
-                partitions = ClipboardHistoryPolicy.sortedPartitions(
-                    entries,
-                    advancedOptions: sortOptions
-                )
-                sortedPartitionMemo = (sortKey, partitions)
-            }
-            let matcher = PercentFuzzyMatcher(query: canonicalQuery)
-            if !matcher.matchesEveryCandidate, !hasBuiltSearchTextMemo {
-                searchTextMemo.removeAll(keepingCapacity: true)
-                searchTextMemo.reserveCapacity(entries.count)
-                for entry in entries {
-                    searchTextMemo[entry.id] = entry.previewText
-                }
-                hasBuiltSearchTextMemo = true
-            }
-            return ClipboardHistoryPolicy.ordered(
-                partitions,
-                query: canonicalQuery,
-                key: key,
-                customCategories: settings.customCategories ?? [],
-                advancedOptions: advancedOptions,
-                searchTextByID: matcher.matchesEveryCandidate ? nil : searchTextMemo
             )
         }
         // Typing a search accumulates one memo entry per query string; keep the
         // table small rather than tracking usage.
-        if orderedMemo.count >= 24 { orderedMemo.removeAll(keepingCapacity: true) }
+        if orderedMemo.count >= Self.orderedMemoCapacity {
+            orderedMemo.removeAll(keepingCapacity: true)
+        }
         orderedMemo[memoKey] = result
         return result
+    }
+
+    /// Applies the search query, continuing from the previous keystroke's
+    /// result when it can.
+    ///
+    /// Searching a long history means scanning every stored text, which is the
+    /// bulk of a keystroke's cost. Typing only ever extends the query, and text
+    /// that fails a query cannot pass a longer query beginning with it, so the
+    /// next character can filter the previous (already much smaller) result
+    /// instead of the whole category. Editing the query any other way —
+    /// backspacing, pasting a different term — simply falls back to a full
+    /// pass, exactly as before.
+    private func queryFilteredPartitions(
+        query: String,
+        key: ClipboardCategoryKey?,
+        advancedOptions: ClipboardAdvancedOptions?
+    ) -> ClipboardHistoryPolicy.SortedPartitions {
+        let categoryKey = (key?.storageValue ?? "*")
+            + "\u{1}" + (advancedOptions?.cacheKey ?? "standard")
+        let base: ClipboardHistoryPolicy.SortedPartitions
+        if let chain = incrementalQueryChain,
+           chain.categoryKey == categoryKey,
+           query.hasPrefix(chain.query),
+           // Wildcard and plain queries match through different comparisons,
+           // so only chain within one kind.
+           chain.query.isEmpty || chain.query.contains("%") == query.contains("%") {
+            if chain.query == query { return chain.partitions }
+            base = chain.partitions
+        } else {
+            base = categoryFilteredPartitions(key: key, advancedOptions: advancedOptions)
+        }
+        let filtered = ClipboardHistoryPolicy.queryFiltered(
+            base,
+            matcher: PercentFuzzyMatcher(query: query)
+        )
+        incrementalQueryChain = (categoryKey, query, filtered)
+        return filtered
+    }
+
+    /// Sorted, category-filtered entries for one category and source filter.
+    /// Both stages are independent of the search query, so the panel pays for
+    /// them once per category rather than once per keystroke.
+    private func categoryFilteredPartitions(
+        key: ClipboardCategoryKey?,
+        advancedOptions: ClipboardAdvancedOptions?
+    ) -> ClipboardHistoryPolicy.SortedPartitions {
+        let sortKey: String
+        let sortOptions: ClipboardAdvancedOptions?
+        if let advancedOptions {
+            sortKey = advancedOptions.sortField.rawValue
+                + "\u{2}" + advancedOptions.sortDirection.rawValue
+            sortOptions = ClipboardAdvancedOptions(
+                sourceIdentifier: nil,
+                sortField: advancedOptions.sortField,
+                sortDirection: advancedOptions.sortDirection
+            )
+        } else {
+            sortKey = "standard"
+            sortOptions = nil
+        }
+        let categoryKey = sortKey
+            + "\u{1}" + (key?.storageValue ?? "*")
+            + "\u{1}" + (advancedOptions?.sourceIdentifier ?? "*")
+        if let cached = categoryPartitionMemo[categoryKey] { return cached }
+
+        let partitions: ClipboardHistoryPolicy.SortedPartitions
+        if let memo = sortedPartitionMemo, memo.key == sortKey {
+            partitions = memo.value
+        } else {
+            partitions = ClipboardHistoryPolicy.sortedPartitions(
+                entries,
+                advancedOptions: sortOptions
+            )
+            sortedPartitionMemo = (sortKey, partitions)
+        }
+        let filtered = ClipboardHistoryPolicy.categoryFiltered(
+            partitions,
+            key: key,
+            customCategories: settings.customCategories ?? [],
+            advancedOptions: advancedOptions
+        )
+        if categoryPartitionMemo.count >= Self.orderedMemoCapacity {
+            categoryPartitionMemo.removeAll(keepingCapacity: true)
+        }
+        categoryPartitionMemo[categoryKey] = filtered
+        return filtered
     }
 
     /// Source menus are read during every panel render, including hover-driven
@@ -570,7 +650,7 @@ public final class ClipboardHistoryStore: ObservableObject {
     public func delete(id: UUID) {
         guard let index = entries.firstIndex(where: { $0.id == id }) else { return }
         let removed = entries.remove(at: index)
-        settings.pasteQueueEntryIDs = settings.resolvedPasteQueueEntryIDs.filter { $0 != id }
+        setPasteQueueIDs(settings.resolvedPasteQueueEntryIDs.filter { $0 != id })
         removeBackingAssets(removed)
         normalizePinOrders()
         persist()
@@ -579,7 +659,7 @@ public final class ClipboardHistoryStore: ObservableObject {
     public func clearHistory() {
         let removed = entries
         entries.removeAll()
-        settings.pasteQueueEntryIDs = []
+        setPasteQueueIDs([])
         for entry in removed { removeBackingAssets(entry) }
         persist()
     }
@@ -606,9 +686,9 @@ public final class ClipboardHistoryStore: ObservableObject {
         guard !removed.isEmpty else { return }
         let removedIDs = Set(removed.map(\.id))
         entries.removeAll { removedIDs.contains($0.id) }
-        settings.pasteQueueEntryIDs = settings.resolvedPasteQueueEntryIDs.filter {
+        setPasteQueueIDs(settings.resolvedPasteQueueEntryIDs.filter {
             !removedIDs.contains($0)
-        }
+        })
         for entry in removed { removeBackingAssets(entry) }
         normalizePinOrders()
         persist()
@@ -850,11 +930,11 @@ public final class ClipboardHistoryStore: ObservableObject {
     }
 
     public func removeFromPasteQueue(id: UUID) {
-        settings.pasteQueueEntryIDs = validPasteQueueIDs.filter { $0 != id }
+        setPasteQueueIDs(validPasteQueueIDs.filter { $0 != id })
     }
 
     public func clearPasteQueue() {
-        settings.pasteQueueEntryIDs = []
+        setPasteQueueIDs([])
     }
 
     /// Copies and removes exactly the first queued item. A failed write or a
@@ -879,14 +959,35 @@ public final class ClipboardHistoryStore: ObservableObject {
             lastError = error.localizedDescription
             throw error
         }
-        settings.pasteQueueEntryIDs = Array(ids.dropFirst())
+        setPasteQueueIDs(Array(ids.dropFirst()))
         finishPasteboardWrite(entry: entry, pasteboard: pasteboard, autoPaste: autoPaste)
         return entry
     }
 
     private var validPasteQueueIDs: [UUID] {
+        if let memo = validPasteQueueMemo { return memo }
+        let queued = settings.resolvedPasteQueueEntryIDs
+        // The common case is an empty queue, which must not walk the history.
+        guard !queued.isEmpty else {
+            validPasteQueueMemo = []
+            return []
+        }
         let existing = Set(entries.map(\.id))
-        return settings.resolvedPasteQueueEntryIDs.filter { existing.contains($0) }
+        let resolved = queued.filter { existing.contains($0) }
+        validPasteQueueMemo = resolved
+        return resolved
+    }
+
+    /// Writes the queue back only when it actually changes.
+    ///
+    /// `settings` is `@Published`, and its `didSet` re-normalizes, re-validates
+    /// and persists the whole snapshot. Several maintenance paths (trimming,
+    /// deleting, clearing a category) used to assign an identical queue and
+    /// trigger that entire cascade — including a second full snapshot write —
+    /// on every clipboard capture once the history reached its limit.
+    private func setPasteQueueIDs(_ ids: [UUID]) {
+        guard ids != settings.resolvedPasteQueueEntryIDs else { return }
+        settings.pasteQueueEntryIDs = ids
     }
 
     private func failQueue<T>(_ error: ClipboardPasteQueueError) throws -> T {
@@ -981,9 +1082,15 @@ public final class ClipboardHistoryStore: ObservableObject {
         isSecret: Bool = false,
         now: Date = .now
     ) -> Bool {
-        let matches = entries.filter { $0.contentHash == contentHash && $0.isSecret == isSecret }
-        guard !matches.isEmpty else { return false }
-        var merged = mergedEntry(from: matches)
+        // One indexed scan instead of filtering the history twice (once here,
+        // once inside the replacement): this runs for every clipboard capture.
+        var matchedIndices: [Int] = []
+        for (index, entry) in entries.enumerated()
+        where entry.contentHash == contentHash && entry.isSecret == isSecret {
+            matchedIndices.append(index)
+        }
+        guard !matchedIndices.isEmpty else { return false }
+        var merged = mergedEntry(from: matchedIndices.map { entries[$0] })
         merged.createdAt = now
         merged.updatedAt = now
         if let source {
@@ -994,9 +1101,10 @@ public final class ClipboardHistoryStore: ObservableObject {
         if replacesOriginalFormats {
             merged.originalFormats = replacementOriginalFormats ?? []
         }
-        replaceEntries(matching: contentHash, isSecret: isSecret, with: merged)
+        collapseGroups([(indices: matchedIndices, merged: merged)])
+        // `normalizePinOrders` finishes with the desktop pass, so a second
+        // explicit call only repeated a full scan of the history.
         normalizePinOrders()
-        _ = normalizeDesktopPinnedOrders()
         return true
     }
 
@@ -1008,15 +1116,70 @@ public final class ClipboardHistoryStore: ObservableObject {
         // identical plain copy share a hash (the hash is over the plaintext),
         // and collapsing them together would drop the secret in favour of the
         // readable one.
-        let duplicates = Dictionary(grouping: entries) { DedupKey(hash: $0.contentHash, isSecret: $0.isSecret) }
-            .filter { $0.value.count > 1 }
-        guard !duplicates.isEmpty else { return false }
-        for (key, matches) in duplicates {
-            replaceEntries(matching: key.hash, isSecret: key.isSecret, with: mergedEntry(from: matches))
+        var indicesByKey: [DedupKey: [Int]] = [:]
+        for (index, entry) in entries.enumerated() {
+            indicesByKey[DedupKey(hash: entry.contentHash, isSecret: entry.isSecret), default: []]
+                .append(index)
         }
+        // Rewriting the array once per duplicate group made loading a history
+        // that had accumulated duplicates quadratic. Merge every group first,
+        // then rebuild the list in a single pass.
+        let groups = indicesByKey.values
+            .filter { $0.count > 1 }
+            .sorted { ($0.last ?? 0) < ($1.last ?? 0) }
+            .map { (indices: $0, merged: mergedEntry(from: $0.map { entries[$0] })) }
+        guard !groups.isEmpty else { return false }
+        collapseGroups(groups)
         normalizePinOrders()
-        _ = normalizeDesktopPinnedOrders()
         return true
+    }
+
+    /// Replaces each group of duplicate entries with its merged result.
+    ///
+    /// Merged entries move to the end of the list, which is where the previous
+    /// remove-then-append implementation placed them; with several groups they
+    /// now follow the order of the entries they replace instead of an arbitrary
+    /// dictionary order.
+    private func collapseGroups(_ groups: [(indices: [Int], merged: ClipboardEntry)]) {
+        guard !groups.isEmpty else { return }
+        var replacedIndices = Set<Int>()
+        var replacementIDByReplacedID: [UUID: UUID] = [:]
+        for group in groups {
+            replacedIndices.formUnion(group.indices)
+            let preservedFormats = Set((group.merged.originalFormats ?? []).map(\.fileName))
+            for index in group.indices {
+                let entry = entries[index]
+                replacementIDByReplacedID[entry.id] = group.merged.id
+                if entry.id != group.merged.id, entry.kind == .image,
+                   let fileName = entry.imageFileName, fileName != group.merged.imageFileName {
+                    do { try repository.removeImage(named: fileName) }
+                    catch { lastError = error.localizedDescription }
+                }
+                let obsoleteFormats = (entry.originalFormats ?? []).filter {
+                    !preservedFormats.contains($0.fileName)
+                }
+                do { try repository.removeOriginalFormats(obsoleteFormats) }
+                catch { lastError = error.localizedDescription }
+            }
+        }
+
+        var collapsed: [ClipboardEntry] = []
+        collapsed.reserveCapacity(entries.count - replacedIndices.count + groups.count)
+        for (index, entry) in entries.enumerated() where !replacedIndices.contains(index) {
+            collapsed.append(entry)
+        }
+        collapsed.append(contentsOf: groups.map(\.merged))
+        entries = collapsed
+
+        let queue = settings.resolvedPasteQueueEntryIDs
+        guard !queue.isEmpty else { return }
+        var mergedQueue: [UUID] = []
+        var seenQueueIDs = Set<UUID>()
+        for id in queue {
+            let resolvedID = replacementIDByReplacedID[id] ?? id
+            if seenQueueIDs.insert(resolvedID).inserted { mergedQueue.append(resolvedID) }
+        }
+        setPasteQueueIDs(mergedQueue)
     }
 
     private struct DedupKey: Hashable { let hash: String; let isSecret: Bool }
@@ -1034,37 +1197,6 @@ public final class ClipboardHistoryStore: ObservableObject {
         let totalUseCount = matches.compactMap(\.useCount).reduce(0, +)
         merged.useCount = totalUseCount == 0 ? nil : totalUseCount
         return merged
-    }
-
-    private func replaceEntries(matching contentHash: String, isSecret: Bool, with merged: ClipboardEntry) {
-        let replaced = entries.filter {
-            $0.contentHash == contentHash && $0.isSecret == isSecret
-        }
-        let replacedIDs = Set(replaced.map(\.id))
-        var mergedQueue: [UUID] = []
-        var seenQueueIDs = Set<UUID>()
-        for id in settings.resolvedPasteQueueEntryIDs {
-            let resolvedID = replacedIDs.contains(id) ? merged.id : id
-            if seenQueueIDs.insert(resolvedID).inserted { mergedQueue.append(resolvedID) }
-        }
-        let preservedFormats = Set((merged.originalFormats ?? []).map(\.fileName))
-        for entry in replaced {
-            if entry.id != merged.id, entry.kind == .image,
-               let fileName = entry.imageFileName, fileName != merged.imageFileName {
-                do { try repository.removeImage(named: fileName) }
-                catch { lastError = error.localizedDescription }
-            }
-            let obsoleteFormats = (entry.originalFormats ?? []).filter {
-                !preservedFormats.contains($0.fileName)
-            }
-            do { try repository.removeOriginalFormats(obsoleteFormats) }
-            catch { lastError = error.localizedDescription }
-        }
-        entries.removeAll { $0.contentHash == contentHash && $0.isSecret == isSecret }
-        entries.append(merged)
-        if mergedQueue != settings.resolvedPasteQueueEntryIDs {
-            settings.pasteQueueEntryIDs = mergedQueue
-        }
     }
 
     @discardableResult
@@ -1085,14 +1217,35 @@ public final class ClipboardHistoryStore: ObservableObject {
 
     public func clearError() { lastError = nil }
 
+    /// Classifies stored text ahead of time, off the main thread.
+    ///
+    /// Deciding whether an entry is text, code or a link is the expensive part
+    /// of building any category, and the results are cached for the life of
+    /// the process — but the first panel open of a long history would pay for
+    /// all of it at once, on the main thread, while the window is coming up.
+    /// This does the same work in the background shortly after launch instead.
+    /// It only fills a shared cache: nothing here mutates the store, so a copy
+    /// captured now stays valid even as new entries arrive.
+    public func warmContentClassification() {
+        let snapshot = entries
+        guard !snapshot.isEmpty else { return }
+        Task.detached(priority: .utility) {
+            for (offset, entry) in snapshot.enumerated() where entry.kind == .text {
+                _ = entry.contentCategory
+                // Stay interruptible so this never competes with real work.
+                if offset % 256 == 0 { await Task.yield() }
+            }
+        }
+    }
+
     /// Search/category results are presentation caches, not user data. Drop them
     /// when the clipboard panel closes so a large history does not keep several
     /// full filtered arrays alive while the app is idle.
     public func releaseTransientCaches() {
         orderedMemo.removeAll(keepingCapacity: false)
         sortedPartitionMemo = nil
-        searchTextMemo.removeAll(keepingCapacity: false)
-        hasBuiltSearchTextMemo = false
+        categoryPartitionMemo.removeAll(keepingCapacity: false)
+        incrementalQueryChain = nil
     }
 
     /// Preview/self-check only: swap the in-memory list without touching the
@@ -1195,44 +1348,75 @@ public final class ClipboardHistoryStore: ObservableObject {
 
     private func clearEntries(matching key: ClipboardCategoryKey) {
         let customs = settings.customCategories ?? []
-        let removed = entries.filter { $0.matches(key: key, customCategories: customs) }
-        let removedIDs = Set(removed.map(\.id))
-        entries.removeAll { $0.matches(key: key, customCategories: customs) }
-        settings.pasteQueueEntryIDs = settings.resolvedPasteQueueEntryIDs.filter {
-            !removedIDs.contains($0)
+        // Partitioned in one pass. Splitting this into a filter and a separate
+        // removal ran the category rules over every entry twice, and mutating
+        // a published array in place copies its whole buffer anyway.
+        var removed: [ClipboardEntry] = []
+        var kept: [ClipboardEntry] = []
+        kept.reserveCapacity(entries.count)
+        for entry in entries {
+            if entry.matches(key: key, customCategories: customs) {
+                removed.append(entry)
+            } else {
+                kept.append(entry)
+            }
         }
+        guard !removed.isEmpty else { return }
+        let removedIDs = Set(removed.map(\.id))
+        entries = kept
+        setPasteQueueIDs(settings.resolvedPasteQueueEntryIDs.filter {
+            !removedIDs.contains($0)
+        })
         for entry in removed { removeBackingAssets(entry) }
         normalizePinOrders()
     }
 
     private func trimToLimit() {
-        let ids = Set(ClipboardHistoryPolicy.idsToTrim(from: entries, maxEntries: settings.maxEntries))
-        guard !ids.isEmpty else { return }
-        let removed = entries.filter { ids.contains($0.id) }
-        entries.removeAll { ids.contains($0.id) }
-        settings.pasteQueueEntryIDs = settings.resolvedPasteQueueEntryIDs.filter {
-            !ids.contains($0)
+        let trimmed = ClipboardHistoryPolicy.idsToTrim(from: entries, maxEntries: settings.maxEntries)
+        guard !trimmed.isEmpty else { return }
+        let ids = Set(trimmed)
+        // One pass produces both halves. A history sitting at its limit trims
+        // on every single capture, so this is a hot path.
+        var removed: [ClipboardEntry] = []
+        removed.reserveCapacity(ids.count)
+        var kept: [ClipboardEntry] = []
+        kept.reserveCapacity(entries.count - ids.count)
+        for entry in entries {
+            if ids.contains(entry.id) { removed.append(entry) } else { kept.append(entry) }
         }
+        entries = kept
+        setPasteQueueIDs(settings.resolvedPasteQueueEntryIDs.filter {
+            !ids.contains($0)
+        })
         for entry in removed { removeBackingAssets(entry) }
     }
 
-    /// Position of every entry by id, built once per normalize pass. Both
-    /// normalizers previously called `entries.firstIndex(where:)` per pinned
-    /// item, i.e. O(pinned × history) on paths that run for *every* copy
-    /// (`promoteExistingEntry`, `trimToLimit`, delete). With a few hundred pins
-    /// against a long history that scan was the dominant cost of recording a
-    /// clipboard change; the map makes both passes linear.
-    private func entryIndexByID() -> [UUID: Int] {
-        var map = [UUID: Int](minimumCapacity: entries.count)
-        for (index, entry) in entries.enumerated() { map[entry.id] = index }
-        return map
-    }
-
+    /// Compacts both pin orders.
+    ///
+    /// These run after every capture, delete and trim. Two properties keep them
+    /// cheap against a large history: they work on entry *indices*, so the
+    /// pinned subset is never copied out and re-matched by id, and they leave
+    /// `entries` untouched when the stored orders are already correct — which
+    /// is the normal case. That last point matters because `entries` is
+    /// `@Published`: every element write republishes the entire list and can
+    /// copy its whole buffer.
     private func normalizePinOrders() {
-        let indexByID = entryIndexByID()
-        for (order, entry) in ClipboardHistoryPolicy.pinnedEntries(entries).enumerated() {
-            guard let index = indexByID[entry.id] else { continue }
-            entries[index].pinnedOrder = order
+        var pinnedIndices: [Int] = []
+        for (index, entry) in entries.enumerated() where entry.isPinned {
+            pinnedIndices.append(index)
+        }
+        if !pinnedIndices.isEmpty {
+            pinnedIndices.sort { lhs, rhs in
+                let left = entries[lhs].pinnedOrder ?? Int.max
+                let right = entries[rhs].pinnedOrder ?? Int.max
+                if left != right { return left < right }
+                return entries[lhs].createdAt < entries[rhs].createdAt
+            }
+            applyOrders(pinnedIndices) { entry, order in
+                guard entry.pinnedOrder != order else { return false }
+                entry.pinnedOrder = order
+                return true
+            }
         }
         _ = normalizeDesktopPinnedOrders()
     }
@@ -1242,15 +1426,43 @@ public final class ClipboardHistoryStore: ObservableObject {
     /// best available approximation of first-pin time for legacy snapshots.
     @discardableResult
     private func normalizeDesktopPinnedOrders() -> Bool {
-        let indexByID = entryIndexByID()
-        var changed = false
-        for (order, entry) in ClipboardHistoryPolicy.desktopPinnedEntries(entries).enumerated() {
-            guard let index = indexByID[entry.id],
-                  entries[index].desktopPinnedOrder != order else { continue }
-            entries[index].desktopPinnedOrder = order
-            changed = true
+        var pinnedIndices: [Int] = []
+        for (index, entry) in entries.enumerated() where entry.isDesktopPinned == true {
+            pinnedIndices.append(index)
         }
-        return changed
+        guard !pinnedIndices.isEmpty else { return false }
+        pinnedIndices.sort { lhs, rhs in
+            let left = entries[lhs].desktopPinnedOrder ?? Int.max
+            let right = entries[rhs].desktopPinnedOrder ?? Int.max
+            if left != right { return left < right }
+            if entries[lhs].updatedAt != entries[rhs].updatedAt {
+                return entries[lhs].updatedAt < entries[rhs].updatedAt
+            }
+            return entries[lhs].createdAt < entries[rhs].createdAt
+        }
+        return applyOrders(pinnedIndices) { entry, order in
+            guard entry.desktopPinnedOrder != order else { return false }
+            entry.desktopPinnedOrder = order
+            return true
+        }
+    }
+
+    /// Writes sequential orders to the given entries, publishing at most once.
+    @discardableResult
+    private func applyOrders(
+        _ indices: [Int],
+        assign: (inout ClipboardEntry, Int) -> Bool
+    ) -> Bool {
+        var updated: [ClipboardEntry]?
+        for (order, index) in indices.enumerated() {
+            var candidate = entries[index]
+            guard assign(&candidate, order) else { continue }
+            if updated == nil { updated = entries }
+            updated?[index] = candidate
+        }
+        guard let updated else { return false }
+        entries = updated
+        return true
     }
 
     private func removeBackingAssets(_ entry: ClipboardEntry) {

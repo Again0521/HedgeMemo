@@ -66,10 +66,15 @@ public final class MemeStore: ObservableObject {
 
     public func deleteCategory(id: UUID) {
         categories.removeAll { $0.id == id }
-        for index in memes.indices where memes[index].categoryID == id {
-            memes[index].categoryID = nil
-            memes[index].updatedAt = .now
+        // Batched into one write-back: see `normalizeSortOrders`.
+        var updated = memes
+        var changed = false
+        for index in updated.indices where updated[index].categoryID == id {
+            updated[index].categoryID = nil
+            updated[index].updatedAt = .now
+            changed = true
         }
+        if changed { memes = updated }
         if selectedCategoryID == id { selectedCategoryID = nil }
         normalizeSortOrders()
         persist()
@@ -147,10 +152,14 @@ public final class MemeStore: ObservableObject {
     }
 
     public func move(ids: Set<UUID>, to categoryID: UUID?) {
-        for index in memes.indices where ids.contains(memes[index].id) {
-            memes[index].categoryID = categoryID
-            memes[index].updatedAt = .now
+        var updated = memes
+        var changed = false
+        for index in updated.indices where ids.contains(updated[index].id) {
+            updated[index].categoryID = categoryID
+            updated[index].updatedAt = .now
+            changed = true
         }
+        if changed { memes = updated }
         normalizeSortOrders()
         persist()
     }
@@ -306,14 +315,25 @@ public final class MemeStore: ObservableObject {
     /// Assigns `sortOrder` from each item's position in `memes`, making the array
     /// order the single source of truth. `reorder` moves items within the array,
     /// so deriving order from stale `sortOrder` here would silently undo the drag.
+    ///
+    /// The whole pass writes back once. `memes` is `@Published`, so assigning
+    /// through it element by element copied the entire library per element —
+    /// quadratic work on a path that runs for every step of a drag.
     private func normalizeSortOrders() {
+        var updated = memes
         var nextOrder = [UUID?: Int]()
-        for index in memes.indices {
-            let category = memes[index].categoryID
+        var changed = false
+        for index in updated.indices {
+            let category = updated[index].categoryID
             let order = nextOrder[category, default: 0]
-            memes[index].sortOrder = order
+            if updated[index].sortOrder != order {
+                updated[index].sortOrder = order
+                changed = true
+            }
             nextOrder[category] = order + 1
         }
+        guard changed else { return }
+        memes = updated
     }
 
     private func persist() {

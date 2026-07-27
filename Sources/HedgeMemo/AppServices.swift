@@ -92,6 +92,10 @@ final class AppServices: ObservableObject {
             // fresh-install check sees a genuinely empty state.
             OnboardingSeeder.seedIfFreshInstall(memeStore: memeStore, clipboardStore: clipboardStore)
             clipboardStore.startMonitoring()
+            // Take the one-off cost of classifying a long history now, in the
+            // background, rather than on the main thread the first time the
+            // panel opens.
+            clipboardStore.warmContentClassification()
         }
 
         let panelController = ClipboardHistoryPanelController(

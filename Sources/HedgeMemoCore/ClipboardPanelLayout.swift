@@ -186,19 +186,25 @@ public enum ClipboardPanelLayout {
     }
 }
 
-/// Incremental rendering policy for the two expensive clipboard surfaces.
-/// Text/link rows stay fully enumerated because they are cheap; code rows incur
+/// Incremental rendering policy for the clipboard surfaces. Code rows incur
 /// syntax highlighting and image cells may schedule a decode, so those lists
-/// grow in bounded pages as their current tail becomes visible.
+/// grow in the smallest pages; plain rows are cheap individually but a history
+/// of several thousand still costs real time to enumerate into SwiftUI's view
+/// tree, so they page too — just in much larger batches.
 public enum ClipboardPanelPagination {
     public static let codePageSize = 60
     public static let imagePageSize = 48
+    /// Roughly ten screenfuls of 27 pt rows. Large enough that the first page
+    /// is already taller than any panel can be — so the window sizes exactly as
+    /// it did when the whole list was mounted — and that scrolling never
+    /// catches up with the loaded tail.
+    public static let textPageSize = 300
 
     public static func pageSize(for key: ClipboardCategoryKey?) -> Int? {
         switch key {
         case .builtin(.code): codePageSize
         case .builtin(.image), .builtin(.screenshot): imagePageSize
-        default: nil
+        default: textPageSize
         }
     }
 

@@ -20,6 +20,8 @@ public final class MemeRepository: @unchecked Sendable {
     private let snapshotURL: URL
     private let fileManager: FileManager
     private let snapshotIO: RepositoryIOCoordinator
+    private let pendingGenerationLock = NSLock()
+    private var latestQueuedGeneration = 0
 
     public static let `default` = MemeRepository()
 
@@ -48,7 +50,9 @@ public final class MemeRepository: @unchecked Sendable {
         try snapshotIO.sync {
             try prepare()
             guard fileManager.fileExists(atPath: snapshotURL.path) else { return MemeSnapshot() }
-            let data = try Data(contentsOf: snapshotURL)
+            // Mapped rather than copied: a large library's manifest is read
+            // during launch, before anything can be shown.
+            let data = try Data(contentsOf: snapshotURL, options: .mappedIfSafe)
             return try JSONDecoder.memeDecoder.decode(MemeSnapshot.self, from: data)
         }
     }
@@ -57,11 +61,26 @@ public final class MemeRepository: @unchecked Sendable {
         try snapshotIO.sync { try saveImmediately(snapshot) }
     }
 
+    /// Enqueues a library write, skipping generations a newer enqueued
+    /// snapshot has already superseded. Bulk edits (an import, a multi-item
+    /// move or delete, a drag reorder) otherwise queued one full re-encode of
+    /// the library per step, each obsolete before it ran.
     public func saveAsync(
         _ snapshot: MemeSnapshot,
         completion: @escaping @Sendable (String?) -> Void
     ) {
+        let generation = pendingGenerationLock.withLock { () -> Int in
+            latestQueuedGeneration += 1
+            return latestQueuedGeneration
+        }
         snapshotIO.async { [self] in
+            let isSuperseded = pendingGenerationLock.withLock {
+                generation < latestQueuedGeneration
+            }
+            guard !isSuperseded else {
+                completion(nil)
+                return
+            }
             do {
                 try saveImmediately(snapshot)
                 completion(nil)
@@ -141,7 +160,8 @@ private extension JSONEncoder {
     static let memeEncoder: JSONEncoder = {
         let encoder = JSONEncoder()
         encoder.dateEncodingStrategy = .iso8601
-        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+        // Compact: the library manifest is rewritten on every edit and read
+        // only by the app. Decoding is unaffected.
         return encoder
     }()
 }
