@@ -241,6 +241,25 @@ final class ClipboardAdvancedModeTests: XCTestCase {
         XCTAssertEqual(legacy.resolvedAdvancedSortDirection, .descending)
     }
 
+    func testSelectingSortFieldStartsAscendingAndRepeatedSelectionReverses() {
+        var settings = ClipboardHistorySettings()
+        XCTAssertEqual(settings.resolvedAdvancedSortField, .capturedAt)
+        XCTAssertEqual(settings.resolvedAdvancedSortDirection, .descending)
+
+        settings.selectAdvancedSortField(.capturedAt)
+        XCTAssertEqual(settings.resolvedAdvancedSortDirection, .ascending)
+
+        settings.selectAdvancedSortField(.capturedAt)
+        XCTAssertEqual(settings.resolvedAdvancedSortDirection, .descending)
+
+        settings.selectAdvancedSortField(.useCount)
+        XCTAssertEqual(settings.resolvedAdvancedSortField, .useCount)
+        XCTAssertEqual(settings.resolvedAdvancedSortDirection, .ascending)
+
+        settings.selectAdvancedSortField(.useCount)
+        XCTAssertEqual(settings.resolvedAdvancedSortDirection, .descending)
+    }
+
     func testAdvancedChromeAddsExactlyOneFilterRow() {
         XCTAssertEqual(
             ClipboardPanelLayout.chromeHeight(advancedMode: true)
@@ -285,6 +304,34 @@ final class ClipboardAdvancedModeTests: XCTestCase {
         XCTAssertTrue(
             store.sourceApplicationsForFiltering(includeSecrets: true)
                 .contains { $0.stableIdentifier == passwordManager.stableIdentifier }
+        )
+    }
+
+    func testSourceChoicesOnlyContainApplicationsWithEntriesInActiveCategory() {
+        let store = ClipboardHistoryStore(
+            repository: ClipboardHistoryRepository(rootURL: tempRoot("scoped-sources"))
+        )
+        XCTAssertTrue(store.addText("ordinary prose", source: safari))
+        XCTAssertTrue(store.addText("https://example.com", source: notes))
+        XCTAssertTrue(store.addText("source missing"))
+
+        XCTAssertEqual(
+            store.sourceApplicationsForFiltering(
+                key: .builtin(.text)
+            ).map(\.stableIdentifier),
+            [safari.stableIdentifier]
+        )
+        XCTAssertEqual(
+            store.sourceApplicationsForFiltering(
+                key: .builtin(.link)
+            ).map(\.stableIdentifier),
+            [notes.stableIdentifier]
+        )
+        XCTAssertTrue(
+            store.hasUnknownSourceForFiltering(key: .builtin(.text))
+        )
+        XCTAssertFalse(
+            store.hasUnknownSourceForFiltering(key: .builtin(.link))
         )
     }
 

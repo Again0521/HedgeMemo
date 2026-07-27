@@ -31,6 +31,11 @@ fi
 # bundle before creating the image.
 mkdir -p "$STAGING_DIR"
 /usr/bin/ditto --noextattr --noqtn "$DIST_APP" "$STAGING_DIR/$APP_NAME.app"
+# File Provider may race the copy and materialize Finder/resource-fork
+# metadata inside the loose dist bundle before `ditto` reads it. The private
+# staging copy is outside Documents, so one recursive cleanup here is stable
+# and does not require re-signing or any administrator access.
+xattr -cr "$STAGING_DIR/$APP_NAME.app"
 codesign --verify --deep --strict "$STAGING_DIR/$APP_NAME.app"
 ln -s /Applications "$STAGING_DIR/Applications"
 rm -f "$DMG_PATH"

@@ -107,29 +107,3 @@ struct HoverIconButton: View {
         .help(help)
     }
 }
-
-/// Category filters use the system selection color.  Unselected filters stay
-/// neutral and are intentionally invariant under pointer hover.
-struct CategoryChip: View {
-    let title: String
-    let isSelected: Bool
-    let action: () -> Void
-    var body: some View {
-        Button(action: action) {
-            Text(title)
-                .font(.system(size: 12, weight: isSelected ? .semibold : .regular))
-                .foregroundStyle(isSelected ? Color.white : Color.primary)
-                .padding(.horizontal, 10)
-                .frame(height: 22)
-                .background(
-                    Capsule(style: .continuous)
-                        .fill(
-                            isSelected
-                                ? AnyShapeStyle(Color.accentColor)
-                                : AnyShapeStyle(.quinary)
-                        )
-                )
-        }
-        .buttonStyle(.plain)
-    }
-}

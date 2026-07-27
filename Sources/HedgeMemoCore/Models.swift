@@ -903,6 +903,21 @@ public struct ClipboardHistorySettings: Codable, Equatable, Sendable {
         )
     }
 
+    /// Choosing a new sort field starts in natural ascending order. Choosing
+    /// the currently active field again reverses it, keeping direction inside
+    /// the native field Picker instead of requiring a separate control.
+    public mutating func selectAdvancedSortField(_ field: ClipboardAdvancedSortField) {
+        if resolvedAdvancedSortField == field {
+            advancedSortDirection =
+                resolvedAdvancedSortDirection == .ascending
+                ? .descending
+                : .ascending
+        } else {
+            advancedSortField = field
+            advancedSortDirection = .ascending
+        }
+    }
+
     public mutating func addAppFilterApplication(_ application: ClipboardSourceApplication) {
         var applications = appFilterApplications ?? []
         guard !applications.contains(where: { $0.matches(application) }) else { return }

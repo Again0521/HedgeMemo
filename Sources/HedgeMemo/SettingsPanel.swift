@@ -1050,8 +1050,8 @@ private struct ChipFlowLayout: Layout {
 }
 
 /// One destination in the floating sidebar. Selection uses the system accent
-/// color and hover uses a semantic material state, matching `CategoryChip` in
-/// the other panels — no custom fills that would fight the glass surface.
+/// color and hover use semantic system states without custom fills that fight
+/// the glass surface.
 private struct SettingsTabRow: View {
     let tab: SettingsTab
     let isSelected: Bool

@@ -155,6 +155,118 @@ private final class ClipboardHoverPreviewDelay {
     }
 }
 
+/// Pure geometry for wrapping existing category controls. Interactive elements
+/// remain native SwiftUI Buttons/Pickers; this helper only decides which
+/// category titles fit on each row and reserves the trailing controls on the
+/// final row.
+private enum ClipboardCategoryBarMetrics {
+    static let lineSpacing: CGFloat = 6
+    private static let itemSpacing: CGFloat = 6
+    private static let chipHorizontalPadding: CGFloat = 20
+    private static let availableWidth =
+        ClipboardPanelLayout.panelWidth - ClipboardPanelLayout.outerPadding * 2
+
+    static func title(
+        for key: ClipboardCategoryKey,
+        settings: ClipboardHistorySettings
+    ) -> String {
+        switch key {
+        case .builtin(let category):
+            category.displayName
+        case .custom(let id):
+            settings.customCategory(id: id)?.name ?? L10n.text("自定义")
+        }
+    }
+
+    static func rows(
+        settings: ClipboardHistorySettings,
+        queueCount: Int
+    ) -> [[ClipboardCategoryKey]] {
+        let keys = settings.enabledCategoryKeys
+        guard !keys.isEmpty else { return [[]] }
+        let widths = Dictionary(uniqueKeysWithValues: keys.map {
+            ($0.storageValue, chipWidth(title(for: $0, settings: settings)))
+        })
+
+        var rows: [[ClipboardCategoryKey]] = []
+        var current: [ClipboardCategoryKey] = []
+        var currentWidth: CGFloat = 0
+        for key in keys {
+            let width = widths[key.storageValue] ?? 44
+            let needed = current.isEmpty ? width : currentWidth + itemSpacing + width
+            if !current.isEmpty, needed > availableWidth {
+                rows.append(current)
+                current = [key]
+                currentWidth = width
+            } else {
+                current.append(key)
+                currentWidth = needed
+            }
+        }
+        if !current.isEmpty { rows.append(current) }
+
+        let finalCapacity = max(80, availableWidth - accessoryWidth(queueCount: queueCount))
+        guard let last = rows.last,
+              rowWidth(last, widths: widths) > finalCapacity,
+              last.count > 1 else {
+            return rows
+        }
+
+        var preceding = last
+        var final: [ClipboardCategoryKey] = []
+        while let candidate = preceding.last {
+            let candidateWidth = widths[candidate.storageValue] ?? 44
+            let nextWidth = final.isEmpty
+                ? candidateWidth
+                : candidateWidth + itemSpacing + rowWidth(final, widths: widths)
+            guard final.isEmpty || nextWidth <= finalCapacity else { break }
+            preceding.removeLast()
+            final.insert(candidate, at: 0)
+        }
+        rows.removeLast()
+        if !preceding.isEmpty { rows.append(preceding) }
+        if !final.isEmpty { rows.append(final) }
+        return rows
+    }
+
+    static func height(settings: ClipboardHistorySettings, queueCount: Int) -> CGFloat {
+        let count = max(1, rows(settings: settings, queueCount: queueCount).count)
+        return CGFloat(count) * ClipboardPanelLayout.segmentedHeight
+            + CGFloat(count - 1) * lineSpacing
+    }
+
+    private static func chipWidth(_ title: String) -> CGFloat {
+        let font = NSFont.systemFont(ofSize: 12, weight: .semibold)
+        return ceil((title as NSString).size(withAttributes: [.font: font]).width)
+            + chipHorizontalPadding
+    }
+
+    private static func rowWidth(
+        _ row: [ClipboardCategoryKey],
+        widths: [String: CGFloat]
+    ) -> CGFloat {
+        row.enumerated().reduce(CGFloat.zero) { total, pair in
+            total
+                + (pair.offset == 0 ? 0 : itemSpacing)
+                + (widths[pair.element.storageValue] ?? 44)
+        }
+    }
+
+    private static func accessoryWidth(queueCount: Int) -> CGFloat {
+        let queueTextWidth: CGFloat
+        if queueCount > 0 {
+            queueTextWidth = ceil(
+                ("\(queueCount)" as NSString).size(
+                    withAttributes: [.font: NSFont.systemFont(ofSize: 10, weight: .semibold)]
+                ).width
+            ) + 18
+        } else {
+            queueTextWidth = 26
+        }
+        return queueTextWidth + itemSpacing + 28 + itemSpacing
+    }
+}
+
 @MainActor
 final class ClipboardHistoryPanelController: NSObject, NSWindowDelegate {
     private let store: ClipboardHistoryStore
@@ -221,8 +333,11 @@ final class ClipboardHistoryPanelController: NSObject, NSWindowDelegate {
             lockStore: lockStore,
             detailPresentation: detailPresentation,
             onDone: { [weak self] in self?.hide() },
-            onContentChange: { [weak self] contentHeight in
-                self?.requestMainResize(contentHeight: contentHeight)
+            onContentChange: { [weak self] contentHeight, categoryBarHeight in
+                self?.requestMainResize(
+                    contentHeight: contentHeight,
+                    categoryBarHeight: categoryBarHeight
+                )
             },
             onDetailEntry: { [weak self] entry in
                 DispatchQueue.main.async { self?.updateDetail(entry: entry) }
@@ -263,7 +378,16 @@ final class ClipboardHistoryPanelController: NSObject, NSWindowDelegate {
             let heightEntries = Array(ordered.prefix(min(pageLimit, ordered.count)))
             initialContentHeight = ClipboardPanelLayout.contentHeight(for: heightEntries, key: key)
         }
-        resize(contentHeight: initialContentHeight, animate: false)
+        let initialCategoryBarHeight = ClipboardCategoryBarMetrics.height(
+            settings: store.settings,
+            queueCount: store.pasteQueueCount
+        )
+        resize(
+            contentHeight: initialContentHeight
+                + initialCategoryBarHeight
+                - ClipboardPanelLayout.segmentedHeight,
+            animate: false
+        )
         position(panel)
         // Match the reference popup's activation contract. The material is
         // fixed by PanelMaterialHost; becoming key must not replace it with a
@@ -448,10 +572,18 @@ final class ClipboardHistoryPanelController: NSObject, NSWindowDelegate {
         mainScreenFrame = frame
     }
 
-    private func requestMainResize(contentHeight: CGFloat) {
+    private func requestMainResize(
+        contentHeight: CGFloat,
+        categoryBarHeight: CGFloat
+    ) {
         guard panel != nil else { return }
         if detailPresentation.isVisible { return }
-        resize(contentHeight: contentHeight, animate: true)
+        resize(
+            contentHeight: contentHeight
+                + categoryBarHeight
+                - ClipboardPanelLayout.segmentedHeight,
+            animate: true
+        )
     }
 
     private func position(_ panel: NSPanel) {
@@ -712,6 +844,12 @@ final class ClipboardHistoryPanelController: NSObject, NSWindowDelegate {
             )
         }
         store.injectPreviewEntries(fakes)
+        store.settings.customCategories = [
+            CustomClipboardCategory(name: "工作资料", pattern: "示例"),
+            CustomClipboardCategory(name: "稍后阅读", pattern: "示例"),
+            CustomClipboardCategory(name: "项目参考链接", pattern: "示例"),
+            CustomClipboardCategory(name: "临时收集", pattern: "示例"),
+        ]
         store.settings.activeCategoryKey = .builtin(.text)
         store.settings.advancedModeEnabled = true
         store.settings.advancedSourceIdentifier = nil
@@ -1315,7 +1453,7 @@ struct ClipboardHistoryPanelView: View {
     @ObservedObject var lockStore: AppLockStore
     @ObservedObject private var detailPresentation: ClipboardDetailPresentation
     let onDone: () -> Void
-    let onContentChange: (CGFloat) -> Void
+    let onContentChange: (CGFloat, CGFloat) -> Void
     let onDetailEntry: (ClipboardEntry?) -> Void
     let onAddToMemes: (ClipboardEntry) -> Void
     let onTogglePin: (ClipboardEntry) -> Void
@@ -1358,7 +1496,7 @@ struct ClipboardHistoryPanelView: View {
         lockStore: AppLockStore,
         detailPresentation: ClipboardDetailPresentation,
         onDone: @escaping () -> Void,
-        onContentChange: @escaping (CGFloat) -> Void,
+        onContentChange: @escaping (CGFloat, CGFloat) -> Void,
         onDetailEntry: @escaping (ClipboardEntry?) -> Void,
         onAddToMemes: @escaping (ClipboardEntry) -> Void,
         onTogglePin: @escaping (ClipboardEntry) -> Void
@@ -1466,11 +1604,107 @@ struct ClipboardHistoryPanelView: View {
     }
 
     private var listContent: some View {
+        listContentLifecycle
+            .onReceive(
+                NotificationCenter.default.publisher(
+                    for: NSMenu.didBeginTrackingNotification
+                )
+            ) { _ in
+                contextMenuTrackingBegan()
+            }
+            .onReceive(
+                NotificationCenter.default.publisher(
+                    for: NSMenu.didEndTrackingNotification
+                )
+            ) { _ in
+                contextMenuTrackingEnded()
+            }
+            .onDisappear {
+                cancelPendingPreview()
+                contextMenuEntryID = nil
+                contextMenuTrackingDepth = 0
+                revealedSecretTexts.removeAll(keepingCapacity: false)
+            }
+            .alert(
+                L10n.text("粘贴队列"),
+                isPresented: queueErrorPresented
+            ) {
+                Button(L10n.text("好"), role: .cancel) { queueError = nil }
+            } message: {
+                Text(queueError ?? "")
+            }
+    }
+
+    private var listContentLifecycle: some View {
+        listContentSelectionObservers
+            .onChange(of: store.settings.pasteQueueEntryIDs) { _, _ in
+                DispatchQueue.main.async { reportContentHeight() }
+            }
+            .onChange(of: store.settings.enabledCategoryKeys.map(\.storageValue)) { _, _ in
+                DispatchQueue.main.async { reportContentHeight() }
+            }
+            .onChange(of: store.settings.customCategories) { _, _ in
+                validateAdvancedSourceSelection()
+                DispatchQueue.main.async { reportContentHeight() }
+            }
+            .onChange(of: activeKey.storageValue) { _, _ in
+                refreshRevealedSecrets()
+                selectionAndSizeChanged(resetPage: true)
+            }
+            // Only the *gate* transition needs its own resize. A category switch
+            // is already handled above; reacting to both fired two resizes.
+            .onChange(of: activeGate) { _, _ in protectedGateChanged() }
+            .onChange(of: activeKey.storageValue) { _, _ in noteProtectedActivity() }
+            .onChange(of: store.entries) { _, _ in
+                refreshRevealedSecrets()
+                validateAdvancedSourceSelection()
+                selectionAndSizeChanged(resetPage: false)
+            }
+            .onChange(of: visibleEntryLimit) { _, _ in
+                DispatchQueue.main.async { reportContentHeight() }
+            }
+            .onChange(of: detailPresentation.isVisible) { _, visible in
+                if !visible { editorClosing = false }
+            }
+    }
+
+    private var listContentSelectionObservers: some View {
+        listContentBase
+            .onAppear {
+                refreshRevealedSecrets()
+                validateAdvancedSourceSelection()
+                resetPagination()
+                validateSelection()
+                reportContentHeight()
+                noteProtectedActivity()
+            }
+            .onChange(of: query) { _, _ in
+                selectionAndSizeChanged(resetPage: true)
+            }
+            .onChange(of: store.settings.lastCategory) { _, _ in
+                validateAdvancedSourceSelection()
+                selectionAndSizeChanged(resetPage: true)
+            }
+            .onChange(of: store.settings.advancedModeEnabled) { _, _ in
+                selectionAndSizeChanged(resetPage: true)
+            }
+            .onChange(of: store.settings.advancedSourceIdentifier) { _, _ in
+                selectionAndSizeChanged(resetPage: true)
+            }
+            .onChange(of: store.settings.advancedSortField) { _, _ in
+                selectionAndSizeChanged(resetPage: true)
+            }
+            .onChange(of: store.settings.advancedSortDirection) { _, _ in
+                selectionAndSizeChanged(resetPage: true)
+            }
+    }
+
+    private var listContentBase: some View {
         VStack(spacing: ClipboardPanelLayout.sectionSpacing) {
             PanelSearchField(placeholder: L10n.text("搜索剪贴板"), text: $query)
                 .frame(height: ClipboardPanelLayout.headerHeight)
             categoryBar
-                .frame(height: ClipboardPanelLayout.segmentedHeight)
+                .frame(height: categoryBarHeight)
             if store.settings.resolvedAdvancedModeEnabled {
                 advancedFilterBar
                     .frame(height: ClipboardPanelLayout.advancedFilterHeight)
@@ -1520,72 +1754,6 @@ struct ClipboardHistoryPanelView: View {
         // ordinary text still reaches the search field, while clipboard
         // actions remain available no matter which control has focus.
         .background(KeyCaptureView { event in handleKey(event) }.frame(width: 1, height: 1))
-        .onAppear {
-            refreshRevealedSecrets()
-            resetPagination()
-            validateSelection()
-            reportContentHeight()
-            noteProtectedActivity()
-        }
-        .onChange(of: query) { _, _ in selectionAndSizeChanged(resetPage: true) }
-        .onChange(of: store.settings.lastCategory) { _, _ in selectionAndSizeChanged(resetPage: true) }
-        .onChange(of: store.settings.advancedModeEnabled) { _, _ in
-            selectionAndSizeChanged(resetPage: true)
-        }
-        .onChange(of: store.settings.advancedSourceIdentifier) { _, _ in
-            selectionAndSizeChanged(resetPage: true)
-        }
-        .onChange(of: store.settings.advancedSortField) { _, _ in
-            selectionAndSizeChanged(resetPage: true)
-        }
-        .onChange(of: store.settings.advancedSortDirection) { _, _ in
-            selectionAndSizeChanged(resetPage: true)
-        }
-        .onChange(of: activeKey.storageValue) { _, _ in
-            refreshRevealedSecrets()
-            selectionAndSizeChanged(resetPage: true)
-        }
-        // Only the *gate* transition needs its own resize. A category switch is
-        // already handled above; reacting to both fired two resizes for one
-        // change, which is what made switching to 密码 flicker and judder.
-        .onChange(of: activeGate) { _, _ in protectedGateChanged() }
-        // Opening a protected category counts as using it.
-        .onChange(of: activeKey.storageValue) { _, _ in noteProtectedActivity() }
-        .onChange(of: store.entries) { _, _ in
-            refreshRevealedSecrets()
-            selectionAndSizeChanged(resetPage: false)
-        }
-        .onChange(of: visibleEntryLimit) { _, _ in
-            DispatchQueue.main.async { reportContentHeight() }
-        }
-        // Once the card is actually gone, clear the closing flag so the next
-        // preview to appear starts fully visible rather than mid-fade.
-        .onChange(of: detailPresentation.isVisible) { _, visible in
-            if !visible { editorClosing = false }
-        }
-        .onReceive(NotificationCenter.default.publisher(for: NSMenu.didBeginTrackingNotification)) { _ in
-            contextMenuTrackingBegan()
-        }
-        .onReceive(NotificationCenter.default.publisher(for: NSMenu.didEndTrackingNotification)) { _ in
-            contextMenuTrackingEnded()
-        }
-        .onDisappear {
-            cancelPendingPreview()
-            contextMenuEntryID = nil
-            contextMenuTrackingDepth = 0
-            revealedSecretTexts.removeAll(keepingCapacity: false)
-        }
-        .alert(
-            L10n.text("粘贴队列"),
-            isPresented: Binding(
-                get: { queueError != nil },
-                set: { if !$0 { queueError = nil } }
-            )
-        ) {
-            Button(L10n.text("好"), role: .cancel) { queueError = nil }
-        } message: {
-            Text(queueError ?? "")
-        }
     }
 
     @ViewBuilder
@@ -1671,6 +1839,7 @@ struct ClipboardHistoryPanelView: View {
 
     private func protectedGateChanged() {
         refreshRevealedSecrets()
+        validateAdvancedSourceSelection()
         if isActiveCategoryLocked {
             // A preview retains the value it was given even after the list
             // becomes empty. Tear it down before the next frame so plaintext
@@ -1685,6 +1854,24 @@ struct ClipboardHistoryPanelView: View {
         reportContentHeight()
     }
 
+    /// A source can exist elsewhere in history but have no item in the active
+    /// category. Reset that stale selection instead of showing an empty,
+    /// unavailable choice in the native Picker.
+    private func validateAdvancedSourceSelection() {
+        guard let identifier = store.settings.advancedSourceIdentifier else { return }
+        if identifier == ClipboardAdvancedOptions.unknownSourceIdentifier {
+            if !hasUnknownSourceEntries {
+                store.settings.advancedSourceIdentifier = nil
+            }
+            return
+        }
+        if !availableSourceApplications.contains(where: {
+            $0.stableIdentifier == identifier
+        }) {
+            store.settings.advancedSourceIdentifier = nil
+        }
+    }
+
     /// Marks the unlocked session as in use while a protected category is being
     /// viewed, so the idle timing means "unused" rather than "since unlock".
     private func noteProtectedActivity() {
@@ -1697,10 +1884,13 @@ struct ClipboardHistoryPanelView: View {
         // so using the rendered prefix yields the same clamped window size without
         // scanning every long code value solely for height arithmetic.
         guard !isActiveCategoryLocked else {
-            onContentChange(ClipboardPanelLayout.lockedStateHeight)
+            onContentChange(ClipboardPanelLayout.lockedStateHeight, categoryBarHeight)
             return
         }
-        onContentChange(ClipboardPanelLayout.contentHeight(for: visibleEntries, key: activeKey))
+        onContentChange(
+            ClipboardPanelLayout.contentHeight(for: visibleEntries, key: activeKey),
+            categoryBarHeight
+        )
     }
 
     private func resetPagination() {
@@ -1731,209 +1921,182 @@ struct ClipboardHistoryPanelView: View {
     }
 
     private func title(for key: ClipboardCategoryKey) -> String {
-        switch key {
-        case .builtin(let category): category.displayName
-        case .custom(let id): store.settings.customCategory(id: id)?.name ?? L10n.text("自定义")
-        }
+        ClipboardCategoryBarMetrics.title(for: key, settings: store.settings)
+    }
+
+    private var categoryRows: [[ClipboardCategoryKey]] {
+        ClipboardCategoryBarMetrics.rows(
+            settings: store.settings,
+            queueCount: store.pasteQueueCount
+        )
+    }
+
+    private var categoryBarHeight: CGFloat {
+        ClipboardCategoryBarMetrics.height(
+            settings: store.settings,
+            queueCount: store.pasteQueueCount
+        )
     }
 
     private var categoryBar: some View {
-        HStack(spacing: 6) {
-            ScrollView(.horizontal, showsIndicators: false) {
+        VStack(alignment: .leading, spacing: ClipboardCategoryBarMetrics.lineSpacing) {
+            ForEach(Array(categoryRows.enumerated()), id: \.offset) { rowIndex, row in
                 HStack(spacing: 6) {
-                    ForEach(store.settings.enabledCategoryKeys, id: \.storageValue) { key in
-                        CategoryChip(title: title(for: key), isSelected: activeKey == key) {
-                            store.settings.activeCategoryKey = key
-                        }
-                    }
-                }
-            }
-            Button {
-                pasteNextQueued()
-            } label: {
-                HStack(spacing: 3) {
-                    Image(systemName: "list.number")
-                        .font(.system(size: 11, weight: .semibold))
-                    if store.pasteQueueCount > 0 {
-                        Text("\(store.pasteQueueCount)")
-                            .font(.system(size: 10, weight: .semibold, design: .rounded))
-                            .monospacedDigit()
-                    }
-                }
-                .foregroundStyle(store.pasteQueueCount > 0 ? Color.white : Color.primary)
-                .frame(minWidth: 24, minHeight: 22)
-                .padding(.horizontal, store.pasteQueueCount > 0 ? 4 : 0)
-                .background(
-                    Capsule(style: .continuous)
-                        .fill(
-                            store.pasteQueueCount > 0
-                                ? AnyShapeStyle(Color.accentColor)
-                                : AnyShapeStyle(.quinary)
-                        )
-                )
-            }
-            .buttonStyle(.plain)
-            .disabled(store.pasteQueueCount == 0)
-            .help(L10n.text("粘贴队列中的下一项"))
-            .accessibilityLabel(L10n.text("粘贴队列"))
-            .accessibilityValue(
-                L10n.format("粘贴队列项目数格式", store.pasteQueueCount)
-            )
-            .contextMenu {
-                Button(L10n.text("清空粘贴队列"), role: .destructive) {
-                    store.clearPasteQueue()
-                }
-                .disabled(store.pasteQueueCount == 0)
-            }
-            Button {
-                withAnimation(.easeOut(duration: 0.16)) {
-                    store.settings.advancedModeEnabled =
-                        !store.settings.resolvedAdvancedModeEnabled
-                }
-            } label: {
-                Image(systemName: "line.3.horizontal.decrease")
-                    .font(.system(size: 11, weight: .semibold))
-                    .foregroundStyle(
-                        store.settings.resolvedAdvancedModeEnabled
-                            ? Color.white
-                            : Color.primary
-                    )
-                    .frame(width: 24, height: 22)
-                    .background(
-                        Capsule(style: .continuous)
-                            .fill(
-                                store.settings.resolvedAdvancedModeEnabled
-                                    ? AnyShapeStyle(Color.accentColor)
-                                    : AnyShapeStyle(.quinary)
+                    ForEach(row, id: \.storageValue) { key in
+                        Toggle(
+                            title(for: key),
+                            isOn: Binding(
+                                get: { activeKey == key },
+                                set: { selected in
+                                    if selected { store.settings.activeCategoryKey = key }
+                                }
                             )
-                    )
+                        )
+                        .toggleStyle(.button)
+                        .controlSize(.small)
+                    }
+                    if rowIndex == categoryRows.count - 1 {
+                        Spacer(minLength: 6)
+                        ControlGroup {
+                            Button {
+                                pasteNextQueued()
+                            } label: {
+                                if store.pasteQueueCount > 0 {
+                                    Label(
+                                        "\(store.pasteQueueCount)",
+                                        systemImage: "list.number"
+                                    )
+                                    .monospacedDigit()
+                                } else {
+                                    Image(systemName: "list.number")
+                                }
+                            }
+                            .disabled(store.pasteQueueCount == 0)
+                            .help(L10n.text("粘贴队列中的下一项"))
+                            .accessibilityLabel(L10n.text("粘贴队列"))
+                            .accessibilityValue(
+                                L10n.format(
+                                    "粘贴队列项目数格式",
+                                    store.pasteQueueCount
+                                )
+                            )
+                            .contextMenu {
+                                Button(
+                                    L10n.text("清空粘贴队列"),
+                                    role: .destructive
+                                ) {
+                                    store.clearPasteQueue()
+                                }
+                                .disabled(store.pasteQueueCount == 0)
+                            }
+
+                            Toggle(
+                                isOn: Binding(
+                                    get: {
+                                        store.settings.resolvedAdvancedModeEnabled
+                                    },
+                                    set: {
+                                        store.settings.advancedModeEnabled = $0
+                                    }
+                                )
+                            ) {
+                                Image(systemName: "line.3.horizontal.decrease")
+                            }
+                            .toggleStyle(.button)
+                            .help(L10n.text("高级筛选与排序"))
+                            .accessibilityLabel(L10n.text("高级筛选与排序"))
+                            .accessibilityValue(
+                                L10n.text(
+                                    store.settings.resolvedAdvancedModeEnabled
+                                        ? "已开启"
+                                        : "已关闭"
+                                )
+                            )
+                        }
+                        .controlSize(.small)
+                        .frame(height: ClipboardPanelLayout.segmentedHeight)
+                    }
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
             }
-            .buttonStyle(.plain)
-            .help(L10n.text("高级筛选与排序"))
-            .accessibilityLabel(L10n.text("高级筛选与排序"))
-            .accessibilityValue(
-                L10n.text(store.settings.resolvedAdvancedModeEnabled ? "已开启" : "已关闭")
-            )
         }
     }
 
     private var availableSourceApplications: [ClipboardSourceApplication] {
-        store.sourceApplicationsForFiltering(includeSecrets: mayExposeSecretSources)
+        store.sourceApplicationsForFiltering(
+            key: activeKey,
+            includeSecrets: mayExposeSecretSources
+        )
     }
 
     private var hasUnknownSourceEntries: Bool {
-        store.hasUnknownSourceForFiltering(includeSecrets: mayExposeSecretSources)
+        store.hasUnknownSourceForFiltering(
+            key: activeKey,
+            includeSecrets: mayExposeSecretSources
+        )
     }
 
     private var mayExposeSecretSources: Bool {
         activeKey == .builtin(.password) && activeGate == .open
     }
 
-    private var selectedSourceTitle: String {
-        guard let identifier = store.settings.advancedSourceIdentifier else {
-            return L10n.text("全部来源")
-        }
-        if identifier == ClipboardAdvancedOptions.unknownSourceIdentifier {
-            return L10n.text("未知来源")
-        }
-        return availableSourceApplications
-            .first(where: { $0.stableIdentifier == identifier })?
-            .displayName
-            ?? L10n.text("来源不可用")
-    }
-
     private var advancedFilterBar: some View {
-        HStack(spacing: 8) {
-            Menu {
-                Button {
-                    store.settings.advancedSourceIdentifier = nil
-                } label: {
-                    menuSelectionLabel(
-                        L10n.text("全部来源"),
-                        selected: store.settings.advancedSourceIdentifier == nil
-                    )
-                }
-                if hasUnknownSourceEntries {
-                    Button {
-                        store.settings.advancedSourceIdentifier =
-                            ClipboardAdvancedOptions.unknownSourceIdentifier
-                    } label: {
-                        menuSelectionLabel(
-                            L10n.text("未知来源"),
-                            selected: store.settings.advancedSourceIdentifier
-                                == ClipboardAdvancedOptions.unknownSourceIdentifier
-                        )
-                    }
-                }
-                if !availableSourceApplications.isEmpty { Divider() }
-                ForEach(availableSourceApplications) { application in
-                    Button {
-                        store.settings.advancedSourceIdentifier = application.stableIdentifier
-                    } label: {
-                        menuSelectionLabel(
-                            application.displayName,
-                            selected: store.settings.advancedSourceIdentifier
-                                == application.stableIdentifier
-                        )
-                    }
-                }
-            } label: {
-                Label(selectedSourceTitle, systemImage: "app")
-                    .lineLimit(1)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-            }
-            .menuStyle(.borderlessButton)
-            .frame(maxWidth: .infinity)
-            .help(L10n.text("按来源应用筛选"))
-
-            Menu {
-                ForEach(ClipboardAdvancedSortField.allCases, id: \.self) { field in
-                    Button {
-                        store.settings.advancedSortField = field
-                    } label: {
-                        menuSelectionLabel(
-                            field.displayName,
-                            selected: store.settings.resolvedAdvancedSortField == field
-                        )
-                    }
-                }
-            } label: {
-                Label(
-                    store.settings.resolvedAdvancedSortField.displayName,
-                    systemImage: "arrow.up.arrow.down"
+        HStack(spacing: 6) {
+            Picker(
+                L10n.text("来源"),
+                selection: Binding(
+                    get: { store.settings.advancedSourceIdentifier },
+                    set: { store.settings.advancedSourceIdentifier = $0 }
                 )
-                .lineLimit(1)
+            ) {
+                Text(L10n.text("全部来源")).tag(nil as String?)
+                if hasUnknownSourceEntries {
+                    Text(L10n.text("未知来源"))
+                        .tag(ClipboardAdvancedOptions.unknownSourceIdentifier as String?)
+                }
+                ForEach(availableSourceApplications) { application in
+                    Text(application.displayName)
+                        .tag(application.stableIdentifier as String?)
+                }
             }
-            .menuStyle(.borderlessButton)
+            .pickerStyle(.menu)
+            .labelsHidden()
+            .controlSize(.small)
+            .fixedSize()
+            .help(L10n.text("按来源应用筛选"))
+            .accessibilityLabel(L10n.text("来源"))
+
+            Picker(
+                L10n.text("排序依据"),
+                selection: Binding(
+                    get: { store.settings.resolvedAdvancedSortField },
+                    set: { store.settings.selectAdvancedSortField($0) }
+                )
+            ) {
+                ForEach(ClipboardAdvancedSortField.allCases, id: \.self) { field in
+                    Text(sortPickerTitle(for: field)).tag(field)
+                }
+            }
+            .pickerStyle(.menu)
+            .labelsHidden()
+            .controlSize(.small)
             .fixedSize()
             .help(L10n.text("排序依据"))
-
-            Button {
-                store.settings.advancedSortDirection =
-                    store.settings.resolvedAdvancedSortDirection == .descending
-                    ? .ascending
-                    : .descending
-            } label: {
-                Image(systemName: store.settings.resolvedAdvancedSortDirection.systemImage)
-                    .frame(width: 22, height: 22)
-            }
-            .buttonStyle(.plain)
-            .help(store.settings.resolvedAdvancedSortDirection.displayName)
-            .accessibilityLabel(L10n.text("排序方向"))
+            .accessibilityLabel(L10n.text("排序依据"))
             .accessibilityValue(store.settings.resolvedAdvancedSortDirection.displayName)
+            Spacer(minLength: 0)
         }
-        .font(.system(size: 11))
-        .padding(.horizontal, 8)
-        .background(.quinary, in: RoundedRectangle(cornerRadius: 7))
+        .frame(maxWidth: .infinity, alignment: .leading)
     }
 
-    @ViewBuilder
-    private func menuSelectionLabel(_ title: String, selected: Bool) -> some View {
-        if selected {
-            Label(title, systemImage: "checkmark")
-        } else {
-            Text(title)
+    private func sortPickerTitle(for field: ClipboardAdvancedSortField) -> String {
+        guard field == store.settings.resolvedAdvancedSortField else {
+            return field.displayName
         }
+        let arrow = store.settings.resolvedAdvancedSortDirection == .ascending
+            ? "↑"
+            : "↓"
+        return "\(field.displayName) \(arrow)"
     }
 
     @ViewBuilder
@@ -2189,6 +2352,15 @@ struct ClipboardHistoryPanelView: View {
         } catch {
             queueError = error.localizedDescription
         }
+    }
+
+    private var queueErrorPresented: Binding<Bool> {
+        Binding(
+            get: { queueError != nil },
+            set: { isPresented in
+                if !isPresented { queueError = nil }
+            }
+        )
     }
 
     private func pasteNextQueued() {

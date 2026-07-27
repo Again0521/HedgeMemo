@@ -8,10 +8,8 @@ public final class ClipboardHistoryStore: ObservableObject {
     @Published public private(set) var entries: [ClipboardEntry] = [] {
         didSet {
             orderedMemo.removeAll(keepingCapacity: true)
-            sourceApplicationMemo = nil
-            sourceApplicationIncludingSecretsMemo = nil
-            hasUnknownSourceMemo = nil
-            hasUnknownSourceIncludingSecretsMemo = nil
+            sourceApplicationMemos.removeAll(keepingCapacity: true)
+            hasUnknownSourceMemos.removeAll(keepingCapacity: true)
         }
     }
     /// `orderedEntries` is asked several times per UI pass (rows, key handling,
@@ -19,10 +17,8 @@ public final class ClipboardHistoryStore: ObservableObject {
     /// Results are memoized per (category, query) until entries or settings
     /// change. Not published: reads during view rendering must stay silent.
     private var orderedMemo: [String: [ClipboardEntry]] = [:]
-    private var sourceApplicationMemo: [ClipboardSourceApplication]?
-    private var sourceApplicationIncludingSecretsMemo: [ClipboardSourceApplication]?
-    private var hasUnknownSourceMemo: Bool?
-    private var hasUnknownSourceIncludingSecretsMemo: Bool?
+    private var sourceApplicationMemos: [String: [ClipboardSourceApplication]] = [:]
+    private var hasUnknownSourceMemos: [String: Bool] = [:]
     // Mutating `settings` inside its own didSet re-enters the @Published setter;
     // without this guard normalize() recurses until the stack overflows.
     private var isNormalizingSettings = false
@@ -30,6 +26,8 @@ public final class ClipboardHistoryStore: ObservableObject {
         didSet {
             // Category enable/order/custom-pattern changes all affect ordering.
             orderedMemo.removeAll(keepingCapacity: true)
+            sourceApplicationMemos.removeAll(keepingCapacity: true)
+            hasUnknownSourceMemos.removeAll(keepingCapacity: true)
             guard !isNormalizingSettings else { return }
             isNormalizingSettings = true
             settings.normalize()
@@ -226,42 +224,48 @@ public final class ClipboardHistoryStore: ObservableObject {
     /// renders. Build the de-duplicated list only when entries change instead
     /// of rescanning a 10,000-item history for every pointer movement.
     public func sourceApplicationsForFiltering(
+        key: ClipboardCategoryKey? = nil,
         includeSecrets: Bool = false
     ) -> [ClipboardSourceApplication] {
-        if includeSecrets, let sourceApplicationIncludingSecretsMemo {
-            return sourceApplicationIncludingSecretsMemo
-        }
-        if !includeSecrets, let sourceApplicationMemo { return sourceApplicationMemo }
+        let memoKey = sourceFilterMemoKey(key: key, includeSecrets: includeSecrets)
+        if let memo = sourceApplicationMemos[memoKey] { return memo }
         var seen = Set<String>()
+        let customs = settings.customCategories ?? []
         let applications = entries
-            .filter { includeSecrets || !$0.isSecret }
+            .filter {
+                (includeSecrets || !$0.isSecret)
+                    && $0.matches(key: key, customCategories: customs)
+            }
             .compactMap(\.sourceApplication)
             .filter { seen.insert($0.stableIdentifier).inserted }
             .sorted {
                 $0.displayName.localizedCaseInsensitiveCompare($1.displayName) == .orderedAscending
             }
-        if includeSecrets {
-            sourceApplicationIncludingSecretsMemo = applications
-        } else {
-            sourceApplicationMemo = applications
-        }
+        sourceApplicationMemos[memoKey] = applications
         return applications
     }
 
-    public func hasUnknownSourceForFiltering(includeSecrets: Bool = false) -> Bool {
-        if includeSecrets, let hasUnknownSourceIncludingSecretsMemo {
-            return hasUnknownSourceIncludingSecretsMemo
-        }
-        if !includeSecrets, let hasUnknownSourceMemo { return hasUnknownSourceMemo }
+    public func hasUnknownSourceForFiltering(
+        key: ClipboardCategoryKey? = nil,
+        includeSecrets: Bool = false
+    ) -> Bool {
+        let memoKey = sourceFilterMemoKey(key: key, includeSecrets: includeSecrets)
+        if let memo = hasUnknownSourceMemos[memoKey] { return memo }
+        let customs = settings.customCategories ?? []
         let value = entries.contains {
-            (includeSecrets || !$0.isSecret) && $0.sourceApplication == nil
+            (includeSecrets || !$0.isSecret)
+                && $0.sourceApplication == nil
+                && $0.matches(key: key, customCategories: customs)
         }
-        if includeSecrets {
-            hasUnknownSourceIncludingSecretsMemo = value
-        } else {
-            hasUnknownSourceMemo = value
-        }
+        hasUnknownSourceMemos[memoKey] = value
         return value
+    }
+
+    private func sourceFilterMemoKey(
+        key: ClipboardCategoryKey?,
+        includeSecrets: Bool
+    ) -> String {
+        "\(includeSecrets ? 1 : 0)|\(key?.storageValue ?? "*")"
     }
 
     /// Returns plaintext for an already-authorized UI projection without

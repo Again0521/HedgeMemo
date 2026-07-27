@@ -468,13 +468,29 @@ private struct CategoryBarView: View {
     var body: some View {
         ScrollView(.horizontal, showsIndicators: false) {
             HStack(spacing: 6) {
-                CategoryChip(title: L10n.text("全部"), isSelected: selectedCategoryID == nil) {
-                    selectedCategoryID = nil
-                }
+                Toggle(
+                    L10n.text("全部"),
+                    isOn: Binding(
+                        get: { selectedCategoryID == nil },
+                        set: { selected in
+                            if selected { selectedCategoryID = nil }
+                        }
+                    )
+                )
+                .toggleStyle(.button)
+                .controlSize(.small)
                 ForEach(categories) { category in
-                    CategoryChip(title: category.name, isSelected: selectedCategoryID == category.id) {
-                        selectedCategoryID = category.id
-                    }
+                    Toggle(
+                        category.name,
+                        isOn: Binding(
+                            get: { selectedCategoryID == category.id },
+                            set: { selected in
+                                if selected { selectedCategoryID = category.id }
+                            }
+                        )
+                    )
+                    .toggleStyle(.button)
+                    .controlSize(.small)
                     .contextMenu {
                         Button(L10n.text("重命名")) { onRename(category) }
                         Divider()
