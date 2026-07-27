@@ -196,20 +196,46 @@ final class ClipboardHistoryPolicyTests: XCTestCase {
     /// copy of every candidate. Surrounding whitespace must stay irrelevant,
     /// and the placeholders shown for blank, unlabelled and masked entries must
     /// still be searchable.
+    ///
+    /// Those placeholders are localized, so the queries come from `L10n` rather
+    /// than from literals: a user searches for the words in front of them, and
+    /// the assertion has to mean the same thing under either interface
+    /// language. Hard-coding the Simplified Chinese wording passed only on a
+    /// Chinese machine and failed on an English one.
     func testQueryFilterMatchesStoredTextAndDisplayPlaceholders() {
+        let blankPlaceholder = L10n.text("空白文字")
+        let imagePlaceholder = L10n.text("图片")
+        let secretPlaceholder = L10n.text("已隐藏的密码")
+
         XCTAssertTrue(Fixture.text("\n\t  发票报销  \n", hash: "pad").matches(query: "发票"))
-        XCTAssertTrue(Fixture.text("   \n  ", hash: "blank").matches(query: "空白文字"))
+        XCTAssertTrue(Fixture.text("   \n  ", hash: "blank").matches(query: blankPlaceholder))
         XCTAssertFalse(Fixture.text("   \n  ", hash: "blank2").matches(query: "发票"))
-        XCTAssertTrue(Fixture.image(hash: "unlabelled").matches(query: "图片"))
+        XCTAssertTrue(Fixture.image(hash: "unlabelled").matches(query: imagePlaceholder))
 
         var labelled = Fixture.image(hash: "labelled")
         labelled.text = "会议截图"
         XCTAssertTrue(labelled.matches(query: "会议"))
-        XCTAssertFalse(labelled.matches(query: "图片"), "a labelled image searches its own note")
+        XCTAssertFalse(
+            labelled.matches(query: imagePlaceholder),
+            "a labelled image searches its own note"
+        )
 
         let secret = Fixture.text("ciphertext-abcdef", hash: "secret", origin: .concealedPassword)
-        XCTAssertTrue(secret.matches(query: "已隐藏"))
+        XCTAssertTrue(secret.matches(query: secretPlaceholder))
         XCTAssertFalse(secret.matches(query: "ciphertext"), "search must never reach stored ciphertext")
+    }
+
+    /// The placeholders above are only meaningful if they really differ per
+    /// language — otherwise the test above would pass without proving anything.
+    func testDisplayPlaceholdersAreLocalized() {
+        for key in ["空白文字", "图片", "已隐藏的密码"] {
+            XCTAssertEqual(L10n.text(key, language: .simplifiedChinese), key)
+            XCTAssertNotEqual(
+                L10n.text(key, language: .english),
+                key,
+                "\(key) must have an English translation"
+            )
+        }
     }
 
     /// Desktop notes occupy a fixed slot in the list. A search shortens the
