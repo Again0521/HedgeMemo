@@ -8,15 +8,18 @@ public final class ClipboardHistoryRepository: @unchecked Sendable {
     public let originalFormatsURL: URL
     private let snapshotURL: URL
     private let fileManager: FileManager
+    private let snapshotIO: RepositoryIOCoordinator
 
     public static let `default` = ClipboardHistoryRepository()
 
     public init(rootURL: URL? = nil, fileManager: FileManager = .default) {
+        let resolvedRoot = rootURL ?? AppSupportLocation.defaultRoot(fileManager: fileManager)
         self.fileManager = fileManager
-        self.rootURL = rootURL ?? AppSupportLocation.defaultRoot(fileManager: fileManager)
+        self.rootURL = resolvedRoot
         self.imagesURL = self.rootURL.appendingPathComponent("clipboard-images", isDirectory: true)
         self.originalFormatsURL = self.rootURL.appendingPathComponent("clipboard-formats", isDirectory: true)
         self.snapshotURL = self.rootURL.appendingPathComponent("clipboard-history.json")
+        self.snapshotIO = .shared(scope: "clipboard", rootURL: resolvedRoot)
     }
 
     public func prepare() throws {
@@ -27,24 +30,52 @@ public final class ClipboardHistoryRepository: @unchecked Sendable {
     /// True once history has ever been written. Used to tell a fresh install
     /// (no snapshot yet) from an update by a user who already has clipboard data.
     public var hasPersistedHistory: Bool {
-        fileManager.fileExists(atPath: snapshotURL.path)
+        snapshotIO.sync {
+            fileManager.fileExists(atPath: snapshotURL.path)
+        }
     }
 
     public func load() throws -> ClipboardHistorySnapshot {
-        try prepare()
-        guard fileManager.fileExists(atPath: snapshotURL.path) else { return ClipboardHistorySnapshot() }
-        let data = try Data(contentsOf: snapshotURL)
-        var snapshot = try JSONDecoder.clipboardDecoder.decode(ClipboardHistorySnapshot.self, from: data)
-        snapshot.settings.normalize()
-        return snapshot
+        try snapshotIO.sync {
+            try prepare()
+            guard fileManager.fileExists(atPath: snapshotURL.path) else { return ClipboardHistorySnapshot() }
+            let data = try Data(contentsOf: snapshotURL)
+            var snapshot = try JSONDecoder.clipboardDecoder.decode(ClipboardHistorySnapshot.self, from: data)
+            snapshot.settings.normalize()
+            return snapshot
+        }
     }
 
     public func save(_ snapshot: ClipboardHistorySnapshot) throws {
-        try prepare()
-        var normalized = snapshot
-        normalized.settings.normalize()
-        let data = try JSONEncoder.clipboardEncoder.encode(normalized)
-        try data.write(to: snapshotURL, options: .atomic)
+        try snapshotIO.sync { try saveImmediately(snapshot) }
+    }
+
+    public func saveAsync(
+        _ snapshot: ClipboardHistorySnapshot,
+        completion: @escaping @Sendable (String?) -> Void
+    ) {
+        snapshotIO.async { [self] in
+            do {
+                try saveImmediately(snapshot)
+                completion(nil)
+            } catch {
+                completion(error.localizedDescription)
+            }
+        }
+    }
+
+    public func flushSnapshotWrites() {
+        snapshotIO.flush()
+    }
+
+    private func saveImmediately(_ snapshot: ClipboardHistorySnapshot) throws {
+        try HedgeMemoPerformance.measure("ClipboardSnapshotWrite") {
+            try prepare()
+            var normalized = snapshot
+            normalized.settings.normalize()
+            let data = try JSONEncoder.clipboardEncoder.encode(normalized)
+            try data.write(to: snapshotURL, options: .atomic)
+        }
     }
 
     public func imageURL(for entry: ClipboardEntry) -> URL? {
@@ -58,11 +89,28 @@ public final class ClipboardHistoryRepository: @unchecked Sendable {
         named id: UUID = UUID(),
         fileExtension: String = "png"
     ) throws -> StoredImage {
+        try saveImageData(
+            data,
+            named: id,
+            fileExtension: fileExtension,
+            precomputedContentHash: data.clipboardContentHash
+        )
+    }
+
+    func saveImageData(
+        _ data: Data,
+        named id: UUID = UUID(),
+        fileExtension: String = "png",
+        precomputedContentHash: String
+    ) throws -> StoredImage {
         try prepare()
         let safeExtension = fileExtension.lowercased().trimmingCharacters(in: CharacterSet(charactersIn: "."))
         let fileName = "\(id.uuidString.lowercased()).\(safeExtension.isEmpty ? "png" : safeExtension)"
         try data.write(to: imagesURL.appendingPathComponent(fileName), options: .atomic)
-        return StoredImage(fileName: fileName, contentHash: SHA256.hash(data: data).clipboardHexString)
+        return StoredImage(
+            fileName: fileName,
+            contentHash: precomputedContentHash
+        )
     }
 
     public func removeImage(named fileName: String) throws {

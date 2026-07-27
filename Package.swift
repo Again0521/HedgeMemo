@@ -22,5 +22,6 @@ let package = Package(
         ),
         .executableTarget(name: "HedgeMemoWhitebox", dependencies: ["HedgeMemoCore"]),
         .testTarget(name: "HedgeMemoCoreTests", dependencies: ["HedgeMemoCore"]),
+        .testTarget(name: "HedgeMemoAppTests", dependencies: ["HedgeMemo"]),
     ]
 )

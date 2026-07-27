@@ -29,6 +29,19 @@ final class MemeModelTests: XCTestCase {
         XCTAssertTrue(ocr.matches(query: "%2026%完成"))
     }
 
+    func testOnlyPercentAndSurroundingWhitespaceCanonicalizeToMatchAll() {
+        let wildcard = PercentFuzzyMatcher(query: "  %%%  ")
+        XCTAssertTrue(wildcard.matchesEveryCandidate)
+        XCTAssertEqual(wildcard.cacheKey, "%%%")
+        XCTAssertTrue(wildcard.matches(""))
+        XCTAssertTrue(wildcard.matches("任意内容"))
+
+        let text = PercentFuzzyMatcher(query: "  invoice  ")
+        XCTAssertFalse(text.matchesEveryCandidate)
+        XCTAssertEqual(text.cacheKey, "invoice")
+        XCTAssertTrue(text.matches("Approved Invoice"))
+    }
+
     func testCategoryFilterPreservesSortOrder() {
         let category = UUID()
         let first = Fixture.meme("一", hash: "1", category: category, sortOrder: 0)

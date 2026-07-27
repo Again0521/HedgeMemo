@@ -523,8 +523,8 @@ await MainActor.run {
     )
 
     expect(
-        AppLockSettings().capturesPasswords,
-        "password capture is on by default; the 密码 category is always PIN-gated and encrypted"
+        !AppLockSettings().capturesPasswords,
+        "password capture is off by default and requires explicit opt-in"
     )
     expect(
         AppLockSettings().isCategoryLocked(.builtin(.password)),

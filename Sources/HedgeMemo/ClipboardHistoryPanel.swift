@@ -326,6 +326,10 @@ final class ClipboardHistoryPanelController: NSObject, NSWindowDelegate {
 
     private func show() {
         ImageThumbnailCache.shared.beginInteractiveUse()
+        let key = store.settings.activeCategoryKey
+        if key == .builtin(.password) || lockStore.settings.isCategoryLocked(key) {
+            lockStore.prepareVaultAccess()
+        }
         let panel = panel ?? makePanel()
         self.panel = panel
         let content = ClipboardHistoryPanelView(
@@ -361,7 +365,6 @@ final class ClipboardHistoryPanelController: NSObject, NSWindowDelegate {
             // active appearance.
             PanelMaterialHost.replace(content, in: mainSurface, usesWindowMaterial: false)
         }
-        let key = store.settings.activeCategoryKey
         // A locked category shows the PIN gate, not a list, so its height comes
         // from the gate. Sizing from the (hidden) entries here made the panel
         // open at the wrong height and then jump as soon as the view reported
@@ -1938,6 +1941,13 @@ struct ClipboardHistoryPanelView: View {
         )
     }
 
+    private func selectCategory(_ key: ClipboardCategoryKey) {
+        if key == .builtin(.password) || lockStore.settings.isCategoryLocked(key) {
+            lockStore.prepareVaultAccess()
+        }
+        store.settings.activeCategoryKey = key
+    }
+
     private var categoryBar: some View {
         VStack(alignment: .leading, spacing: ClipboardCategoryBarMetrics.lineSpacing) {
             ForEach(Array(categoryRows.enumerated()), id: \.offset) { rowIndex, row in
@@ -1948,7 +1958,7 @@ struct ClipboardHistoryPanelView: View {
                             isOn: Binding(
                                 get: { activeKey == key },
                                 set: { selected in
-                                    if selected { store.settings.activeCategoryKey = key }
+                                    if selected { selectCategory(key) }
                                 }
                             )
                         )

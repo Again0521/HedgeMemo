@@ -94,7 +94,13 @@ final class ScreenshotService: NSObject {
     }
 
     private static func windowUnderPointer() -> CapturableWindow? {
-        guard let info = CGWindowListCopyWindowInfo([.optionOnScreenOnly, .excludeDesktopElements], kCGNullWindowID) as? [[String: Any]] else {
+        let windowInfo = HedgeMemoPerformance.measure("SmartWindowEnumeration") {
+            CGWindowListCopyWindowInfo(
+                [.optionOnScreenOnly, .excludeDesktopElements],
+                kCGNullWindowID
+            )
+        }
+        guard let info = windowInfo as? [[String: Any]] else {
             return nil
         }
         let point = appKitToQuartz(NSEvent.mouseLocation)
@@ -282,10 +288,22 @@ private final class SmartWindowPickerController {
 }
 
 private final class SmartWindowPickerView: NSView {
+    /// A display cannot present more than one border update per frame. Coalescing
+    /// high-rate mouse events here avoids enumerating every on-screen window
+    /// hundreds of times per second without changing visible tracking cadence.
     private let windowProvider: () -> CapturableWindow?
     private let highlightRect: (CGRect) -> CGRect
     private let onComplete: (CapturableWindow?) -> Void
     private var target: CapturableWindow?
+    private var pendingRefresh: DispatchWorkItem?
+    private var lastRefreshUptime: TimeInterval = 0
+
+    private var refreshInterval: TimeInterval {
+        // Respect ProMotion and high-refresh external displays. The overlay spans
+        // every screen, so use the fastest active screen rather than assuming 60Hz.
+        let framesPerSecond = NSScreen.screens.map(\.maximumFramesPerSecond).max() ?? 60
+        return 1.0 / Double(max(framesPerSecond, 1))
+    }
 
     init(
         frame frameRect: NSRect,
@@ -311,7 +329,15 @@ private final class SmartWindowPickerView: NSView {
         super.viewDidMoveToWindow()
         window?.makeFirstResponder(self)
         window?.acceptsMouseMovedEvents = true
-        refreshTarget()
+        refreshTargetImmediately()
+    }
+
+    override func viewWillMove(toWindow newWindow: NSWindow?) {
+        if newWindow == nil {
+            pendingRefresh?.cancel()
+            pendingRefresh = nil
+        }
+        super.viewWillMove(toWindow: newWindow)
     }
 
     override func updateTrackingAreas() {
@@ -325,10 +351,13 @@ private final class SmartWindowPickerView: NSView {
     }
 
     override func mouseMoved(with event: NSEvent) {
-        refreshTarget()
+        scheduleTargetRefresh()
     }
 
     override func mouseDown(with event: NSEvent) {
+        // Mouse-down is authoritative even if it lands between display-cadence
+        // refreshes: resolve once now so capture and visible target cannot diverge.
+        refreshTargetImmediately()
         onComplete(target)
     }
 
@@ -340,9 +369,42 @@ private final class SmartWindowPickerView: NSView {
         }
     }
 
-    private func refreshTarget() {
-        target = windowProvider()
-        needsDisplay = true
+    private func scheduleTargetRefresh() {
+        guard pendingRefresh == nil else { return }
+        let elapsed = ProcessInfo.processInfo.systemUptime - lastRefreshUptime
+        let delay = max(0, refreshInterval - elapsed)
+        let work = DispatchWorkItem { [weak self] in
+            guard let self else { return }
+            self.pendingRefresh = nil
+            self.refreshTargetImmediately()
+        }
+        pendingRefresh = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: work)
+    }
+
+    private func refreshTargetImmediately() {
+        pendingRefresh?.cancel()
+        pendingRefresh = nil
+        lastRefreshUptime = ProcessInfo.processInfo.systemUptime
+
+        let previousSelection = target.map { highlightRect($0.bounds) }
+        let next = windowProvider()
+        let nextSelection = next.map { highlightRect($0.bounds) }
+        guard target?.id != next?.id || previousSelection != nextSelection else { return }
+
+        target = next
+        switch (previousSelection, nextSelection) {
+        case (nil, nil):
+            return
+        case (nil, _), (_, nil):
+            // Creating or removing the only cut-out changes the presentation of
+            // the dimming overlay, so request a complete redraw.
+            needsDisplay = true
+        case (let old?, let new?):
+            // Everywhere else the dimming is unchanged. Repaint only the previous
+            // and next holes plus their antialiased borders.
+            setNeedsDisplay(old.union(new).insetBy(dx: -6, dy: -6))
+        }
     }
 
     override func draw(_ dirtyRect: NSRect) {

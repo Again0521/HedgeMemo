@@ -8,33 +8,37 @@ public struct PercentFuzzyMatcher: Sendable {
     private let pattern: String
     private let fragments: [String]
     private let hasWildcard: Bool
+    /// Empty queries and patterns made only from `%` accept every candidate.
+    /// Exposing this lets collection filters skip candidate-string preparation
+    /// entirely — important for blank searches over a large clipboard history.
+    public let matchesEveryCandidate: Bool
+    /// Canonical form used by presentation caches. Queries differing only in
+    /// surrounding whitespace have identical matching semantics.
+    public var cacheKey: String { pattern }
 
     public init(query: String) {
         pattern = query.trimmingCharacters(in: .whitespacesAndNewlines)
         hasWildcard = pattern.contains("%")
         fragments = hasWildcard
-            ? pattern.split(separator: "%", omittingEmptySubsequences: false).map(String.init)
+            ? pattern.split(separator: "%").map(String.init)
             : []
+        matchesEveryCandidate = pattern.isEmpty || (hasWildcard && fragments.isEmpty)
     }
 
     public func matches(_ candidate: String) -> Bool {
-        guard !pattern.isEmpty else { return true }
+        guard !matchesEveryCandidate else { return true }
         guard hasWildcard else { return candidate.localizedCaseInsensitiveContains(pattern) }
 
         let options: String.CompareOptions = [.caseInsensitive]
         var cursor = candidate.startIndex
-        var lastMatch: Range<String.Index>?
 
-        for fragment in fragments where !fragment.isEmpty {
+        for fragment in fragments {
             guard let match = candidate.range(of: fragment, options: options, range: cursor..<candidate.endIndex) else {
                 return false
             }
-            lastMatch = match
             cursor = match.upperBound
         }
-
-        // A pattern made only from `%` characters matches everything.
-        return lastMatch != nil || fragments.allSatisfy(\.isEmpty)
+        return true
     }
 
     public static func matches(_ candidate: String, query: String) -> Bool {
@@ -109,13 +113,20 @@ public struct MemeSnapshot: Codable, Sendable {
 public enum MemeFilter {
     public static func apply(_ memes: [MemeItem], categoryID: UUID?, query: String) -> [MemeItem] {
         let matcher = PercentFuzzyMatcher(query: query)
-        return memes
-            .filter { categoryID == nil || $0.categoryID == categoryID }
-            .filter { $0.matches(matcher: matcher) }
-            .sorted { lhs, rhs in
-                if lhs.sortOrder == rhs.sortOrder { return lhs.createdAt < rhs.createdAt }
-                return lhs.sortOrder < rhs.sortOrder
+        var result: [MemeItem] = []
+        result.reserveCapacity(memes.count)
+        for meme in memes {
+            guard categoryID == nil || meme.categoryID == categoryID,
+                  matcher.matchesEveryCandidate || meme.matches(matcher: matcher) else {
+                continue
             }
+            result.append(meme)
+        }
+        result.sort { lhs, rhs in
+            if lhs.sortOrder == rhs.sortOrder { return lhs.createdAt < rhs.createdAt }
+            return lhs.sortOrder < rhs.sortOrder
+        }
+        return result
     }
 }
 
@@ -1233,6 +1244,11 @@ public struct ClipboardHistorySnapshot: Codable, Sendable {
 }
 
 public enum ClipboardHistoryPolicy {
+    package struct SortedPartitions {
+        package var ordinary: [ClipboardEntry]
+        package var desktopPinned: [ClipboardEntry]
+    }
+
     /// Desktop notes occupy a stable section beginning at the tenth visible
     /// position. The first nine regular/list-pinned results keep their familiar
     /// command-number slots; desktop-pinned items are then ordered first-pinned
@@ -1247,23 +1263,88 @@ public enum ClipboardHistoryPolicy {
         customCategories: [CustomClipboardCategory] = [],
         advancedOptions: ClipboardAdvancedOptions? = nil
     ) -> [ClipboardEntry] {
-        let matcher = PercentFuzzyMatcher(query: query)
-        let filtered = entries.filter {
-            $0.matches(matcher: matcher) && $0.matches(key: key, customCategories: customCategories)
-                && (advancedOptions?.matchesSource($0) ?? true)
-        }
-        let desktopPinned = desktopPinnedEntries(filtered)
-        let ordinary = filtered
-            .filter { $0.isDesktopPinned != true }
-            .sorted { lhs, rhs in
-                if lhs.isPinned != rhs.isPinned { return lhs.isPinned && !rhs.isPinned }
-                if lhs.isPinned {
-                    return (lhs.pinnedOrder ?? Int.max) < (rhs.pinnedOrder ?? Int.max)
-                }
-                return advancedOptions?.comesBefore(lhs, rhs) ?? (lhs.createdAt > rhs.createdAt)
+        ordered(
+            sortedPartitions(entries, advancedOptions: advancedOptions),
+            query: query,
+            key: key,
+            customCategories: customCategories,
+            advancedOptions: advancedOptions
+        )
+    }
+
+    /// Sorting is independent of query, category and source selection. Stores
+    /// can retain one transient partition while the panel is open and reuse it
+    /// for each character typed into search.
+    package static func sortedPartitions(
+        _ entries: [ClipboardEntry],
+        advancedOptions: ClipboardAdvancedOptions?
+    ) -> SortedPartitions {
+        var desktopPinned: [ClipboardEntry] = []
+        var ordinary: [ClipboardEntry] = []
+        desktopPinned.reserveCapacity(min(entries.count, 32))
+        ordinary.reserveCapacity(entries.count)
+        for entry in entries {
+            if entry.isDesktopPinned == true {
+                desktopPinned.append(entry)
+            } else {
+                ordinary.append(entry)
             }
+        }
+
+        desktopPinned.sort {
+            let left = $0.desktopPinnedOrder ?? Int.max
+            let right = $1.desktopPinnedOrder ?? Int.max
+            if left != right { return left < right }
+            if $0.updatedAt != $1.updatedAt { return $0.updatedAt < $1.updatedAt }
+            return $0.createdAt < $1.createdAt
+        }
+        ordinary.sort { lhs, rhs in
+            if lhs.isPinned != rhs.isPinned { return lhs.isPinned && !rhs.isPinned }
+            if lhs.isPinned {
+                return (lhs.pinnedOrder ?? Int.max) < (rhs.pinnedOrder ?? Int.max)
+            }
+            return advancedOptions?.comesBefore(lhs, rhs) ?? (lhs.createdAt > rhs.createdAt)
+        }
+        return SortedPartitions(ordinary: ordinary, desktopPinned: desktopPinned)
+    }
+
+    package static func ordered(
+        _ partitions: SortedPartitions,
+        query: String,
+        key: ClipboardCategoryKey?,
+        customCategories: [CustomClipboardCategory],
+        advancedOptions: ClipboardAdvancedOptions?,
+        searchTextByID: [UUID: String]? = nil
+    ) -> [ClipboardEntry] {
+        let matcher = PercentFuzzyMatcher(query: query)
+        var desktopPinned: [ClipboardEntry] = []
+        var ordinary: [ClipboardEntry] = []
+        desktopPinned.reserveCapacity(partitions.desktopPinned.count)
+        ordinary.reserveCapacity(partitions.ordinary.count)
+
+        func matches(_ entry: ClipboardEntry) -> Bool {
+            // Cheap structural predicates go first so category/source filters
+            // can reject an entry before query matching prepares preview text.
+            guard entry.matches(key: key, customCategories: customCategories),
+                  advancedOptions?.matchesSource(entry) ?? true else { return false }
+            if matcher.matchesEveryCandidate { return true }
+            return matcher.matches(searchTextByID?[entry.id] ?? entry.previewText)
+        }
+
+        for entry in partitions.ordinary where matches(entry) {
+            ordinary.append(entry)
+        }
+        for entry in partitions.desktopPinned where matches(entry) {
+            desktopPinned.append(entry)
+        }
+
         let insertion = min(desktopPinnedInsertionIndex, ordinary.count)
-        return Array(ordinary[..<insertion]) + desktopPinned + Array(ordinary[insertion...])
+        var result: [ClipboardEntry] = []
+        result.reserveCapacity(ordinary.count + desktopPinned.count)
+        result.append(contentsOf: ordinary[..<insertion])
+        result.append(contentsOf: desktopPinned)
+        result.append(contentsOf: ordinary[insertion...])
+        return result
     }
 
     public static func pinnedEntries(_ entries: [ClipboardEntry]) -> [ClipboardEntry] {

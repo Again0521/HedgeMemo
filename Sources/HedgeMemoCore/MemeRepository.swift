@@ -19,14 +19,17 @@ public final class MemeRepository: @unchecked Sendable {
     public let imagesURL: URL
     private let snapshotURL: URL
     private let fileManager: FileManager
+    private let snapshotIO: RepositoryIOCoordinator
 
     public static let `default` = MemeRepository()
 
     public init(rootURL: URL? = nil, fileManager: FileManager = .default) {
+        let resolvedRoot = rootURL ?? AppSupportLocation.defaultRoot(fileManager: fileManager)
         self.fileManager = fileManager
-        self.rootURL = rootURL ?? AppSupportLocation.defaultRoot(fileManager: fileManager)
+        self.rootURL = resolvedRoot
         self.imagesURL = self.rootURL.appendingPathComponent("images", isDirectory: true)
         self.snapshotURL = self.rootURL.appendingPathComponent("library.json")
+        self.snapshotIO = .shared(scope: "memes", rootURL: resolvedRoot)
     }
 
     public func prepare() throws {
@@ -36,20 +39,48 @@ public final class MemeRepository: @unchecked Sendable {
     /// True once a library has ever been written. Used to tell a fresh install
     /// (no snapshot yet) from an update by a user who already has memes.
     public var hasPersistedLibrary: Bool {
-        fileManager.fileExists(atPath: snapshotURL.path)
+        snapshotIO.sync {
+            fileManager.fileExists(atPath: snapshotURL.path)
+        }
     }
 
     public func load() throws -> MemeSnapshot {
-        try prepare()
-        guard fileManager.fileExists(atPath: snapshotURL.path) else { return MemeSnapshot() }
-        let data = try Data(contentsOf: snapshotURL)
-        return try JSONDecoder.memeDecoder.decode(MemeSnapshot.self, from: data)
+        try snapshotIO.sync {
+            try prepare()
+            guard fileManager.fileExists(atPath: snapshotURL.path) else { return MemeSnapshot() }
+            let data = try Data(contentsOf: snapshotURL)
+            return try JSONDecoder.memeDecoder.decode(MemeSnapshot.self, from: data)
+        }
     }
 
     public func save(_ snapshot: MemeSnapshot) throws {
-        try prepare()
-        let data = try JSONEncoder.memeEncoder.encode(snapshot)
-        try data.write(to: snapshotURL, options: .atomic)
+        try snapshotIO.sync { try saveImmediately(snapshot) }
+    }
+
+    public func saveAsync(
+        _ snapshot: MemeSnapshot,
+        completion: @escaping @Sendable (String?) -> Void
+    ) {
+        snapshotIO.async { [self] in
+            do {
+                try saveImmediately(snapshot)
+                completion(nil)
+            } catch {
+                completion(error.localizedDescription)
+            }
+        }
+    }
+
+    public func flushSnapshotWrites() {
+        snapshotIO.flush()
+    }
+
+    private func saveImmediately(_ snapshot: MemeSnapshot) throws {
+        try HedgeMemoPerformance.measure("MemeSnapshotWrite") {
+            try prepare()
+            let data = try JSONEncoder.memeEncoder.encode(snapshot)
+            try data.write(to: snapshotURL, options: .atomic)
+        }
     }
 
     public func imageURL(for meme: MemeItem) -> URL {
@@ -62,11 +93,28 @@ public final class MemeRepository: @unchecked Sendable {
         named id: UUID = UUID(),
         fileExtension: String = "png"
     ) throws -> StoredImage {
+        try saveImageData(
+            data,
+            named: id,
+            fileExtension: fileExtension,
+            precomputedContentHash: SHA256.hash(data: data).hexString
+        )
+    }
+
+    func saveImageData(
+        _ data: Data,
+        named id: UUID = UUID(),
+        fileExtension: String = "png",
+        precomputedContentHash: String
+    ) throws -> StoredImage {
         try prepare()
         let safeExtension = fileExtension.lowercased().trimmingCharacters(in: CharacterSet(charactersIn: "."))
         let fileName = "\(id.uuidString.lowercased()).\(safeExtension.isEmpty ? "png" : safeExtension)"
         try data.write(to: imagesURL.appendingPathComponent(fileName), options: .atomic)
-        return StoredImage(fileName: fileName, contentHash: SHA256.hash(data: data).hexString)
+        return StoredImage(
+            fileName: fileName,
+            contentHash: precomputedContentHash
+        )
     }
 
     public func removeImage(named fileName: String) throws {

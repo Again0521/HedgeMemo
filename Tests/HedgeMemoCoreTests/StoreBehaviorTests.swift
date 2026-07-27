@@ -60,6 +60,28 @@ final class StoreBehaviorTests: XCTestCase {
         XCTAssertEqual(try? Data(contentsOf: store.imageURL(for: gif)), Fixture.gifBytes)
     }
 
+    func testImageValidationUsesEncodedContainerWithoutChangingGIFBytes() {
+        XCTAssertTrue(ImageAssetData.isValidImageData(Fixture.gifBytes))
+        XCTAssertFalse(ImageAssetData.isValidImageData(Data("not an image".utf8)))
+        let payload = ImageAssetData(data: Fixture.gifBytes, fileExtension: "png")
+        XCTAssertEqual(payload.fileExtension, "gif")
+        XCTAssertEqual(payload.data, Fixture.gifBytes)
+    }
+
+    func testRepositoryAcceptsPrecomputedImageHash() throws {
+        let repository = MemeRepository(rootURL: tempRoot("precomputed-hash"))
+        let stored = try repository.saveImageData(
+            Fixture.gifBytes,
+            fileExtension: "gif",
+            precomputedContentHash: "already-computed"
+        )
+        XCTAssertEqual(stored.contentHash, "already-computed")
+        XCTAssertEqual(
+            try Data(contentsOf: repository.imagesURL.appendingPathComponent(stored.fileName)),
+            Fixture.gifBytes
+        )
+    }
+
     func testMemeCaptureServiceConsumesClipboardImages() {
         let pasteboard = NSPasteboard.withUniqueName()
         let payload = ImageAssetData(data: Fixture.gifBytes, fileExtension: "gif")
@@ -104,6 +126,43 @@ final class StoreBehaviorTests: XCTestCase {
             XCTAssertFalse(store.addImageData(payload))
         }
         XCTAssertEqual(store.filteredMemes(query: "").count, 3)
+    }
+
+    func testArchiveImportPublishesAndPersistsOneDeduplicatedBatch() throws {
+        let repository = MemeRepository(rootURL: tempRoot("archive-target"))
+        let store = MemeStore(repository: repository)
+        let imagesURL = tempRoot("archive-images")
+        try FileManager.default.createDirectory(at: imagesURL, withIntermediateDirectories: true)
+
+        let png = try XCTUnwrap(Fixture.solidImage(0.6, size: 9).pngData)
+        try Fixture.gifBytes.write(to: imagesURL.appendingPathComponent("first.gif"))
+        try Fixture.gifBytes.write(to: imagesURL.appendingPathComponent("duplicate.gif"))
+        try png.write(to: imagesURL.appendingPathComponent("second.png"))
+
+        let category = MemeCategory(name: "归档分类")
+        let snapshot = MemeSnapshot(
+            categories: [category],
+            memes: [
+                MemeItem(fileName: "first.gif", contentHash: "stale-a", note: "一", categoryID: category.id),
+                MemeItem(fileName: "duplicate.gif", contentHash: "stale-b", note: "重复", categoryID: category.id),
+                MemeItem(fileName: "second.png", contentHash: "stale-c", note: "二", categoryID: category.id),
+            ]
+        )
+        store.importArchive(
+            MemeArchiveManifest(memeSnapshot: snapshot, clipboardSnapshot: nil),
+            imagesURL: imagesURL
+        )
+
+        XCTAssertEqual(store.categories.map(\.name), ["归档分类"])
+        XCTAssertEqual(store.filteredMemes(query: "").map(\.note), ["一", "二"])
+        XCTAssertEqual(
+            try FileManager.default.contentsOfDirectory(atPath: repository.imagesURL.path).count,
+            2,
+            "duplicate archive bytes must never create a temporary third file"
+        )
+
+        let reloaded = MemeStore(repository: repository)
+        XCTAssertEqual(reloaded.filteredMemes(query: "").map(\.note), ["一", "二"])
     }
 
     func testCopyingAMemeNotifiesSoItStaysOutOfHistory() {
@@ -407,6 +466,26 @@ final class StoreBehaviorTests: XCTestCase {
 
         let reloaded = ClipboardHistoryStore(repository: ClipboardHistoryRepository(rootURL: root))
         XCTAssertEqual(reloaded.entries.first?.text, "持久化后的内容")
+    }
+
+    func testBurstSnapshotWritesFlushLatestGenerationInOrder() {
+        let root = tempRoot("clip-write-order")
+        let repository = ClipboardHistoryRepository(rootURL: root)
+        let store = ClipboardHistoryStore(repository: repository)
+        for index in 0..<40 {
+            XCTAssertTrue(store.addText("突发写入-\(index)"))
+        }
+
+        store.flushPendingSave()
+        let reloaded = ClipboardHistoryStore(
+            repository: ClipboardHistoryRepository(rootURL: root)
+        )
+        XCTAssertEqual(reloaded.entries.count, 40)
+        XCTAssertEqual(
+            reloaded.entries.compactMap(\.text),
+            (0..<40).map { "突发写入-\($0)" },
+            "the final queued generation must contain every mutation in source order"
+        )
     }
 
     func testManualCategoryMovesEntryPersistsAndCanReturnToAutomatic() {

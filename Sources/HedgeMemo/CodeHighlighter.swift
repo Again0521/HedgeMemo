@@ -79,7 +79,9 @@ enum CodeHighlighter {
         }
         let key = "\(theme.rawValue)\u{1}\(code)" as NSString
         if let cached = highlightCache.object(forKey: key) { return cached.value }
-        let result = computeHighlight(code, theme: theme)
+        let result = HedgeMemoPerformance.measure("CodePreviewHighlight") {
+            computeHighlight(code, theme: theme)
+        }
         highlightCache.setObject(HighlightBox(result), forKey: key)
         return result
     }
@@ -102,11 +104,16 @@ enum CodeHighlighter {
         return attributed
     }
 
-    /// Live highlighting for an editable `NSTextView`. Normalizes the whole run
-    /// to the base monospaced font and plain color first (so pasted styling and
-    /// just-typed characters are neutral), then recolors each token class. Cheap
-    /// enough to re-run on every keystroke for clipboard-sized snippets.
-    static func applyHighlighting(to storage: NSTextStorage, baseFont: NSFont, theme: CodeHighlightTheme) {
+    /// Live highlighting for an editable `NSTextView`. A nil edited range
+    /// normalizes and recolors the complete document. A non-nil range is
+    /// expanded to complete lines, preserving identical lexical results for
+    /// documents whose token rules cannot cross a newline.
+    static func applyHighlighting(
+        to storage: NSTextStorage,
+        baseFont: NSFont,
+        theme: CodeHighlightTheme,
+        editedRange: NSRange? = nil
+    ) {
         let text = storage.string
         let full = NSRange(location: 0, length: (text as NSString).length)
         let palette = NSPalette(theme: theme)
@@ -119,16 +126,29 @@ enum CodeHighlighter {
             storage.endEditing()
             return
         }
-        storage.beginEditing()
-        storage.setAttributes([.font: baseFont, .foregroundColor: palette.plain], range: full)
-        applyNS(typePattern, to: storage, in: text, range: full, color: palette.type)
-        applyNS(functionPattern, to: storage, in: text, range: full, color: palette.function)
-        applyNS(annotationPattern, to: storage, in: text, range: full, color: palette.annotation)
-        applyNS(keywordPattern, to: storage, in: text, range: full, color: palette.keyword)
-        applyNS(numberPattern, to: storage, in: text, range: full, color: palette.number)
-        applyNS(stringPattern, to: storage, in: text, range: full, color: palette.string)
-        applyNS(commentPattern, to: storage, in: text, range: full, color: palette.comment)
-        storage.endEditing()
+        let target: NSRange
+        if let editedRange, full.length > 0 {
+            target = CodeHighlightInvalidation.affectedLineRange(in: text, editedRange: editedRange)
+        } else {
+            target = full
+        }
+        let apply = {
+            storage.beginEditing()
+            storage.setAttributes([.font: baseFont, .foregroundColor: palette.plain], range: target)
+            applyNS(typePattern, to: storage, in: text, range: target, color: palette.type)
+            applyNS(functionPattern, to: storage, in: text, range: target, color: palette.function)
+            applyNS(annotationPattern, to: storage, in: text, range: target, color: palette.annotation)
+            applyNS(keywordPattern, to: storage, in: text, range: target, color: palette.keyword)
+            applyNS(numberPattern, to: storage, in: text, range: target, color: palette.number)
+            applyNS(stringPattern, to: storage, in: text, range: target, color: palette.string)
+            applyNS(commentPattern, to: storage, in: text, range: target, color: palette.comment)
+            storage.endEditing()
+        }
+        if editedRange == nil {
+            HedgeMemoPerformance.measure("CodeHighlightFull", operation: apply)
+        } else {
+            HedgeMemoPerformance.measure("CodeHighlightIncremental", operation: apply)
+        }
     }
 
     private static func applyNS(

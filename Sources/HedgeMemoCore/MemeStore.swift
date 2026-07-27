@@ -35,9 +35,12 @@ public final class MemeStore: ObservableObject {
     }
 
     public func filteredMemes(query: String) -> [MemeItem] {
-        let memoKey = (selectedCategoryID?.uuidString ?? "*") + "\u{1}" + query
+        let canonicalQuery = PercentFuzzyMatcher(query: query).cacheKey
+        let memoKey = (selectedCategoryID?.uuidString ?? "*") + "\u{1}" + canonicalQuery
         if let cached = filteredMemo[memoKey] { return cached }
-        let result = MemeFilter.apply(memes, categoryID: selectedCategoryID, query: query)
+        let result = HedgeMemoPerformance.measure("MemeFiltering") {
+            MemeFilter.apply(memes, categoryID: selectedCategoryID, query: canonicalQuery)
+        }
         if filteredMemo.count >= 24 { filteredMemo.removeAll(keepingCapacity: true) }
         filteredMemo[memoKey] = result
         return result
@@ -94,20 +97,24 @@ public final class MemeStore: ObservableObject {
         ocrText: String = ""
     ) -> Bool {
         do {
-            guard NSImage(data: payload.data) != nil else { throw MemeRepositoryError.cannotEncodeImage }
-            let tempStored = try repository.saveImageData(payload.data, fileExtension: payload.fileExtension)
-            guard !memes.contains(where: { $0.contentHash == tempStored.contentHash }) else {
-                try repository.removeImage(named: tempStored.fileName)
-                return false
+            guard ImageAssetData.isValidImageData(payload.data) else {
+                throw MemeRepositoryError.cannotEncodeImage
             }
+            // Check the hash before touching the filesystem. Repeated clipboard
+            // captures no longer write and then delete a complete temporary file.
+            let contentHash = payload.data.clipboardContentHash
+            guard !memes.contains(where: { $0.contentHash == contentHash }) else { return false }
+            let stored = try repository.saveImageData(
+                payload.data,
+                fileExtension: payload.fileExtension,
+                precomputedContentHash: contentHash
+            )
             let targetCategory = categoryID ?? selectedCategoryID
-            let displayNote = note?.trimmingCharacters(in: .whitespacesAndNewlines)
-            let generatedNote = ocrText.trimmingCharacters(in: .whitespacesAndNewlines)
             let nextOrder = (memes.filter { $0.categoryID == targetCategory }.map(\.sortOrder).max() ?? -1) + 1
             memes.append(MemeItem(
-                fileName: tempStored.fileName,
-                contentHash: tempStored.contentHash,
-                note: (displayNote?.isEmpty == false ? displayNote! : (generatedNote.isEmpty ? L10n.text("未命名") : generatedNote)),
+                fileName: stored.fileName,
+                contentHash: stored.contentHash,
+                note: resolvedNote(note, ocrText: ocrText),
                 ocrText: ocrText,
                 categoryID: targetCategory,
                 sortOrder: nextOrder
@@ -218,24 +225,82 @@ public final class MemeStore: ObservableObject {
 
     public func importArchive(_ manifest: MemeArchiveManifest, imagesURL: URL) {
         guard let memeSnapshot = manifest.memeSnapshot else { return }
+
+        // Build the import in local values and publish once. The former loop
+        // called addCategory/addImageData per item, re-encoding the complete
+        // library JSON and invalidating the grid after every single image.
         var categoryMap = [UUID: UUID]()
+        var categoryIDsByName = Dictionary(uniqueKeysWithValues: categories.map { ($0.name, $0.id) })
+        var importedCategories: [MemeCategory] = []
         for category in memeSnapshot.categories {
-            if let existing = categories.first(where: { $0.name == category.name }) {
-                categoryMap[category.id] = existing.id
-            } else if let id = addCategory(name: category.name) {
-                categoryMap[category.id] = id
+            let cleaned = category.name.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !cleaned.isEmpty else { continue }
+            if let existingID = categoryIDsByName[cleaned] {
+                categoryMap[category.id] = existingID
+            } else {
+                let imported = MemeCategory(name: cleaned)
+                importedCategories.append(imported)
+                categoryIDsByName[cleaned] = imported.id
+                categoryMap[category.id] = imported.id
             }
         }
+
+        var knownHashes = Set(memes.map(\.contentHash))
+        var nextOrderByCategory: [UUID?: Int] = [:]
+        for meme in memes {
+            nextOrderByCategory[meme.categoryID] = max(
+                nextOrderByCategory[meme.categoryID] ?? 0,
+                meme.sortOrder + 1
+            )
+        }
+        var importedMemes: [MemeItem] = []
         for meme in memeSnapshot.memes {
             guard let url = MemeArchiveService.safeContainedURL(base: imagesURL, fileName: meme.fileName),
                   let payload = ImageAssetData(fileURL: url) else { continue }
-            _ = addImageData(
-                payload,
-                categoryID: meme.categoryID.flatMap { categoryMap[$0] },
-                note: meme.note,
-                ocrText: meme.ocrText
-            )
+            let contentHash = payload.data.clipboardContentHash
+            guard knownHashes.insert(contentHash).inserted else { continue }
+            do {
+                let stored = try repository.saveImageData(
+                    payload.data,
+                    fileExtension: payload.fileExtension,
+                    precomputedContentHash: contentHash
+                )
+                // Preserve addImageData's existing nil-category behavior: an
+                // uncategorized archive item enters the currently selected group.
+                let targetCategory = meme.categoryID.flatMap { categoryMap[$0] } ?? selectedCategoryID
+                let sortOrder = nextOrderByCategory[targetCategory] ?? 0
+                nextOrderByCategory[targetCategory] = sortOrder + 1
+                importedMemes.append(MemeItem(
+                    fileName: stored.fileName,
+                    contentHash: stored.contentHash,
+                    note: resolvedNote(meme.note, ocrText: meme.ocrText),
+                    ocrText: meme.ocrText,
+                    categoryID: targetCategory,
+                    sortOrder: sortOrder
+                ))
+            } catch {
+                // A failed write must not reserve the hash: another archive entry
+                // with the same bytes may still be importable.
+                knownHashes.remove(contentHash)
+                lastError = error.localizedDescription
+            }
         }
+
+        guard !importedCategories.isEmpty || !importedMemes.isEmpty else { return }
+        if !importedCategories.isEmpty {
+            categories.append(contentsOf: importedCategories)
+        }
+        if !importedMemes.isEmpty {
+            memes.append(contentsOf: importedMemes)
+        }
+        persist()
+    }
+
+    private func resolvedNote(_ note: String?, ocrText: String) -> String {
+        let displayNote = note?.trimmingCharacters(in: .whitespacesAndNewlines)
+        if let displayNote, !displayNote.isEmpty { return displayNote }
+        let generatedNote = ocrText.trimmingCharacters(in: .whitespacesAndNewlines)
+        return generatedNote.isEmpty ? L10n.text("未命名") : generatedNote
     }
 
     /// Assigns `sortOrder` from each item's position in `memes`, making the array
@@ -252,7 +317,16 @@ public final class MemeStore: ObservableObject {
     }
 
     private func persist() {
-        do { try repository.save(snapshot()) }
-        catch { lastError = error.localizedDescription }
+        repository.saveAsync(snapshot()) { [weak self] errorMessage in
+            guard let errorMessage else { return }
+            Task { @MainActor [weak self] in
+                self?.lastError = errorMessage
+            }
+        }
+    }
+
+    /// Durability barrier for application termination and deterministic tests.
+    public func flushPendingSave() {
+        repository.flushSnapshotWrites()
     }
 }

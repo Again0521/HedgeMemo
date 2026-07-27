@@ -20,7 +20,7 @@
 
 HedgeMemo lives in the macOS menu bar. Clipboard history, memes, and screenshot tools stay in one place—ready when you need them and quietly out of the way when you don’t.
 
-Your content is stored on this Mac by default. HedgeMemo asks for system permission only when a screenshot or automatic paste needs it. Copied passwords are stored encrypted and locked away in their own category.
+Your content is stored on this Mac by default. HedgeMemo asks for system permission only when a screenshot or automatic paste needs it. Password copies are not recorded by default; if you opt in, they are stored encrypted and locked in their own category.
 
 One app, three everyday tools: **Clipboard · Memes · Screenshots**.
 
@@ -92,14 +92,14 @@ Any clipboard item can become a desktop note, keeping code, to-do lists, and ref
 
 <img src="Assets/feature-password_en.svg" width="100%" alt="Passwords category with PIN unlock" />
 
-Anything copied from a password manager or a browser password field goes into its own Passwords category. That category always asks for a PIN, which you can create the first time you open it.
+Private copies from password managers and browser password fields are not recorded by default. You can explicitly enable “Record Password Copies” under Settings → General → Security; enabled copies then go into the PIN-protected Passwords category.
 
 - Password text is sealed with AES-GCM before it reaches the disk. The key lives in the system keychain, and values are decrypted temporarily only after the Passwords category is unlocked.
 - Before unlocking, lists, search, and previews show only “Hidden password.” After unlocking, values appear in plain text so you can identify and use them.
 - Beyond passwords, you can lock text, code, screenshots, other categories, and the meme panel.
 - Choose when it re-locks: when the Mac locks, or after 5, 15, or 30 minutes unused.
 - Unlock with Touch ID (with the system password as a fallback). Five wrong PINs start a 10-minute cooldown.
-- Prefer not to keep them at all? Turn off “Record Password Copies” in Settings and they are never stored.
+- “Record Password Copies” is off by default. Only copies made after you explicitly enable it are stored.
 
 Password entries are never pinned to the desktop, and never leave this Mac in an exported ZIP.
 

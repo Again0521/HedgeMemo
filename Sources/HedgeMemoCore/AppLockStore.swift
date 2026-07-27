@@ -26,12 +26,17 @@ public final class AppLockStore: ObservableObject {
     @Published public private(set) var cooldownUntil: Date?
 
     private let defaults: UserDefaults
+    private let pinStateLoader: () -> Bool
     private let key = "HedgeMemo.AppLockSettings"
     private static let persistentSuite = "com.hedgememo.app"
 
-    public init(defaults: UserDefaults? = nil) {
+    public init(
+        defaults: UserDefaults? = nil,
+        pinStateLoader: @escaping () -> Bool = { SecretVault.hasPIN }
+    ) {
         let resolved = defaults ?? UserDefaults(suiteName: Self.persistentSuite) ?? .standard
         self.defaults = resolved
+        self.pinStateLoader = pinStateLoader
         if let data = resolved.data(forKey: key),
            var decoded = try? JSONDecoder().decode(AppLockSettings.self, from: data) {
             decoded.normalize()
@@ -41,25 +46,32 @@ public final class AppLockStore: ObservableObject {
         }
         failedAttempts = resolved.integer(forKey: Self.failedAttemptsKey)
         cooldownUntil = resolved.object(forKey: Self.cooldownUntilKey) as? Date
-        // Password capture became on-by-default after some builds had already
-        // persisted it as off. A stored value would otherwise win forever and
-        // the new default would never reach those installs, so apply it once.
-        if !resolved.bool(forKey: Self.capturedDefaultAppliedKey) {
-            resolved.set(true, forKey: Self.capturedDefaultAppliedKey)
-            settings.capturesPasswords = true
+        // A short-lived build accidentally migrated every existing install to
+        // password capture on. Apply the privacy-safe default once. Afterwards
+        // an explicit user opt-in persists across launches.
+        if !resolved.bool(forKey: Self.passwordCaptureOptOutAppliedKey) {
+            resolved.set(true, forKey: Self.passwordCaptureOptOutAppliedKey)
+            settings.capturesPasswords = false
         }
     }
 
-    private static let capturedDefaultAppliedKey = "HedgeMemo.AppLock.appliedPasswordCaptureDefault"
+    private static let passwordCaptureOptOutAppliedKey = "HedgeMemo.AppLock.appliedPasswordCaptureOptOutDefault"
     private static let failedAttemptsKey = "HedgeMemo.AppLock.failedAttempts"
     private static let cooldownUntilKey = "HedgeMemo.AppLock.cooldownUntil"
 
-    /// Cached because `gateState` is read from SwiftUI bodies on every render,
-    /// and `SecretVault.hasPIN` is a synchronous Keychain query. Hitting the
-    /// keychain once per body pass stalled the render loop — the flicker and
-    /// judder when switching to the 密码 category. Only this type mutates the
-    /// PIN, so the cache cannot go stale behind our back.
-    @Published public private(set) var hasPIN: Bool = SecretVault.hasPIN
+    /// Do not touch the Keychain merely because the application launched.
+    /// Legacy vault items can display a macOS authentication dialog after a
+    /// signed update. The first protected surface or Security settings page
+    /// calls `prepareVaultAccess()` as an explicit user action, then this value
+    /// remains cached for the process lifetime.
+    @Published public private(set) var hasPIN = false
+    private var hasLoadedPINState = false
+
+    public func prepareVaultAccess() {
+        guard !hasLoadedPINState else { return }
+        hasPIN = pinStateLoader()
+        hasLoadedPINState = true
+    }
 
     /// What a protected surface should show right now.
     public enum GateState: Equatable, Sendable {
@@ -96,6 +108,7 @@ public final class AppLockStore: ObservableObject {
 
     private func gate(isProtected: Bool) -> GateState {
         guard isProtected else { return .open }
+        prepareVaultAccess()
         if isSessionUnlocked { return .open }
         return hasPIN ? .needsUnlock : .needsSetup
     }
@@ -110,6 +123,7 @@ public final class AppLockStore: ObservableObject {
     public func setPIN(_ pin: String) throws {
         try SecretVault.setPIN(pin)
         hasPIN = true
+        hasLoadedPINState = true
         failedAttempts = 0
         cooldownUntil = nil
         persistAttemptState()
@@ -120,6 +134,7 @@ public final class AppLockStore: ObservableObject {
     public func removePIN() throws {
         try SecretVault.removePIN()
         hasPIN = false
+        hasLoadedPINState = true
         unlockedAt = nil
         failedAttempts = 0
         cooldownUntil = nil

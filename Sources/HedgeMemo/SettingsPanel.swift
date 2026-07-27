@@ -279,7 +279,7 @@ struct SettingsPanelView: View {
     private var securitySection: some View {
         SettingsSection(
             title: L10n.text("安全"),
-            footer: L10n.text("密码管理器等标记为隐私的复制内容会记录到「密码」分类并加密保存；该分类始终需要 PIN 码解锁。关闭后这类内容将完全不被记录。")
+            footer: L10n.text("默认不记录密码管理器等标记为隐私的复制内容。开启后才会将其加密保存到「密码」分类，且该分类始终需要 PIN 码解锁。")
         ) {
             SettingsActionRow {
                 HStack(spacing: 8) {
@@ -338,6 +338,12 @@ struct SettingsPanelView: View {
                 Toggle(L10n.text("记录密码类内容"), isOn: capturesPasswordsBinding)
                     .labelsHidden()
             }
+        }
+        .onAppear {
+            // The Keychain is inspected only after the user opens this Security
+            // section. Launching the app or viewing unrelated settings must not
+            // raise an update-time authentication dialog.
+            lockStore.prepareVaultAccess()
         }
     }
 

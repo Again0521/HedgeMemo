@@ -40,17 +40,16 @@ public struct AppLockSettings: Codable, Equatable, Sendable {
     /// Whether concealed clipboard content (password managers mark copies with
     /// `org.nspasteboard.ConcealedType`) is recorded at all.
     ///
-    /// On by default: such copies land in the 密码 category, which is always
-    /// PIN-gated and whose text is encrypted at rest, so recording them does not
-    /// expose them the way an ordinary history entry would. Switching this off
-    /// restores the 1.2.0 behaviour of not storing them at all.
+    /// Off by default. Password-manager copies are unusually sensitive, so the
+    /// user must explicitly opt in before they are encrypted and stored in the
+    /// PIN-gated 密码 category.
     public var capturesPasswords: Bool
 
     public init(
         timing: AppLockTiming = .onScreenLock,
         lockedCategoryKeys: [String]? = nil,
         allowsBiometrics: Bool = true,
-        capturesPasswords: Bool = true
+        capturesPasswords: Bool = false
     ) {
         self.timing = timing
         self.lockedCategoryKeys = lockedCategoryKeys
@@ -77,7 +76,7 @@ public struct AppLockSettings: Codable, Equatable, Sendable {
         lockedCategoryKeys = try values.decodeIfPresent([String].self, forKey: .lockedCategoryKeys)
             ?? [ClipboardCategoryKey.builtin(.password).storageValue]
         allowsBiometrics = try values.decodeIfPresent(Bool.self, forKey: .allowsBiometrics) ?? true
-        capturesPasswords = try values.decodeIfPresent(Bool.self, forKey: .capturesPasswords) ?? true
+        capturesPasswords = try values.decodeIfPresent(Bool.self, forKey: .capturesPasswords) ?? false
         normalize()
     }
 

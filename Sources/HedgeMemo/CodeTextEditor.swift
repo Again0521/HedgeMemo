@@ -69,6 +69,7 @@ struct CodeTextEditor: NSViewRepresentable {
         guard let textView = scroll.documentView as? CodeNSTextView else { return }
         context.coordinator.parent = self
         scroll.hasVerticalScroller = showsScrollIndicators
+        let appearanceChanged = textView.baseFont != font || textView.highlightTheme != theme
         textView.baseFont = font
         textView.highlightTheme = theme
         textView.onCancel = onCancel
@@ -76,6 +77,8 @@ struct CodeTextEditor: NSViewRepresentable {
         // on the echo of the user's own edit, which would move the caret.
         if textView.string != text {
             textView.string = text
+            textView.applyHighlighting()
+        } else if appearanceChanged {
             textView.applyHighlighting()
         }
     }
@@ -86,10 +89,22 @@ struct CodeTextEditor: NSViewRepresentable {
 
         init(_ parent: CodeTextEditor) { self.parent = parent }
 
+        func textView(
+            _ textView: NSTextView,
+            shouldChangeTextIn affectedCharRange: NSRange,
+            replacementString: String?
+        ) -> Bool {
+            (textView as? CodeNSTextView)?.prepareHighlightingEdit(
+                affectedRange: affectedCharRange,
+                replacementString: replacementString ?? ""
+            )
+            return true
+        }
+
         func textDidChange(_ notification: Notification) {
             guard let textView = notification.object as? CodeNSTextView else { return }
             parent.text = textView.string
-            textView.applyHighlighting()
+            textView.applyHighlightingAfterEdit()
             textView.refreshSuggestion()
         }
 
@@ -123,10 +138,39 @@ final class CodeNSTextView: NSTextView {
     /// itself changes so that a selection change (arrow keys) reuses them.
     private var wordCacheSource: String?
     private var cachedTokens = InlineCodeCompletion.Tokens()
+    private var pendingHighlightRange: NSRange?
+    private var pendingEditWasLineLocal = false
 
     func applyHighlighting() {
         guard let storage = textStorage else { return }
         CodeHighlighter.applyHighlighting(to: storage, baseFont: baseFont, theme: highlightTheme)
+        pendingHighlightRange = nil
+        pendingEditWasLineLocal = false
+        typingAttributes[.font] = baseFont
+    }
+
+    func prepareHighlightingEdit(affectedRange: NSRange, replacementString: String) {
+        pendingEditWasLineLocal = CodeHighlightInvalidation.supportsLineLocalHighlighting(string)
+        pendingHighlightRange = NSRange(
+            location: affectedRange.location,
+            length: (replacementString as NSString).length
+        )
+    }
+
+    func applyHighlightingAfterEdit() {
+        guard let storage = textStorage else { return }
+        let editedRange = pendingEditWasLineLocal
+            && CodeHighlightInvalidation.supportsLineLocalHighlighting(storage.string)
+            ? pendingHighlightRange
+            : nil
+        CodeHighlighter.applyHighlighting(
+            to: storage,
+            baseFont: baseFont,
+            theme: highlightTheme,
+            editedRange: editedRange
+        )
+        pendingHighlightRange = nil
+        pendingEditWasLineLocal = false
         typingAttributes[.font] = baseFont
     }
 

@@ -8,6 +8,9 @@ public final class ClipboardHistoryStore: ObservableObject {
     @Published public private(set) var entries: [ClipboardEntry] = [] {
         didSet {
             orderedMemo.removeAll(keepingCapacity: true)
+            sortedPartitionMemo = nil
+            searchTextMemo.removeAll(keepingCapacity: true)
+            hasBuiltSearchTextMemo = false
             sourceApplicationMemos.removeAll(keepingCapacity: true)
             hasUnknownSourceMemos.removeAll(keepingCapacity: true)
         }
@@ -17,6 +20,12 @@ public final class ClipboardHistoryStore: ObservableObject {
     /// Results are memoized per (category, query) until entries or settings
     /// change. Not published: reads during view rendering must stay silent.
     private var orderedMemo: [String: [ClipboardEntry]] = [:]
+    private var sortedPartitionMemo: (
+        key: String,
+        value: ClipboardHistoryPolicy.SortedPartitions
+    )?
+    private var searchTextMemo: [UUID: String] = [:]
+    private var hasBuiltSearchTextMemo = false
     private var sourceApplicationMemos: [String: [ClipboardSourceApplication]] = [:]
     private var hasUnknownSourceMemos: [String: Bool] = [:]
     // Mutating `settings` inside its own didSet re-enters the @Published setter;
@@ -26,6 +35,9 @@ public final class ClipboardHistoryStore: ObservableObject {
         didSet {
             // Category enable/order/custom-pattern changes all affect ordering.
             orderedMemo.removeAll(keepingCapacity: true)
+            sortedPartitionMemo = nil
+            searchTextMemo.removeAll(keepingCapacity: true)
+            hasBuiltSearchTextMemo = false
             sourceApplicationMemos.removeAll(keepingCapacity: true)
             hasUnknownSourceMemos.removeAll(keepingCapacity: true)
             guard !isNormalizingSettings else { return }
@@ -202,17 +214,54 @@ public final class ClipboardHistoryStore: ObservableObject {
         advancedOptions: ClipboardAdvancedOptions? = nil
     ) -> [ClipboardEntry] {
         if let key, !settings.isCategoryEnabled(key) { return [] }
+        let canonicalQuery = PercentFuzzyMatcher(query: query).cacheKey
         let memoKey = (key?.storageValue ?? "*")
-            + "\u{1}" + query
+            + "\u{1}" + canonicalQuery
             + "\u{1}" + (advancedOptions?.cacheKey ?? "standard")
         if let cached = orderedMemo[memoKey] { return cached }
-        let result = ClipboardHistoryPolicy.ordered(
-            entries,
-            query: query,
-            key: key,
-            customCategories: settings.customCategories ?? [],
-            advancedOptions: advancedOptions
-        )
+        let result = HedgeMemoPerformance.measure("ClipboardOrdering") {
+            let sortKey: String
+            let sortOptions: ClipboardAdvancedOptions?
+            if let advancedOptions {
+                sortKey = advancedOptions.sortField.rawValue
+                    + "\u{2}" + advancedOptions.sortDirection.rawValue
+                sortOptions = ClipboardAdvancedOptions(
+                    sourceIdentifier: nil,
+                    sortField: advancedOptions.sortField,
+                    sortDirection: advancedOptions.sortDirection
+                )
+            } else {
+                sortKey = "standard"
+                sortOptions = nil
+            }
+            let partitions: ClipboardHistoryPolicy.SortedPartitions
+            if let memo = sortedPartitionMemo, memo.key == sortKey {
+                partitions = memo.value
+            } else {
+                partitions = ClipboardHistoryPolicy.sortedPartitions(
+                    entries,
+                    advancedOptions: sortOptions
+                )
+                sortedPartitionMemo = (sortKey, partitions)
+            }
+            let matcher = PercentFuzzyMatcher(query: canonicalQuery)
+            if !matcher.matchesEveryCandidate, !hasBuiltSearchTextMemo {
+                searchTextMemo.removeAll(keepingCapacity: true)
+                searchTextMemo.reserveCapacity(entries.count)
+                for entry in entries {
+                    searchTextMemo[entry.id] = entry.previewText
+                }
+                hasBuiltSearchTextMemo = true
+            }
+            return ClipboardHistoryPolicy.ordered(
+                partitions,
+                query: canonicalQuery,
+                key: key,
+                customCategories: settings.customCategories ?? [],
+                advancedOptions: advancedOptions,
+                searchTextByID: matcher.matchesEveryCandidate ? nil : searchTextMemo
+            )
+        }
         // Typing a search accumulates one memo entry per query string; keep the
         // table small rather than tracking usage.
         if orderedMemo.count >= 24 { orderedMemo.removeAll(keepingCapacity: true) }
@@ -472,7 +521,11 @@ public final class ClipboardHistoryStore: ObservableObject {
                 persist()
                 return false
             }
-            let stored = try repository.saveImageData(payload.data, fileExtension: payload.fileExtension)
+            let stored = try repository.saveImageData(
+                payload.data,
+                fileExtension: payload.fileExtension,
+                precomputedContentHash: candidate.contentHash
+            )
             entries.append(ClipboardEntry(
                 kind: .image,
                 text: note,
@@ -1037,6 +1090,9 @@ public final class ClipboardHistoryStore: ObservableObject {
     /// full filtered arrays alive while the app is idle.
     public func releaseTransientCaches() {
         orderedMemo.removeAll(keepingCapacity: false)
+        sortedPartitionMemo = nil
+        searchTextMemo.removeAll(keepingCapacity: false)
+        hasBuiltSearchTextMemo = false
     }
 
     /// Preview/self-check only: swap the in-memory list without touching the
@@ -1206,9 +1262,9 @@ public final class ClipboardHistoryStore: ObservableObject {
         catch { lastError = error.localizedDescription }
     }
 
-    /// Writes now and drops any pending coalesced write. Used by every mutation
-    /// except the bursty `markUsed`, so persistence stays synchronous and a
-    /// fresh store reloading the same repository always sees the latest state.
+    /// Enqueues the newest value snapshot and drops any delayed mark-used write.
+    /// JSON encoding and atomic replacement run on the repository's serial I/O
+    /// queue; a reload or explicit flush is a durability barrier.
     private func persist() {
         pendingSaveWork?.cancel()
         pendingSaveWork = nil
@@ -1230,18 +1286,21 @@ public final class ClipboardHistoryStore: ObservableObject {
     /// just-recorded use count is never lost, and available to tests that need
     /// the on-disk snapshot to be current before reloading.
     public func flushPendingSave() {
-        guard pendingSaveWork != nil else { return }
-        pendingSaveWork?.cancel()
-        pendingSaveWork = nil
-        writeSnapshot()
+        if pendingSaveWork != nil {
+            pendingSaveWork?.cancel()
+            pendingSaveWork = nil
+            writeSnapshot()
+        }
+        repository.flushSnapshotWrites()
     }
 
     private func writeSnapshot() {
         guard !isPersistenceDisabled else { return }
-        do {
-            try repository.save(persistableSnapshot())
-        } catch {
-            lastError = error.localizedDescription
+        repository.saveAsync(persistableSnapshot()) { [weak self] errorMessage in
+            guard let errorMessage else { return }
+            Task { @MainActor [weak self] in
+                self?.lastError = errorMessage
+            }
         }
     }
 

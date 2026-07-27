@@ -42,6 +42,11 @@ final class HedgeMemoAppDelegate: NSObject, NSApplicationDelegate {
             DispatchQueue.main.async { services.previewScreenshotEditor(imageURL: imageURL) }
         }
     }
+
+    func applicationWillTerminate(_ notification: Notification) {
+        services?.clipboardStore.flushPendingSave()
+        services?.memeStore.flushPendingSave()
+    }
 }
 
 @main

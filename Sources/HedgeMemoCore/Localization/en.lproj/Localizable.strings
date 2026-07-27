@@ -288,6 +288,7 @@
 "PIN 码至少 4 位" = "A PIN must be at least 4 digits";
 "密码内容会加密保存，仅在复制时解密；列表中始终以隐藏形式显示。" = "Password entries are stored encrypted and decrypted only when copied; the list always shows them masked.";
 "密码管理器等标记为隐私的复制内容会记录到「密码」分类并加密保存；该分类始终需要 PIN 码解锁。关闭后这类内容将完全不被记录。" = "Copies marked private by password managers are recorded into the Passwords category and stored encrypted; that category always requires the PIN. Turn this off to not record them at all.";
+"默认不记录密码管理器等标记为隐私的复制内容。开启后才会将其加密保存到「密码」分类，且该分类始终需要 PIN 码解锁。" = "Private copies from password managers are not recorded by default. Turn this on to store them encrypted in the Passwords category, which always requires the PIN.";
 "需要先设置 PIN 码" = "Set a PIN first";
 "没有密码记录" = "No Passwords";
 "为「密码」设置 PIN 码" = "Set a PIN for Passwords";

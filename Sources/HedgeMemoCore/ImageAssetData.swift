@@ -1,5 +1,6 @@
 import AppKit
 import Foundation
+import ImageIO
 import UniformTypeIdentifiers
 
 /// Original encoded image bytes plus their file format. Keeping the encoded
@@ -15,7 +16,7 @@ public struct ImageAssetData: Sendable {
     }
 
     public init?(fileURL: URL) {
-        guard let data = try? Data(contentsOf: fileURL), NSImage(data: data) != nil else { return nil }
+        guard let data = try? Data(contentsOf: fileURL), Self.isValidImageData(data) else { return nil }
         self.init(data: data, fileExtension: fileURL.pathExtension)
     }
 
@@ -23,7 +24,7 @@ public struct ImageAssetData: Sendable {
     public static func read(from pasteboard: NSPasteboard, allowFileURLs: Bool = true) -> ImageAssetData? {
         let declaredTypes = Set(pasteboard.types ?? [])
         for candidate in pasteboardCandidates where declaredTypes.contains(candidate.type) {
-            if let data = pasteboard.data(forType: candidate.type), NSImage(data: data) != nil {
+            if let data = pasteboard.data(forType: candidate.type), Self.isValidImageData(data) {
                 return ImageAssetData(data: data, fileExtension: candidate.extension)
             }
         }
@@ -42,6 +43,17 @@ public struct ImageAssetData: Sendable {
             }
         }
         return nil
+    }
+
+    /// Reads only the encoded image container instead of instantiating an
+    /// `NSImage`. Capture paths need validation, not a full-size representation;
+    /// display-size decoding remains the thumbnail pipeline's responsibility.
+    public static func isValidImageData(_ data: Data) -> Bool {
+        guard !data.isEmpty,
+              let source = CGImageSourceCreateWithData(data as CFData, nil) else {
+            return false
+        }
+        return CGImageSourceGetCount(source) > 0
     }
 
     @MainActor

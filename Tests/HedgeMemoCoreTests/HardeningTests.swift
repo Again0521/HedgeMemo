@@ -33,6 +33,21 @@ final class HardeningTests: XCTestCase {
         XCTAssertFalse(ClipboardHistoryStore.isPrivatePasteboard(ordinary))
     }
 
+    func testConcealedPasteboardIsNotRecordedWithoutExplicitOptIn() {
+        let store = makeClipboardStore()
+        XCTAssertFalse(store.capturesPasswords)
+        let concealed = NSPasteboard.withUniqueName()
+        concealed.declareTypes(
+            [NSPasteboard.PasteboardType("org.nspasteboard.ConcealedType"), .string],
+            owner: nil
+        )
+        concealed.setString("never-persist-this", forType: .string)
+
+        store.capturePasteboardContents(concealed, source: nil)
+
+        XCTAssertTrue(store.entries.isEmpty)
+    }
+
     // MARK: - Size caps
 
     func testOversizedTextIsNotRecorded() {

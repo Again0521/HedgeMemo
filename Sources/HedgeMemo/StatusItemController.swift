@@ -145,6 +145,9 @@ final class StatusItemController: NSObject {
 
     private func showPopover(relativeTo rect: NSRect, of view: NSView, preferredEdge: NSRectEdge) {
         hideKeyboardMemePanel()
+        if services.lockStore.settings.locksMemePanel {
+            services.lockStore.prepareVaultAccess()
+        }
         installMemeContent()
         ImageThumbnailCache.shared.beginInteractiveUse()
         NSApp.activate(ignoringOtherApps: true)
@@ -157,6 +160,9 @@ final class StatusItemController: NSObject {
     }
 
     private func showKeyboardMemePanel(near mouseLocation: NSPoint) {
+        if services.lockStore.settings.locksMemePanel {
+            services.lockStore.prepareVaultAccess()
+        }
         let panel = keyboardMemePanel ?? makeKeyboardMemePanel()
         keyboardMemePanel = panel
         installKeyboardMemeContent(in: panel)
