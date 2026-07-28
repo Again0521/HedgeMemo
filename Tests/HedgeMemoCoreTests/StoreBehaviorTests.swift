@@ -42,6 +42,169 @@ final class StoreBehaviorTests: XCTestCase {
         XCTAssertEqual(store.filteredMemes(query: "").map(\.note), ["三", "一", "二"])
     }
 
+    func testMemeDragBurstPersistsOnlyFinalSnapshot() {
+        let repository = MemeRepository(rootURL: tempRoot("meme-drag-coalescing"))
+        let store = MemeStore(repository: repository)
+        XCTAssertTrue(store.addImage(Fixture.solidImage(0.1, size: 6), note: "一"))
+        XCTAssertTrue(store.addImage(Fixture.solidImage(0.5, size: 8), note: "二"))
+        XCTAssertTrue(store.addImage(Fixture.solidImage(0.9, size: 10), note: "三"))
+        store.flushPendingSave()
+        let writesBeforeDrag = repository.completedSnapshotWriteCount
+
+        for _ in 0..<20 {
+            let visible = store.filteredMemes(query: "")
+            store.reorder(draggedID: visible[0].id, over: visible[2].id)
+        }
+        store.flushPendingSave()
+
+        XCTAssertEqual(
+            repository.completedSnapshotWriteCount - writesBeforeDrag,
+            1,
+            "live drag updates stay immediate but must replace the full manifest only once"
+        )
+        let reloaded = MemeStore(repository: repository)
+        XCTAssertEqual(reloaded.filteredMemes(query: "").map(\.id), store.filteredMemes(query: "").map(\.id))
+    }
+
+    func testLegacyMemeJSONMigratesToSQLiteAndRemainsAsBackup() throws {
+        let root = tempRoot("meme-sqlite-migration")
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        let legacyURL = root.appendingPathComponent("library.json")
+        let category = MemeCategory(name: "旧分类")
+        let original = MemeSnapshot(
+            categories: [category],
+            memes: [
+                MemeItem(
+                    fileName: "legacy.png",
+                    contentHash: "legacy-meme",
+                    note: "旧表情",
+                    categoryID: category.id
+                )
+            ]
+        )
+        let encoder = JSONEncoder()
+        encoder.dateEncodingStrategy = .iso8601
+        try encoder.encode(original).write(to: legacyURL, options: .atomic)
+
+        let repository = MemeRepository(rootURL: root)
+        let migrated = try repository.load()
+        XCTAssertEqual(migrated.categories.map(\.name), ["旧分类"])
+        XCTAssertEqual(migrated.memes.map(\.note), ["旧表情"])
+        XCTAssertTrue(FileManager.default.fileExists(atPath: repository.databaseURL.path))
+        XCTAssertTrue(FileManager.default.fileExists(atPath: legacyURL.path))
+
+        try encoder.encode(MemeSnapshot()).write(to: legacyURL, options: .atomic)
+        let reloaded = try MemeRepository(rootURL: root).load()
+        XCTAssertEqual(reloaded.memes.map(\.note), ["旧表情"])
+    }
+
+    func testMemeSQLiteSaveOnlyUpsertsChangedRows() throws {
+        let repository = MemeRepository(rootURL: tempRoot("meme-sqlite-delta"))
+        let category = MemeCategory(name: "分类")
+        var snapshot = MemeSnapshot(
+            categories: [category],
+            memes: (0..<50).map {
+                MemeItem(
+                    fileName: "\($0).png",
+                    contentHash: "meme-\($0)",
+                    note: "表情-\($0)",
+                    categoryID: category.id,
+                    sortOrder: $0
+                )
+            }
+        )
+        try repository.save(snapshot)
+        XCTAssertEqual(repository.lastDatabaseMutationCounts.changedCategories, 1)
+        XCTAssertEqual(repository.lastDatabaseMutationCounts.changedMemes, 50)
+
+        snapshot.memes[25].note = "只修改这一条"
+        try repository.save(snapshot)
+        XCTAssertEqual(repository.lastDatabaseMutationCounts.changedCategories, 0)
+        XCTAssertEqual(repository.lastDatabaseMutationCounts.changedMemes, 1)
+        XCTAssertEqual(repository.lastDatabaseMutationCounts.deletedMemes, 0)
+
+        snapshot.memes.removeLast()
+        try repository.save(snapshot)
+        XCTAssertEqual(repository.lastDatabaseMutationCounts.changedMemes, 0)
+        XCTAssertEqual(repository.lastDatabaseMutationCounts.deletedMemes, 1)
+    }
+
+    func testMemeRepositoryPagesWithoutDuplicatesAndPreservesExactSearch() throws {
+        let repository = MemeRepository(rootURL: tempRoot("meme-pages"))
+        let category = MemeCategory(name: "分页")
+        let other = MemeCategory(name: "其他")
+        let memes = (0..<31).map { index in
+            MemeItem(
+                fileName: "\(index).png",
+                contentHash: "page-\(index)",
+                note: index.isMultiple(of: 3) ? "前缀 Java 中段 Script \(index)" : "普通 \(index)",
+                categoryID: index.isMultiple(of: 2) ? category.id : other.id,
+                sortOrder: index / 4,
+                createdAt: Date(timeIntervalSince1970: TimeInterval(index))
+            )
+        }
+        try repository.save(MemeSnapshot(categories: [category, other], memes: memes))
+
+        var cursor: MemePageCursor?
+        var loaded: [MemeItem] = []
+        repeat {
+            let page = try repository.loadPage(
+                categoryID: category.id,
+                after: cursor,
+                limit: 5
+            )
+            loaded.append(contentsOf: page.items)
+            cursor = page.nextCursor
+        } while cursor != nil
+
+        let expected = MemeFilter.apply(memes, categoryID: category.id, query: "")
+        XCTAssertEqual(loaded.map(\.id), expected.map(\.id))
+        XCTAssertEqual(Set(loaded.map(\.id)).count, loaded.count)
+        XCTAssertEqual(try repository.memeCount(categoryID: category.id), expected.count)
+
+        let fuzzy = try repository.loadPage(query: "jav%script", limit: 100)
+        XCTAssertEqual(
+            fuzzy.items.map(\.id),
+            MemeFilter.apply(memes, categoryID: nil, query: "jav%script").map(\.id)
+        )
+        XCTAssertNil(fuzzy.nextCursor)
+        XCTAssertEqual(
+            try repository.memeCount(query: "jav%script"),
+            fuzzy.items.count
+        )
+    }
+
+    func testMemeStoreCommonEditsUseSingleRowDeltas() throws {
+        let repository = MemeRepository(rootURL: tempRoot("meme-store-deltas"))
+        let store = MemeStore(repository: repository)
+        let categoryID = try XCTUnwrap(store.addCategory(name: "常用"))
+        store.flushPendingSave()
+        XCTAssertEqual(repository.lastDatabaseMutationCounts.changedCategories, 1)
+        XCTAssertEqual(repository.lastDatabaseMutationCounts.changedMemes, 0)
+
+        XCTAssertTrue(
+            store.addImage(
+                Fixture.solidImage(0.4, size: 8),
+                categoryID: categoryID,
+                note: "初始备注"
+            )
+        )
+        store.flushPendingSave()
+        XCTAssertEqual(repository.lastDatabaseMutationCounts.changedCategories, 0)
+        XCTAssertEqual(repository.lastDatabaseMutationCounts.changedMemes, 1)
+
+        let memeID = try XCTUnwrap(store.memes.first?.id)
+        store.updateNote(id: memeID, note: "修改后")
+        store.flushPendingSave()
+        XCTAssertEqual(repository.lastDatabaseMutationCounts.changedCategories, 0)
+        XCTAssertEqual(repository.lastDatabaseMutationCounts.changedMemes, 1)
+        XCTAssertEqual(
+            MemeStore(repository: MemeRepository(rootURL: repository.rootURL))
+                .memes.first?.note,
+            "修改后"
+        )
+    }
+
     func testDuplicateMemeImageIsRejected() {
         let store = makeMemeStore()
         let image = Fixture.solidImage(0.3, size: 7)
@@ -488,6 +651,28 @@ final class StoreBehaviorTests: XCTestCase {
         )
     }
 
+    func testClipboardArchiveBatchWritesOneSnapshot() throws {
+        let repository = ClipboardHistoryRepository(rootURL: tempRoot("clip-import-coalescing"))
+        let store = ClipboardHistoryStore(repository: repository)
+        let imported = (0..<40).map {
+            ClipboardEntry(kind: .text, text: "归档-\($0)", contentHash: "stale-\($0)")
+        }
+        let emptyAssets = tempRoot("clip-import-empty-assets")
+        try FileManager.default.createDirectory(at: emptyAssets, withIntermediateDirectories: true)
+
+        try store.importArchive(
+            ClipboardHistorySnapshot(entries: imported),
+            imagesURL: emptyAssets,
+            originalFormatsURL: emptyAssets
+        )
+        store.flushPendingSave()
+
+        XCTAssertEqual(repository.completedSnapshotWriteCount, 1)
+        XCTAssertEqual(store.entries.count, 40)
+        let reloaded = ClipboardHistoryStore(repository: repository)
+        XCTAssertEqual(reloaded.entries.compactMap(\.text), imported.compactMap(\.text))
+    }
+
     func testManualCategoryMovesEntryPersistsAndCanReturnToAutomatic() {
         let root = tempRoot("clip-manual-category")
         let repository = ClipboardHistoryRepository(rootURL: root)
@@ -586,6 +771,110 @@ final class StoreBehaviorTests: XCTestCase {
         XCTAssertFalse(memeRepo.hasPersistedLibrary)
         XCTAssertTrue(memeStore.addImage(Fixture.solidImage(0.3, size: 6), note: "图"))
         XCTAssertTrue(memeRepo.hasPersistedLibrary)
+    }
+
+    func testLegacyClipboardJSONMigratesToSQLiteAndRemainsAsBackup() throws {
+        let root = tempRoot("clip-sqlite-migration")
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        let legacyURL = root.appendingPathComponent("clipboard-history.json")
+        let original = ClipboardHistorySnapshot(entries: [
+            ClipboardEntry(kind: .text, text: "旧数据", contentHash: "legacy")
+        ])
+        let encoder = JSONEncoder()
+        encoder.dateEncodingStrategy = .iso8601
+        try encoder.encode(original).write(to: legacyURL, options: .atomic)
+        // Simulate termination after the SQLite file was created but before
+        // the migration transaction committed its initialization marker.
+        try Data().write(to: root.appendingPathComponent("clipboard-history.sqlite3"))
+
+        let repository = ClipboardHistoryRepository(rootURL: root)
+        let migrated = try repository.load()
+        XCTAssertEqual(migrated.entries.compactMap(\.text), ["旧数据"])
+        XCTAssertTrue(FileManager.default.fileExists(atPath: repository.databaseURL.path))
+        XCTAssertTrue(
+            FileManager.default.fileExists(atPath: legacyURL.path),
+            "the source JSON remains available as a migration backup"
+        )
+
+        // Once migration succeeds, SQLite is canonical even if the old backup
+        // later contains a different snapshot.
+        try encoder.encode(ClipboardHistorySnapshot()).write(to: legacyURL, options: .atomic)
+        let reloaded = try ClipboardHistoryRepository(rootURL: root).load()
+        XCTAssertEqual(reloaded.entries.compactMap(\.text), ["旧数据"])
+    }
+
+    func testClipboardSQLiteSaveMutatesOnlyChangedRows() throws {
+        let repository = ClipboardHistoryRepository(rootURL: tempRoot("clip-sqlite-delta"))
+        let entries = (0..<100).map {
+            ClipboardEntry(kind: .text, text: "条目-\($0)", contentHash: "hash-\($0)")
+        }
+        var snapshot = ClipboardHistorySnapshot(entries: entries)
+        try repository.save(snapshot)
+        XCTAssertEqual(repository.lastDatabaseMutationCounts.changedEntries, 100)
+        XCTAssertEqual(repository.lastDatabaseMutationCounts.deletedEntries, 0)
+
+        snapshot.entries[50].isPinned = true
+        try repository.save(snapshot)
+        XCTAssertEqual(repository.lastDatabaseMutationCounts.changedEntries, 1)
+        XCTAssertEqual(repository.lastDatabaseMutationCounts.deletedEntries, 0)
+
+        snapshot.entries.removeFirst()
+        try repository.save(snapshot)
+        XCTAssertEqual(repository.lastDatabaseMutationCounts.changedEntries, 0)
+        XCTAssertEqual(repository.lastDatabaseMutationCounts.deletedEntries, 1)
+
+        snapshot.settings.autoPaste.toggle()
+        try repository.save(snapshot)
+        XCTAssertEqual(repository.lastDatabaseMutationCounts.changedEntries, 0)
+        XCTAssertEqual(repository.lastDatabaseMutationCounts.deletedEntries, 0)
+    }
+
+    func testClipboardCaptureUsesSingleRowDeltaAndTrimsSingleRowAtLimit() throws {
+        let root = tempRoot("clip-sqlite-capture-delta")
+        let repository = ClipboardHistoryRepository(rootURL: root)
+        let initialEntries = (0..<100).map {
+            ClipboardEntry(kind: .text, text: "已有-\($0)", contentHash: "existing-\($0)")
+        }
+        try repository.save(ClipboardHistorySnapshot(entries: initialEntries))
+        let store = ClipboardHistoryStore(repository: repository)
+
+        XCTAssertTrue(store.addText("最新捕获"))
+        store.flushPendingSave()
+
+        XCTAssertEqual(repository.lastDatabaseMutationCounts.changedEntries, 1)
+        XCTAssertEqual(repository.lastDatabaseMutationCounts.deletedEntries, 1)
+        XCTAssertEqual(store.entries.count, 100)
+        XCTAssertFalse(store.entries.contains { $0.id == initialEntries[0].id })
+        XCTAssertEqual(
+            ClipboardHistoryStore(
+                repository: ClipboardHistoryRepository(rootURL: root)
+            ).entries.compactMap(\.text).last,
+            "最新捕获"
+        )
+    }
+
+    func testClipboardUsageAndOrdinarySettingsAvoidFullSnapshotDiff() throws {
+        let repository = ClipboardHistoryRepository(rootURL: tempRoot("clip-sqlite-hot-deltas"))
+        let store = ClipboardHistoryStore(repository: repository)
+        XCTAssertTrue(store.addText("经常使用"))
+        store.flushPendingSave()
+        let entry = try XCTUnwrap(store.entries.first)
+
+        XCTAssertTrue(store.copyToPasteboard(entry, to: NSPasteboard.withUniqueName()))
+        store.flushPendingSave()
+        XCTAssertEqual(repository.lastDatabaseMutationCounts.changedEntries, 1)
+        XCTAssertEqual(repository.lastDatabaseMutationCounts.deletedEntries, 0)
+
+        store.settings.itemSize = .compact
+        store.flushPendingSave()
+        XCTAssertEqual(repository.lastDatabaseMutationCounts.changedEntries, 0)
+        XCTAssertEqual(repository.lastDatabaseMutationCounts.deletedEntries, 0)
+        XCTAssertEqual(
+            ClipboardHistoryStore(
+                repository: ClipboardHistoryRepository(rootURL: repository.rootURL)
+            ).settings.itemSize,
+            .compact
+        )
     }
 
     func testDeleteAndClearHistory() {
@@ -712,5 +1001,32 @@ final class StoreBehaviorTests: XCTestCase {
         store.clearHistory(matching: selected)
 
         XCTAssertEqual(store.entries.compactMap(\.text), ["普通中文内容"])
+    }
+
+    func testConfiguredMaximumHistoryKeepsExactSearchAndBoundedFirstPage() {
+        let store = makeClipboardStore()
+        let textKey = ClipboardCategoryKey.builtin(.text).storageValue
+        let entries = (0..<10_000).map { index in
+            ClipboardEntry(
+                kind: .text,
+                text: index == 9_999 ? "needle middle 9999 tail" : "普通历史条目 \(index)",
+                contentHash: "large-fixture-\(index)",
+                manualCategoryStorageValue: textKey
+            )
+        }
+        store.injectPreviewEntries(entries)
+
+        let all = store.orderedEntries(key: .builtin(.text))
+        XCTAssertEqual(all.count, 10_000)
+        XCTAssertEqual(
+            store.orderedEntries(query: "needle%9999", key: .builtin(.text)).compactMap(\.text),
+            ["needle middle 9999 tail"],
+            "large-library optimization must preserve ordered-fragment search semantics"
+        )
+        XCTAssertEqual(
+            Array(all.prefix(ClipboardPanelPagination.initialLimit(for: .builtin(.text)))).count,
+            300,
+            "the visible page remains bounded even at the configured history ceiling"
+        )
     }
 }

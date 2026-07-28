@@ -110,6 +110,30 @@ public struct MemeSnapshot: Codable, Sendable {
     }
 }
 
+/// Stable keyset cursor for loading a large meme library without retaining the
+/// complete result set. It follows the same ordering as `MemeFilter`.
+public struct MemePageCursor: Equatable, Sendable {
+    let sortOrder: Int
+    let createdAt: TimeInterval
+    let id: String
+
+    init(sortOrder: Int, createdAt: TimeInterval, id: String) {
+        self.sortOrder = sortOrder
+        self.createdAt = createdAt
+        self.id = id
+    }
+}
+
+public struct MemePage: Sendable {
+    public let items: [MemeItem]
+    public let nextCursor: MemePageCursor?
+
+    public init(items: [MemeItem], nextCursor: MemePageCursor?) {
+        self.items = items
+        self.nextCursor = nextCursor
+    }
+}
+
 public enum MemeFilter {
     public static func apply(_ memes: [MemeItem], categoryID: UUID?, query: String) -> [MemeItem] {
         let matcher = PercentFuzzyMatcher(query: query)
@@ -170,7 +194,7 @@ public enum ClipboardContentCategory: String, Codable, CaseIterable, Sendable {
 /// The source is optional so snapshots written before screenshot separation
 /// continue to decode as ordinary image entries.
 public enum ClipboardEntryOrigin: String, Codable, Sendable {
-    // The raw value is persisted in clipboard-history.json and ZIP manifests;
+    // The raw value is persisted in the clipboard database and ZIP manifests;
     // it keeps the pre-rename (MemeMemo era) spelling so existing snapshots
     // and archives continue to decode after the HedgeMemo rename.
     case hedgeMemoScreenshot = "memeMemoScreenshot"

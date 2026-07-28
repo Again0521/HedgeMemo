@@ -27,6 +27,7 @@ final class AppServices: ObservableObject {
     /// switch to another app to copy an image, and the popover closes as part
     /// of that normal workflow.
     private var memeCaptureService: ClipboardCaptureService?
+    private var clipboardMonitoringSuspendedForMemeCapture = false
     private let screenshotService = ScreenshotService()
     private let screenshotEditor = ScreenshotEditorPanelController()
     private var cancellables = Set<AnyCancellable>()
@@ -164,9 +165,20 @@ final class AppServices: ObservableObject {
         guard enabled else {
             memeCaptureService?.stop()
             memeCaptureService = nil
+            // Meme capture owns the pasteboard poll while enabled. Restore the
+            // ordinary history monitor only after that owner has stopped.
+            if clipboardMonitoringSuspendedForMemeCapture {
+                clipboardMonitoringSuspendedForMemeCapture = false
+                clipboardStore.setPollingSuspended(false)
+            }
             return
         }
         guard memeCaptureService == nil else { return }
+        // History recording is paused during meme capture, so keeping its timer
+        // alive only wakes the process to update a change counter. Give the
+        // capture service sole ownership of polling until capture ends.
+        clipboardStore.setPollingSuspended(true)
+        clipboardMonitoringSuspendedForMemeCapture = true
         let service = ClipboardCaptureService { [weak self] image in
             guard let self else { return }
             _ = self.memeStore.addImageData(image)

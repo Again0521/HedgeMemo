@@ -11,7 +11,7 @@ import Security
 ///   PIN. The PIN itself is never written anywhere, so reading the keychain item
 ///   does not reveal it.
 /// * a **content key** — a random 256-bit AES key used to encrypt password entry
-///   text before it reaches `clipboard-history.json`.
+///   text before it reaches persistent clipboard storage.
 ///
 /// The content key is what makes the lock meaningful. Without it a PIN would
 /// only hide rows in the UI while the secrets themselves sat in plain text in

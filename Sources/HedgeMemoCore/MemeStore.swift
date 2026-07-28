@@ -13,6 +13,10 @@ public final class MemeStore: ObservableObject {
     /// several times per popover render and once per mouse-move during a drag.
     /// Memoized per (category, query) until the library changes.
     private var filteredMemo: [String: [MemeItem]] = [:]
+    /// Drag reordering can emit dozens of mutations per second. Keep the live
+    /// array/UI updates immediate, but collapse their full-library snapshots
+    /// into one trailing write.
+    private var pendingSaveWork: DispatchWorkItem?
     @Published public var captureEnabled = false
     @Published public private(set) var lastError: String?
 
@@ -52,7 +56,7 @@ public final class MemeStore: ObservableObject {
         guard !cleaned.isEmpty, !categories.contains(where: { $0.name == cleaned }) else { return nil }
         let category = MemeCategory(name: cleaned)
         categories.append(category)
-        persist()
+        persistCategoryDelta(category, appending: true)
         return category.id
     }
 
@@ -61,7 +65,7 @@ public final class MemeStore: ObservableObject {
         guard !cleaned.isEmpty, !categories.contains(where: { $0.id != id && $0.name == cleaned }),
               let index = categories.firstIndex(where: { $0.id == id }) else { return }
         categories[index].name = cleaned
-        persist()
+        persistCategoryDelta(categories[index], appending: false)
     }
 
     public func deleteCategory(id: UUID) {
@@ -116,15 +120,16 @@ public final class MemeStore: ObservableObject {
             )
             let targetCategory = categoryID ?? selectedCategoryID
             let nextOrder = (memes.filter { $0.categoryID == targetCategory }.map(\.sortOrder).max() ?? -1) + 1
-            memes.append(MemeItem(
+            let meme = MemeItem(
                 fileName: stored.fileName,
                 contentHash: stored.contentHash,
                 note: resolvedNote(note, ocrText: ocrText),
                 ocrText: ocrText,
                 categoryID: targetCategory,
                 sortOrder: nextOrder
-            ))
-            persist()
+            )
+            memes.append(meme)
+            persistMemeDelta(meme, appending: true)
             return true
         } catch {
             lastError = error.localizedDescription
@@ -137,7 +142,7 @@ public final class MemeStore: ObservableObject {
         let cleaned = note.trimmingCharacters(in: .whitespacesAndNewlines)
         memes[index].note = cleaned.isEmpty ? (memes[index].ocrText.isEmpty ? L10n.text("未命名") : memes[index].ocrText) : cleaned
         memes[index].updatedAt = .now
-        persist()
+        persistMemeDelta(memes[index], appending: false)
     }
 
     public func delete(ids: Set<UUID>) {
@@ -184,7 +189,7 @@ public final class MemeStore: ObservableObject {
         // the target's former slot for drags in either direction.
         memes.insert(item, at: targetIndex)
         normalizeSortOrders()
-        persist()
+        persistCoalesced()
     }
 
     /// Moves the dragged meme to the tail of `categoryID`, adopting that
@@ -204,7 +209,7 @@ public final class MemeStore: ObservableObject {
             : memes.lastIndex(where: { $0.categoryID == destinationCategory }).map { $0 + 1 } ?? memes.endIndex
         memes.insert(item, at: destination)
         normalizeSortOrders()
-        persist()
+        persistCoalesced()
     }
 
     /// Invoked right after a meme is written to the system pasteboard, so the
@@ -337,6 +342,46 @@ public final class MemeStore: ObservableObject {
     }
 
     private func persist() {
+        pendingSaveWork?.cancel()
+        pendingSaveWork = nil
+        writeSnapshot()
+    }
+
+    private func persistCategoryDelta(_ category: MemeCategory, appending: Bool) {
+        repository.saveDeltaAsync(
+            categoryUpserts: [category],
+            appendingCategoryIDs: appending ? [category.id] : []
+        ) { [weak self] errorMessage in
+            guard let errorMessage else { return }
+            Task { @MainActor [weak self] in
+                self?.lastError = errorMessage
+            }
+        }
+    }
+
+    private func persistMemeDelta(_ meme: MemeItem, appending: Bool) {
+        repository.saveDeltaAsync(
+            memeUpserts: [meme],
+            appendingMemeIDs: appending ? [meme.id] : []
+        ) { [weak self] errorMessage in
+            guard let errorMessage else { return }
+            Task { @MainActor [weak self] in
+                self?.lastError = errorMessage
+            }
+        }
+    }
+
+    private func persistCoalesced() {
+        pendingSaveWork?.cancel()
+        let work = DispatchWorkItem { [weak self] in
+            self?.pendingSaveWork = nil
+            self?.writeSnapshot()
+        }
+        pendingSaveWork = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.15, execute: work)
+    }
+
+    private func writeSnapshot() {
         repository.saveAsync(snapshot()) { [weak self] errorMessage in
             guard let errorMessage else { return }
             Task { @MainActor [weak self] in
@@ -347,6 +392,11 @@ public final class MemeStore: ObservableObject {
 
     /// Durability barrier for application termination and deterministic tests.
     public func flushPendingSave() {
+        if pendingSaveWork != nil {
+            pendingSaveWork?.cancel()
+            pendingSaveWork = nil
+            writeSnapshot()
+        }
         repository.flushSnapshotWrites()
     }
 }

@@ -62,10 +62,18 @@ public final class ClipboardHistoryStore: ObservableObject {
     // Mutating `settings` inside its own didSet re-enters the @Published setter;
     // without this guard normalize() recurses until the stack overflows.
     private var isNormalizingSettings = false
+    private var settingsMutationRequiresSnapshot = false
     @Published public var settings: ClipboardHistorySettings {
         didSet {
-            // Category enable/order/custom-pattern changes all affect ordering.
-            invalidateDerivedState()
+            // Most settings are presentation/capture preferences and do not
+            // change any derived history result. Invalidating every cached
+            // category for a hot-key, item-size or auto-paste edit made the
+            // next panel open rescan the entire history for no reason.
+            if oldValue.customCategories != settings.customCategories {
+                invalidateDerivedState()
+            } else if oldValue.pasteQueueEntryIDs != settings.pasteQueueEntryIDs {
+                validPasteQueueMemo = nil
+            }
             guard !isNormalizingSettings else { return }
             isNormalizingSettings = true
             settings.normalize()
@@ -75,8 +83,13 @@ public final class ClipboardHistoryStore: ObservableObject {
             } catch {
                 lastError = error.localizedDescription
             }
-            trimToLimit()
-            persist()
+            let deletedIDs = trimToLimit()
+            if settingsMutationRequiresSnapshot {
+                settingsMutationRequiresSnapshot = false
+                persist()
+            } else {
+                persistSettings(deletedIDs: deletedIDs)
+            }
         }
     }
     @Published public private(set) var lastError: String?
@@ -92,8 +105,8 @@ public final class ClipboardHistoryStore: ObservableObject {
 
     /// Upper bounds on a single captured item. A runaway clipboard (a giant
     /// pasted document or a full-resolution screenshot from another app) would
-    /// otherwise sit in memory and be re-encoded into the history JSON on every
-    /// save. Oversized content is skipped rather than truncated so partial,
+    /// otherwise sit in memory and create excessive database/asset pressure.
+    /// Oversized content is skipped rather than truncated so partial,
     /// misleading copies are never stored.
     public static let maxTextByteCount = 2_000_000      // ~2 MB of UTF-8 text
     public static let maxImageByteCount = 40_000_000    // ~40 MB encoded image
@@ -120,6 +133,13 @@ public final class ClipboardHistoryStore: ObservableObject {
     /// on each. Every other mutation still persists immediately; this pending
     /// write is flushed on stop/teardown so a use-count update is never lost.
     private var pendingSaveWork: DispatchWorkItem?
+    private var pendingSaveEntryIDs = Set<UUID>()
+    /// Bulk operations may still reuse the ordinary mutation paths for their
+    /// validation, deduplication and asset handling, but they must not retain
+    /// one complete history snapshot per imported item. Only the outermost
+    /// batch is allowed to enqueue a snapshot.
+    private var persistenceBatchDepth = 0
+    private var persistenceBatchNeedsWrite = false
 
     private var timer: Timer?
     private var observedChangeCount = NSPasteboard.general.changeCount
@@ -130,6 +150,9 @@ public final class ClipboardHistoryStore: ObservableObject {
     /// deliberate stop from a sleep-induced suspend so the timer only rebuilds
     /// on wake when monitoring is actually meant to be running.
     private var isMonitoringEnabled = false
+    /// An alternate pasteboard consumer (currently meme capture) can take
+    /// temporary ownership without turning a UI toggle into a disk flush.
+    private var isPollingExternallySuspended = false
 
     public init(repository: ClipboardHistoryRepository = .default) {
         self.repository = repository
@@ -159,6 +182,7 @@ public final class ClipboardHistoryStore: ObservableObject {
     public func startMonitoring() {
         stopMonitoring()
         isMonitoringEnabled = true
+        isPollingExternallySuspended = false
         observedChangeCount = NSPasteboard.general.changeCount
         schedulePollTimer()
         installSleepWakeObservers()
@@ -172,6 +196,21 @@ public final class ClipboardHistoryStore: ObservableObject {
         let center = NSWorkspace.shared.notificationCenter
         for observer in sleepWakeObservers { center.removeObserver(observer) }
         sleepWakeObservers.removeAll()
+    }
+
+    /// Temporarily yields pasteboard polling to another in-process consumer.
+    /// Unlike `stopMonitoring`, this does not flush a potentially huge snapshot
+    /// or tear down sleep/wake observers, so enabling capture stays responsive.
+    public func setPollingSuspended(_ suspended: Bool) {
+        guard isPollingExternallySuspended != suspended else { return }
+        isPollingExternallySuspended = suspended
+        if suspended {
+            timer?.invalidate()
+            timer = nil
+        } else {
+            observedChangeCount = NSPasteboard.general.changeCount
+            resumePollingIfNeeded()
+        }
     }
 
     private func schedulePollTimer() {
@@ -230,7 +269,7 @@ public final class ClipboardHistoryStore: ObservableObject {
     }
 
     private func resumePollingIfNeeded() {
-        guard isMonitoringEnabled, timer == nil else { return }
+        guard isMonitoringEnabled, !isPollingExternallySuspended, timer == nil else { return }
         schedulePollTimer()
     }
 
@@ -442,8 +481,8 @@ public final class ClipboardHistoryStore: ObservableObject {
             return false
         }
         entries.append(entry)
-        trimToLimit()
-        persist()
+        let deletedIDs = trimToLimit()
+        persistAppendedEntry(entry, deletedIDs: deletedIDs)
         return true
     }
 
@@ -493,8 +532,8 @@ public final class ClipboardHistoryStore: ObservableObject {
             return false
         }
         entries.append(entry)
-        trimToLimit()
-        persist()
+        let deletedIDs = trimToLimit()
+        persistAppendedEntry(entry, deletedIDs: deletedIDs)
         return true
     }
 
@@ -535,7 +574,7 @@ public final class ClipboardHistoryStore: ObservableObject {
             lastError = L10n.text("无法加密密码，已跳过记录。")
             return false
         }
-        entries.append(ClipboardEntry(
+        let entry = ClipboardEntry(
             kind: .text,
             text: ciphertext,
             contentHash: hash,
@@ -543,9 +582,10 @@ public final class ClipboardHistoryStore: ObservableObject {
             sourceBundleIdentifier: source?.bundleIdentifier,
             sourceBundleURLPath: source?.bundleURLPath,
             origin: .concealedPassword
-        ))
-        trimToLimit()
-        persist()
+        )
+        entries.append(entry)
+        let deletedIDs = trimToLimit()
+        persistAppendedEntry(entry, deletedIDs: deletedIDs)
         return true
     }
 
@@ -606,7 +646,7 @@ public final class ClipboardHistoryStore: ObservableObject {
                 fileExtension: payload.fileExtension,
                 precomputedContentHash: candidate.contentHash
             )
-            entries.append(ClipboardEntry(
+            let entry = ClipboardEntry(
                 kind: .image,
                 text: note,
                 imageFileName: stored.fileName,
@@ -615,9 +655,10 @@ public final class ClipboardHistoryStore: ObservableObject {
                 sourceBundleIdentifier: source?.bundleIdentifier,
                 sourceBundleURLPath: source?.bundleURLPath,
                 origin: origin
-            ))
-            trimToLimit()
-            persist()
+            )
+            entries.append(entry)
+            let deletedIDs = trimToLimit()
+            persistAppendedEntry(entry, deletedIDs: deletedIDs)
             return true
         } catch {
             lastError = error.localizedDescription
@@ -733,38 +774,40 @@ public final class ClipboardHistoryStore: ObservableObject {
         imagesURL: URL,
         originalFormatsURL: URL
     ) throws {
-        for entry in snapshot.entries {
-            // Export strips secrets, so any here came from a hand-made archive.
-            // Importing one would drop its origin and surface the ciphertext as
-            // an ordinary readable entry.
-            guard !entry.isSecret else { continue }
-            switch entry.kind {
-            case .text:
-                let formats = try (entry.originalFormats ?? []).map { format -> ClipboardFormatData in
-                    guard let url = MemeArchiveService.safeContainedURL(
-                        base: originalFormatsURL,
-                        fileName: format.fileName
-                    ) else {
-                        throw ClipboardRichTextError.unsafeStoredFileName(format.fileName)
+        try withPersistenceBatch {
+            for entry in snapshot.entries {
+                // Export strips secrets, so any here came from a hand-made archive.
+                // Importing one would drop its origin and surface the ciphertext as
+                // an ordinary readable entry.
+                guard !entry.isSecret else { continue }
+                switch entry.kind {
+                case .text:
+                    let formats = try (entry.originalFormats ?? []).map { format -> ClipboardFormatData in
+                        guard let url = MemeArchiveService.safeContainedURL(
+                            base: originalFormatsURL,
+                            fileName: format.fileName
+                        ) else {
+                            throw ClipboardRichTextError.unsafeStoredFileName(format.fileName)
+                        }
+                        return ClipboardFormatData(
+                            typeIdentifier: format.typeIdentifier,
+                            data: try Data(contentsOf: url)
+                        )
                     }
-                    return ClipboardFormatData(
-                        typeIdentifier: format.typeIdentifier,
-                        data: try Data(contentsOf: url)
-                    )
+                    if formats.isEmpty {
+                        _ = addText(entry.text ?? "", source: entry.sourceApplication)
+                    } else {
+                        _ = try addRichText(
+                            ClipboardRichTextPayload(plainText: entry.text ?? "", formats: formats),
+                            source: entry.sourceApplication
+                        )
+                    }
+                case .image:
+                    guard let fileName = entry.imageFileName,
+                          let url = MemeArchiveService.safeContainedURL(base: imagesURL, fileName: fileName),
+                          let payload = ImageAssetData(fileURL: url) else { continue }
+                    _ = addImageData(payload, note: entry.text, source: entry.sourceApplication, origin: entry.origin)
                 }
-                if formats.isEmpty {
-                    _ = addText(entry.text ?? "", source: entry.sourceApplication)
-                } else {
-                    _ = try addRichText(
-                        ClipboardRichTextPayload(plainText: entry.text ?? "", formats: formats),
-                        source: entry.sourceApplication
-                    )
-                }
-            case .image:
-                guard let fileName = entry.imageFileName,
-                      let url = MemeArchiveService.safeContainedURL(base: imagesURL, fileName: fileName),
-                      let payload = ImageAssetData(fileURL: url) else { continue }
-                _ = addImageData(payload, note: entry.text, source: entry.sourceApplication, origin: entry.origin)
             }
         }
     }
@@ -773,7 +816,10 @@ public final class ClipboardHistoryStore: ObservableObject {
     /// removed from disk and it will no longer collect matching clipboard data.
     public func setCategory(_ key: ClipboardCategoryKey, enabled: Bool) {
         guard settings.isCategoryEnabled(key) != enabled else { return }
-        if !enabled { clearEntries(matching: key) }
+        if !enabled {
+            clearEntries(matching: key)
+            settingsMutationRequiresSnapshot = true
+        }
         settings.setCategory(key, enabled: enabled)
         if !settings.isCategoryEnabled(settings.activeCategoryKey) {
             settings.activeCategoryKey = settings.enabledCategoryKeys.first ?? .builtin(.text)
@@ -1067,7 +1113,7 @@ public final class ClipboardHistoryStore: ObservableObject {
         guard let index = entries.firstIndex(where: { $0.id == id }) else { return }
         entries[index].lastUsedAt = .now
         entries[index].useCount = (entries[index].useCount ?? 0) + 1
-        persistCoalesced()
+        persistCoalesced(entryID: id)
     }
 
     /// Re-copying content already held by HedgeMemo is a recency update, not a
@@ -1371,9 +1417,10 @@ public final class ClipboardHistoryStore: ObservableObject {
         normalizePinOrders()
     }
 
-    private func trimToLimit() {
+    @discardableResult
+    private func trimToLimit() -> [UUID] {
         let trimmed = ClipboardHistoryPolicy.idsToTrim(from: entries, maxEntries: settings.maxEntries)
-        guard !trimmed.isEmpty else { return }
+        guard !trimmed.isEmpty else { return [] }
         let ids = Set(trimmed)
         // One pass produces both halves. A history sitting at its limit trims
         // on every single capture, so this is a hot path.
@@ -1389,6 +1436,7 @@ public final class ClipboardHistoryStore: ObservableObject {
             !ids.contains($0)
         })
         for entry in removed { removeBackingAssets(entry) }
+        return trimmed
     }
 
     /// Compacts both pin orders.
@@ -1480,23 +1528,99 @@ public final class ClipboardHistoryStore: ObservableObject {
     }
 
     /// Enqueues the newest value snapshot and drops any delayed mark-used write.
-    /// JSON encoding and atomic replacement run on the repository's serial I/O
-    /// queue; a reload or explicit flush is a durability barrier.
+    /// SQLite reconciliation runs on the repository's serial I/O queue; a
+    /// reload or explicit flush is a durability barrier.
     private func persist() {
+        guard persistenceBatchDepth == 0 else {
+            persistenceBatchNeedsWrite = true
+            return
+        }
         pendingSaveWork?.cancel()
         pendingSaveWork = nil
+        pendingSaveEntryIDs.removeAll(keepingCapacity: true)
         writeSnapshot()
     }
 
-    private func persistCoalesced() {
+    /// Persists the normal capture path without materializing a second copy of
+    /// the complete history. The repository writes exactly the appended row and
+    /// any rows trimmed at the configured limit.
+    private func persistAppendedEntry(_ entry: ClipboardEntry, deletedIDs: [UUID]) {
         guard !isPersistenceDisabled else { return }
+        guard persistenceBatchDepth == 0 else {
+            persistenceBatchNeedsWrite = true
+            return
+        }
+        repository.saveDeltaAsync(
+            upserts: [entry],
+            deletedIDs: deletedIDs,
+            appendingIDs: [entry.id],
+            settings: settings
+        ) { [weak self] errorMessage in
+            guard let errorMessage else { return }
+            Task { @MainActor [weak self] in
+                self?.lastError = errorMessage
+            }
+        }
+    }
+
+    private func persistSettings(deletedIDs: [UUID]) {
+        guard !isPersistenceDisabled else { return }
+        repository.saveDeltaAsync(
+            upserts: [],
+            deletedIDs: deletedIDs,
+            settings: settings
+        ) { [weak self] errorMessage in
+            guard let errorMessage else { return }
+            Task { @MainActor [weak self] in
+                self?.lastError = errorMessage
+            }
+        }
+    }
+
+    /// Runs a group of ordinary store mutations with a single final snapshot.
+    /// Nested batches are supported so future import/migration paths can compose
+    /// without accidentally re-enabling per-item persistence.
+    private func withPersistenceBatch<T>(_ operation: () throws -> T) rethrows -> T {
+        persistenceBatchDepth += 1
+        defer {
+            persistenceBatchDepth -= 1
+            if persistenceBatchDepth == 0, persistenceBatchNeedsWrite {
+                persistenceBatchNeedsWrite = false
+                pendingSaveWork?.cancel()
+                pendingSaveWork = nil
+                pendingSaveEntryIDs.removeAll(keepingCapacity: true)
+                writeSnapshot()
+            }
+        }
+        return try operation()
+    }
+
+    private func persistCoalesced(entryID: UUID) {
+        guard !isPersistenceDisabled else { return }
+        pendingSaveEntryIDs.insert(entryID)
         pendingSaveWork?.cancel()
         let work = DispatchWorkItem { [weak self] in
-            self?.pendingSaveWork = nil
-            self?.writeSnapshot()
+            self?.writePendingEntryDeltas()
         }
         pendingSaveWork = work
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.6, execute: work)
+    }
+
+    private func writePendingEntryDeltas() {
+        pendingSaveWork = nil
+        let ids = pendingSaveEntryIDs
+        pendingSaveEntryIDs.removeAll(keepingCapacity: true)
+        guard !ids.isEmpty else { return }
+        let updatedEntries = entries.filter { ids.contains($0.id) }
+        repository.saveDeltaAsync(
+            upserts: updatedEntries,
+            settings: settings
+        ) { [weak self] errorMessage in
+            guard let errorMessage else { return }
+            Task { @MainActor [weak self] in
+                self?.lastError = errorMessage
+            }
+        }
     }
 
     /// Flushes a pending coalesced write immediately. Called on teardown so a
@@ -1505,8 +1629,7 @@ public final class ClipboardHistoryStore: ObservableObject {
     public func flushPendingSave() {
         if pendingSaveWork != nil {
             pendingSaveWork?.cancel()
-            pendingSaveWork = nil
-            writeSnapshot()
+            writePendingEntryDeltas()
         }
         repository.flushSnapshotWrites()
     }

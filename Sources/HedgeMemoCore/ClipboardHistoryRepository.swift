@@ -6,11 +6,20 @@ public final class ClipboardHistoryRepository: @unchecked Sendable {
     public let rootURL: URL
     public let imagesURL: URL
     public let originalFormatsURL: URL
-    private let snapshotURL: URL
+    /// Kept as a read-only migration backup after SQLite becomes canonical.
+    private let legacySnapshotURL: URL
+    let databaseURL: URL
+    private let database: ClipboardHistoryDatabase
+    private var databaseState: ClipboardHistoryDatabase.State?
     private let fileManager: FileManager
     private let snapshotIO: RepositoryIOCoordinator
     private let pendingGenerationLock = NSLock()
     private var latestQueuedGeneration = 0
+    private var completedWriteCount = 0
+    private var latestMutationCounts = ClipboardHistoryDatabase.MutationCounts(
+        changedEntries: 0,
+        deletedEntries: 0
+    )
 
     public static let `default` = ClipboardHistoryRepository()
 
@@ -20,7 +29,10 @@ public final class ClipboardHistoryRepository: @unchecked Sendable {
         self.rootURL = resolvedRoot
         self.imagesURL = self.rootURL.appendingPathComponent("clipboard-images", isDirectory: true)
         self.originalFormatsURL = self.rootURL.appendingPathComponent("clipboard-formats", isDirectory: true)
-        self.snapshotURL = self.rootURL.appendingPathComponent("clipboard-history.json")
+        self.legacySnapshotURL = self.rootURL.appendingPathComponent("clipboard-history.json")
+        let resolvedDatabaseURL = self.rootURL.appendingPathComponent("clipboard-history.sqlite3")
+        self.databaseURL = resolvedDatabaseURL
+        self.database = ClipboardHistoryDatabase(url: resolvedDatabaseURL)
         self.snapshotIO = .shared(scope: "clipboard", rootURL: resolvedRoot)
     }
 
@@ -33,20 +45,32 @@ public final class ClipboardHistoryRepository: @unchecked Sendable {
     /// (no snapshot yet) from an update by a user who already has clipboard data.
     public var hasPersistedHistory: Bool {
         snapshotIO.sync {
-            fileManager.fileExists(atPath: snapshotURL.path)
+            (try? database.isInitialized) == true
+                || fileManager.fileExists(atPath: legacySnapshotURL.path)
         }
     }
 
     public func load() throws -> ClipboardHistorySnapshot {
         try snapshotIO.sync {
             try prepare()
-            guard fileManager.fileExists(atPath: snapshotURL.path) else { return ClipboardHistorySnapshot() }
-            // A long history is a large file, and this read happens during
-            // launch. Mapping it hands the pages to the decoder without first
-            // copying the whole document into the heap.
-            let data = try Data(contentsOf: snapshotURL, options: .mappedIfSafe)
-            var snapshot = try JSONDecoder.clipboardDecoder.decode(ClipboardHistorySnapshot.self, from: data)
+            if database.exists, try database.isInitialized {
+                let loaded = try database.load()
+                databaseState = loaded.state
+                return loaded.snapshot
+            }
+            guard fileManager.fileExists(atPath: legacySnapshotURL.path) else {
+                return ClipboardHistorySnapshot()
+            }
+            // One-time migration from the former monolithic JSON snapshot.
+            // The source file remains untouched as a recovery backup until a
+            // later maintenance policy explicitly retires it.
+            let data = try Data(contentsOf: legacySnapshotURL, options: .mappedIfSafe)
+            var snapshot = try JSONDecoder.clipboardDecoder.decode(
+                ClipboardHistorySnapshot.self,
+                from: data
+            )
             snapshot.settings.normalize()
+            latestMutationCounts = try database.save(snapshot, state: &databaseState)
             return snapshot
         }
     }
@@ -89,8 +113,52 @@ public final class ClipboardHistoryRepository: @unchecked Sendable {
         }
     }
 
+    /// Incremental hot-path persistence. Unlike a snapshot generation, a delta
+    /// is never skipped: each one represents a distinct capture/delete event
+    /// and the shared serial coordinator preserves their source order.
+    public func saveDeltaAsync(
+        upserts: [ClipboardEntry],
+        deletedIDs: [UUID] = [],
+        appendingIDs: Set<UUID> = [],
+        settings: ClipboardHistorySettings,
+        completion: @escaping @Sendable (String?) -> Void
+    ) {
+        snapshotIO.async { [self] in
+            do {
+                try prepare()
+                latestMutationCounts = try database.apply(
+                    upserts: upserts,
+                    deletedIDs: deletedIDs,
+                    appendingIDs: appendingIDs,
+                    settings: settings,
+                    state: &databaseState
+                )
+                pendingGenerationLock.withLock { completedWriteCount += 1 }
+                completion(nil)
+            } catch {
+                completion(error.localizedDescription)
+            }
+        }
+    }
+
     public func flushSnapshotWrites() {
         snapshotIO.flush()
+    }
+
+    /// Test/diagnostic counter for verifying that burst coalescing actually
+    /// reduces physical snapshot replacements rather than merely reordering
+    /// them. Protected by the same lock as the generation state.
+    var completedSnapshotWriteCount: Int {
+        pendingGenerationLock.withLock { completedWriteCount }
+    }
+
+    var lastDatabaseMutationCounts: (changedEntries: Int, deletedEntries: Int) {
+        snapshotIO.sync {
+            (
+                latestMutationCounts.changedEntries,
+                latestMutationCounts.deletedEntries
+            )
+        }
     }
 
     private func saveImmediately(_ snapshot: ClipboardHistorySnapshot) throws {
@@ -98,8 +166,8 @@ public final class ClipboardHistoryRepository: @unchecked Sendable {
             try prepare()
             var normalized = snapshot
             normalized.settings.normalize()
-            let data = try JSONEncoder.clipboardEncoder.encode(normalized)
-            try data.write(to: snapshotURL, options: .atomic)
+            latestMutationCounts = try database.save(normalized, state: &databaseState)
+            pendingGenerationLock.withLock { completedWriteCount += 1 }
         }
     }
 
@@ -227,19 +295,6 @@ public extension Data {
     var clipboardContentHash: String {
         SHA256.hash(data: self).clipboardHexString
     }
-}
-
-private extension JSONEncoder {
-    /// Compact output on purpose. This document is rewritten whenever the
-    /// history changes and can hold thousands of entries; pretty-printing and
-    /// key sorting inflated it by roughly a third and added a per-object sort,
-    /// for indentation nothing reads. The format is otherwise unchanged, so
-    /// existing snapshots keep decoding.
-    static let clipboardEncoder: JSONEncoder = {
-        let encoder = JSONEncoder()
-        encoder.dateEncodingStrategy = .iso8601
-        return encoder
-    }()
 }
 
 private extension JSONDecoder {

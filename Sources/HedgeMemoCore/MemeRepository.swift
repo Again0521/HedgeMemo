@@ -17,11 +17,21 @@ public enum MemeRepositoryError: LocalizedError {
 public final class MemeRepository: @unchecked Sendable {
     public let rootURL: URL
     public let imagesURL: URL
-    private let snapshotURL: URL
+    private let legacySnapshotURL: URL
+    let databaseURL: URL
+    private let database: MemeDatabase
+    private var databaseState: MemeDatabase.State?
     private let fileManager: FileManager
     private let snapshotIO: RepositoryIOCoordinator
     private let pendingGenerationLock = NSLock()
     private var latestQueuedGeneration = 0
+    private var completedWriteCount = 0
+    private var latestMutationCounts = MemeDatabase.MutationCounts(
+        changedCategories: 0,
+        deletedCategories: 0,
+        changedMemes: 0,
+        deletedMemes: 0
+    )
 
     public static let `default` = MemeRepository()
 
@@ -30,7 +40,10 @@ public final class MemeRepository: @unchecked Sendable {
         self.fileManager = fileManager
         self.rootURL = resolvedRoot
         self.imagesURL = self.rootURL.appendingPathComponent("images", isDirectory: true)
-        self.snapshotURL = self.rootURL.appendingPathComponent("library.json")
+        self.legacySnapshotURL = self.rootURL.appendingPathComponent("library.json")
+        let resolvedDatabaseURL = self.rootURL.appendingPathComponent("meme-library.sqlite3")
+        self.databaseURL = resolvedDatabaseURL
+        self.database = MemeDatabase(url: resolvedDatabaseURL)
         self.snapshotIO = .shared(scope: "memes", rootURL: resolvedRoot)
     }
 
@@ -42,19 +55,62 @@ public final class MemeRepository: @unchecked Sendable {
     /// (no snapshot yet) from an update by a user who already has memes.
     public var hasPersistedLibrary: Bool {
         snapshotIO.sync {
-            fileManager.fileExists(atPath: snapshotURL.path)
+            (try? database.isInitialized) == true
+                || fileManager.fileExists(atPath: legacySnapshotURL.path)
         }
     }
 
     public func load() throws -> MemeSnapshot {
         try snapshotIO.sync {
             try prepare()
-            guard fileManager.fileExists(atPath: snapshotURL.path) else { return MemeSnapshot() }
-            // Mapped rather than copied: a large library's manifest is read
-            // during launch, before anything can be shown.
-            let data = try Data(contentsOf: snapshotURL, options: .mappedIfSafe)
-            return try JSONDecoder.memeDecoder.decode(MemeSnapshot.self, from: data)
+            if database.exists, try database.isInitialized {
+                let loaded = try database.load()
+                databaseState = loaded.state
+                return loaded.snapshot
+            }
+            guard fileManager.fileExists(atPath: legacySnapshotURL.path) else {
+                return MemeSnapshot()
+            }
+            let data = try Data(contentsOf: legacySnapshotURL, options: .mappedIfSafe)
+            let snapshot = try JSONDecoder.memeDecoder.decode(MemeSnapshot.self, from: data)
+            latestMutationCounts = try database.save(snapshot, state: &databaseState)
+            return snapshot
         }
+    }
+
+    public func loadPage(
+        categoryID: UUID? = nil,
+        query: String = "",
+        after cursor: MemePageCursor? = nil,
+        limit: Int
+    ) throws -> MemePage {
+        try migrateLegacySnapshotIfNeeded()
+        return try snapshotIO.sync {
+            try prepare()
+            return try database.loadPage(
+                categoryID: categoryID,
+                query: query,
+                after: cursor,
+                limit: limit
+            )
+        }
+    }
+
+    public func memeCount(categoryID: UUID? = nil, query: String = "") throws -> Int {
+        try migrateLegacySnapshotIfNeeded()
+        return try snapshotIO.sync {
+            try prepare()
+            return try database.count(categoryID: categoryID, query: query)
+        }
+    }
+
+    private func migrateLegacySnapshotIfNeeded() throws {
+        let needsMigration = try snapshotIO.sync {
+            guard fileManager.fileExists(atPath: legacySnapshotURL.path) else { return false }
+            guard database.exists else { return true }
+            return try !database.isInitialized
+        }
+        if needsMigration { _ = try load() }
     }
 
     public func save(_ snapshot: MemeSnapshot) throws {
@@ -90,15 +146,64 @@ public final class MemeRepository: @unchecked Sendable {
         }
     }
 
+    public func saveDeltaAsync(
+        categoryUpserts: [MemeCategory] = [],
+        deletedCategoryIDs: [UUID] = [],
+        memeUpserts: [MemeItem] = [],
+        deletedMemeIDs: [UUID] = [],
+        appendingCategoryIDs: Set<UUID> = [],
+        appendingMemeIDs: Set<UUID> = [],
+        completion: @escaping @Sendable (String?) -> Void
+    ) {
+        snapshotIO.async { [self] in
+            do {
+                try prepare()
+                latestMutationCounts = try database.apply(
+                    categoryUpserts: categoryUpserts,
+                    deletedCategoryIDs: deletedCategoryIDs,
+                    memeUpserts: memeUpserts,
+                    deletedMemeIDs: deletedMemeIDs,
+                    appendingCategoryIDs: appendingCategoryIDs,
+                    appendingMemeIDs: appendingMemeIDs,
+                    state: &databaseState
+                )
+                pendingGenerationLock.withLock { completedWriteCount += 1 }
+                completion(nil)
+            } catch {
+                completion(error.localizedDescription)
+            }
+        }
+    }
+
     public func flushSnapshotWrites() {
         snapshotIO.flush()
+    }
+
+    var completedSnapshotWriteCount: Int {
+        pendingGenerationLock.withLock { completedWriteCount }
+    }
+
+    var lastDatabaseMutationCounts: (
+        changedCategories: Int,
+        deletedCategories: Int,
+        changedMemes: Int,
+        deletedMemes: Int
+    ) {
+        snapshotIO.sync {
+            (
+                latestMutationCounts.changedCategories,
+                latestMutationCounts.deletedCategories,
+                latestMutationCounts.changedMemes,
+                latestMutationCounts.deletedMemes
+            )
+        }
     }
 
     private func saveImmediately(_ snapshot: MemeSnapshot) throws {
         try HedgeMemoPerformance.measure("MemeSnapshotWrite") {
             try prepare()
-            let data = try JSONEncoder.memeEncoder.encode(snapshot)
-            try data.write(to: snapshotURL, options: .atomic)
+            latestMutationCounts = try database.save(snapshot, state: &databaseState)
+            pendingGenerationLock.withLock { completedWriteCount += 1 }
         }
     }
 
@@ -154,16 +259,6 @@ public extension NSImage {
               let bitmap = NSBitmapImageRep(data: tiff) else { return nil }
         return bitmap.representation(using: .png, properties: [:])
     }
-}
-
-private extension JSONEncoder {
-    static let memeEncoder: JSONEncoder = {
-        let encoder = JSONEncoder()
-        encoder.dateEncodingStrategy = .iso8601
-        // Compact: the library manifest is rewritten on every edit and read
-        // only by the app. Decoding is unaffected.
-        return encoder
-    }()
 }
 
 private extension JSONDecoder {

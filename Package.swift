@@ -13,7 +13,8 @@ let package = Package(
     targets: [
         .target(
             name: "HedgeMemoCore",
-            resources: [.process("Localization")]
+            resources: [.process("Localization")],
+            linkerSettings: [.linkedLibrary("sqlite3")]
         ),
         .executableTarget(
             name: "HedgeMemo",
