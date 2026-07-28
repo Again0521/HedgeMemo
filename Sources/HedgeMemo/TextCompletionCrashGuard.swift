@@ -102,10 +102,30 @@ final class TextCompletionCrashGuard {
         textView.isAutomaticTextCompletionEnabled = false
     }
 
-    private static func finishActiveTextSessions() {
-        for window in NSApp.windows where window.firstResponder is NSTextView {
+    /// Must run before an AppKit/SwiftUI window is ordered on screen.
+    ///
+    /// `didBecomeKey` is too late for this failure mode: ViewBridge validates
+    /// completion remote views during `makeKeyAndOrderFront`. A field editor
+    /// retained by a disappearing popover can therefore abort the process
+    /// before any key-window notification is delivered. End those old editing
+    /// sessions first, materialize the destination hierarchy, and disable
+    /// completion there before AppKit starts its order-on-screen transaction.
+    static func prepareToOrderOnScreen(
+        _ destination: NSWindow,
+        existingWindows: [NSWindow]? = nil
+    ) {
+        finishActiveTextSessions(in: existingWindows ?? NSApp.windows)
+        destination.contentView?.layoutSubtreeIfNeeded()
+        disableRemoteCompletion(in: destination)
+    }
+
+    static func finishActiveTextSessions(in windows: [NSWindow]? = nil) {
+        for window in windows ?? NSApp.windows {
+            disableRemoteCompletion(in: window)
+            guard window.firstResponder is NSTextView else { continue }
             // Ending editing commits the current SwiftUI/AppKit binding before
-            // sleep and tears down any completion ViewBridge session.
+            // another window appears and tears down its completion ViewBridge
+            // session while the editor still has the correct containing window.
             window.makeFirstResponder(nil)
         }
     }

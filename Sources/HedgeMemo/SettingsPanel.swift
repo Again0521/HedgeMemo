@@ -76,6 +76,7 @@ final class SettingsWindowController: NSObject, NSWindowDelegate {
         updateCheckStore.acknowledgeUpdateBadge()
         if let panel {
             NSApp.activate(ignoringOtherApps: true)
+            TextCompletionCrashGuard.prepareToOrderOnScreen(panel)
             panel.orderFrontRegardless()
             panel.makeKeyAndOrderFront(nil)
             return
@@ -122,6 +123,7 @@ final class SettingsWindowController: NSObject, NSWindowDelegate {
         self.panel = panel
         NSApp.activate(ignoringOtherApps: true)
         panel.center()
+        TextCompletionCrashGuard.prepareToOrderOnScreen(panel)
         panel.makeKeyAndOrderFront(nil)
     }
 
