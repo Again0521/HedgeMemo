@@ -80,4 +80,22 @@ final class TextCompletionCrashGuardTests: XCTestCase {
         XCTAssertFalse(source.firstResponder is NSTextView)
         XCTAssertFalse(destinationField.isAutomaticTextCompletionEnabled)
     }
+
+    func testUnifiedPopupSessionUsesSharedPanelChrome() {
+        let session = UnifiedPopupSession(
+            title: "Popup",
+            size: NSSize(width: 400, height: 220)
+        )
+
+        XCTAssertEqual(session.panel.titleVisibility, .hidden)
+        XCTAssertTrue(session.panel.titlebarAppearsTransparent)
+        XCTAssertEqual(session.panel.titlebarSeparatorStyle, .none)
+        XCTAssertFalse(session.panel.isOpaque)
+        XCTAssertEqual(session.panel.backgroundColor, .clear)
+        XCTAssertTrue(session.panel.hasShadow)
+        XCTAssertFalse(session.panel.hidesOnDeactivate)
+        XCTAssertFalse(session.panel.isMovableByWindowBackground)
+        XCTAssertTrue(session.panel.collectionBehavior.contains(.moveToActiveSpace))
+        XCTAssertTrue(session.panel.collectionBehavior.contains(.fullScreenAuxiliary))
+    }
 }

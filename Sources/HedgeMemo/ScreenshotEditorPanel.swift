@@ -937,20 +937,19 @@ private final class ScreenshotCanvasView: NSView {
     }
 
     private func promptForText(at point: CGPoint, color: RGBAColor) {
-        let alert = NSAlert()
-        alert.messageText = L10n.text("添加文字")
-        alert.addButton(withTitle: L10n.text("添加"))
-        alert.addButton(withTitle: L10n.text("取消"))
-        let field = NSTextField(frame: NSRect(x: 0, y: 0, width: 240, height: 24))
-        field.placeholderString = L10n.text("输入标注文字")
-        alert.accessoryView = field
-        alert.window.initialFirstResponder = field
-        guard alert.runModal() == .alertFirstButtonReturn else { return }
-        let text = field.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !text.isEmpty else { return }
-        addLabel(text, at: point, color: color)
-        onStateChange?(state)
-        needsDisplay = true
+        UnifiedPopupPanel.requestText(
+            title: L10n.text("添加文字"),
+            message: L10n.text("输入标注文字"),
+            placeholder: L10n.text("输入标注文字"),
+            confirmationTitle: L10n.text("添加")
+        ) { [weak self] value in
+            guard let self, let value else { return }
+            let text = value.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !text.isEmpty else { return }
+            self.addLabel(text, at: point, color: color)
+            self.onStateChange?(self.state)
+            self.needsDisplay = true
+        }
     }
 
     override func keyDown(with event: NSEvent) {

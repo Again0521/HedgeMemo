@@ -61,6 +61,27 @@ enum PanelMaterialHost {
     }
 }
 
+/// Shared presentation treatment for SwiftUI sheets. The sheet window supplies
+/// lifecycle and keyboard routing; this modifier supplies the same adjustable
+/// material and compact control density as HedgeMemo's standalone panels.
+private struct UnifiedPopupSurfaceModifier: ViewModifier {
+    func body(content: Content) -> some View {
+        content
+            .controlSize(.small)
+            .background {
+                AdjustablePanelBackground()
+                    .ignoresSafeArea()
+            }
+            .presentationBackground(.clear)
+    }
+}
+
+extension View {
+    func unifiedPopupSurface() -> some View {
+        modifier(UnifiedPopupSurfaceModifier())
+    }
+}
+
 /// A clipped card surface for multiple pieces of content inside one key panel.
 /// Its backing is the exact same native glass view as the window surface, not a
 /// color overlay. Separation from the desktop is deliberately supplied by
@@ -81,7 +102,7 @@ struct SystemGlassCard<Content: View>: View {
     }
 }
 
-private struct AdjustablePanelBackground: View {
+struct AdjustablePanelBackground: View {
     @AppStorage(AppPreferences.interfaceOpacityKey)
     private var interfaceOpacity = AppPreferences.defaultInterfaceOpacity
 

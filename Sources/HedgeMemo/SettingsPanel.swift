@@ -186,16 +186,18 @@ struct SettingsPanelView: View {
         .sheet(isPresented: $isVerifyingPIN) {
             PINVerifySheet(lockStore: lockStore)
         }
-        .alert(
-            L10n.text("无法保存分类"),
+        .sheet(
             isPresented: Binding(
                 get: { customCategoryError != nil },
                 set: { if !$0 { customCategoryError = nil } }
             )
         ) {
-            Button(L10n.text("好")) { customCategoryError = nil }
-        } message: {
-            Text(customCategoryError ?? "")
+            UnifiedMessagePopupContent(
+                title: L10n.text("无法保存分类"),
+                message: customCategoryError ?? "",
+                onDismiss: { customCategoryError = nil }
+            )
+            .unifiedPopupSurface()
         }
     }
 
@@ -1304,6 +1306,7 @@ private struct CustomCategoryEditorSheet: View {
         }
         .padding(20)
         .frame(width: 560)
+        .unifiedPopupSurface()
     }
 
     @ViewBuilder

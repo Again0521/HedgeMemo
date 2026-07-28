@@ -25,8 +25,25 @@ final class HedgeMemoAppDelegate: NSObject, NSApplicationDelegate {
         if arguments.contains("--preview-settings") {
             DispatchQueue.main.async { statusItemController.previewSettings() }
         }
+        if arguments.contains("--preview-popup") {
+            // Let application launch finish before entering the modal event
+            // loop; otherwise `open --args --preview-popup` waits for the app's
+            // ready handshake instead of returning to the preview harness.
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
+                UnifiedPopupPanel.requestText(
+                    title: L10n.text("新建分类"),
+                    message: L10n.text("输入分类名称后按 Return 保存。"),
+                    placeholder: L10n.text("分类名称"),
+                    confirmationTitle: L10n.text("保存")
+                ) { _ in }
+            }
+        }
         if arguments.contains("--preview-memes") {
-            DispatchQueue.main.async { statusItemController.previewMemes() }
+            // Status-item popovers also need LaunchServices' ready handshake to
+            // finish before they enter their own event tracking loop.
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
+                statusItemController.previewMemes()
+            }
         }
         if arguments.contains("--preview-clipboard-code") {
             DispatchQueue.main.async { services.previewClipboard(category: .code) }

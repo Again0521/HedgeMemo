@@ -51,12 +51,13 @@ struct ClipboardAppFilterSettingsView: View {
                 }
             }
         }
-        .alert(item: $presentedError) { error in
-            Alert(
-                title: Text(L10n.text("无法添加应用")),
-                message: Text(error.message),
-                dismissButton: .default(Text(L10n.text("好")))
+        .sheet(item: $presentedError) { error in
+            UnifiedMessagePopupContent(
+                title: L10n.text("无法添加应用"),
+                message: error.message,
+                onDismiss: { presentedError = nil }
             )
+            .unifiedPopupSurface()
         }
     }
 

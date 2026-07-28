@@ -18,63 +18,12 @@ struct ArchiveCategorySelection {
 typealias ArchiveExportSelection = ArchiveCategorySelection
 typealias ArchiveImportSelection = ArchiveCategorySelection
 
-/// AppKit owns only the modal-window lifecycle. SwiftUI still owns the
-/// checkbox state and passes one final value back through a small closure.
-/// In particular, the traffic-light close button must stop the modal loop;
-/// without this delegate path the status-bar menu remains in a tracking state
-/// after a user closes export/import with the red button.
-@MainActor
-private final class ArchiveSelectionSession: NSObject, NSWindowDelegate {
-    let panel: NSPanel
-    private var finished = false
-
-    init(title: String, size: NSSize) {
-        panel = NSPanel(
-            contentRect: NSRect(origin: .zero, size: size),
-            styleMask: [.titled, .closable, .fullSizeContentView],
-            backing: .buffered,
-            defer: false
-        )
-        super.init()
-        panel.title = title
-        panel.titleVisibility = .hidden
-        panel.titlebarAppearsTransparent = true
-        panel.titlebarSeparatorStyle = .none
-        panel.isOpaque = false
-        panel.backgroundColor = .clear
-        panel.hasShadow = true
-        panel.isReleasedWhenClosed = false
-        panel.hidesOnDeactivate = false
-        panel.isMovableByWindowBackground = false
-        panel.collectionBehavior = [.moveToActiveSpace, .fullScreenAuxiliary]
-        panel.delegate = self
-    }
-
-    func present() {
-        NSApp.activate(ignoringOtherApps: true)
-        panel.center()
-        panel.makeKeyAndOrderFront(nil)
-        _ = NSApp.runModal(for: panel)
-    }
-
-    func finish(_ response: NSApplication.ModalResponse) {
-        guard !finished else { return }
-        finished = true
-        panel.orderOut(nil)
-        NSApp.stopModal(withCode: response)
-    }
-
-    func windowWillClose(_ notification: Notification) {
-        finish(.cancel)
-    }
-}
-
 @MainActor
 enum ArchiveExportSelectionPanel {
     static func run(memeStore: MemeStore, clipboardStore: ClipboardHistoryStore) -> ArchiveExportSelection? {
         let categories = memeStore.categories
         let clipboardKeys = clipboardStore.settings.orderedCategoryKeys
-        let session = ArchiveSelectionSession(
+        let session = UnifiedPopupSession(
             title: L10n.text("选择导出内容"),
             size: ArchiveSelectionMetrics.size(rowCount: categories.count + clipboardKeys.count + 1)
         )
@@ -112,7 +61,7 @@ enum ArchiveImportSelectionPanel {
         let uncategorizedMemes = memeSnapshot?.memes.contains(where: { $0.categoryID == nil }) == true
         let clipboardKeys = archiveClipboardKeys(in: clipboardSnapshot)
         let customs = clipboardSnapshot?.settings.customCategories ?? []
-        let session = ArchiveSelectionSession(
+        let session = UnifiedPopupSession(
             title: L10n.text("选择导入内容"),
             size: ArchiveSelectionMetrics.size(
                 rowCount: memeCategories.count + clipboardKeys.count + (uncategorizedMemes ? 1 : 0)

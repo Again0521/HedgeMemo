@@ -19,6 +19,7 @@ struct PINVerifySheet: View {
         }
         .padding(.vertical, 16)
         .frame(width: 320)
+        .unifiedPopupSurface()
         // `unlockedAt` is the published signal; a successful PIN entry or Touch
         // ID both set it, so this covers either route out of the sheet.
         .onChange(of: lockStore.unlockedAt) { _, unlockedAt in
@@ -93,6 +94,7 @@ struct PINSetupSheet: View {
         }
         .padding(20)
         .frame(width: 320)
+        .unifiedPopupSurface()
         .onAppear { pinFocused = true }
         .onChange(of: pin) { _, value in
             if !value.isEmpty { errorMessage = nil }

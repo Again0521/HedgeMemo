@@ -33,10 +33,10 @@ enum LibraryActions {
             }
         } catch {
             memeStore.report(error)
-            let alert = NSAlert(error: error)
-            alert.messageText = L10n.text("无法识别导入的 ZIP")
-            alert.informativeText = L10n.text("请选择由 HedgeMemo 导出的压缩包。")
-            alert.runModal()
+            UnifiedPopupPanel.showMessage(
+                title: L10n.text("无法识别导入的 ZIP"),
+                message: L10n.text("请选择由 HedgeMemo 导出的压缩包。")
+            )
         }
     }
 

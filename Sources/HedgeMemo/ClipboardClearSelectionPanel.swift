@@ -11,7 +11,8 @@ enum ClipboardClearSelectionPanel {
         let keys = store.settings.orderedCategoryKeys
         guard !keys.isEmpty else { return }
 
-        let session = ClipboardClearSelectionSession(
+        let session = UnifiedPopupSession(
+            title: L10n.text("清除剪贴板"),
             size: ClipboardClearSelectionMetrics.size(rowCount: keys.count)
         )
         let root = ClipboardClearSelectionView(
@@ -26,52 +27,6 @@ enum ClipboardClearSelectionPanel {
         )
         PanelMaterialHost.install(root, in: session.panel, cornerRadius: 14)
         session.present()
-    }
-}
-
-@MainActor
-private final class ClipboardClearSelectionSession: NSObject, NSWindowDelegate {
-    let panel: NSPanel
-    private var finished = false
-
-    init(size: NSSize) {
-        panel = NSPanel(
-            contentRect: NSRect(origin: .zero, size: size),
-            styleMask: [.titled, .closable, .fullSizeContentView],
-            backing: .buffered,
-            defer: false
-        )
-        super.init()
-        panel.title = L10n.text("清除剪贴板")
-        panel.titleVisibility = .hidden
-        panel.titlebarAppearsTransparent = true
-        panel.titlebarSeparatorStyle = .none
-        panel.isOpaque = false
-        panel.backgroundColor = .clear
-        panel.hasShadow = true
-        panel.isReleasedWhenClosed = false
-        panel.hidesOnDeactivate = false
-        panel.isMovableByWindowBackground = false
-        panel.collectionBehavior = [.moveToActiveSpace, .fullScreenAuxiliary]
-        panel.delegate = self
-    }
-
-    func present() {
-        NSApp.activate(ignoringOtherApps: true)
-        panel.center()
-        panel.makeKeyAndOrderFront(nil)
-        _ = NSApp.runModal(for: panel)
-    }
-
-    func finish() {
-        guard !finished else { return }
-        finished = true
-        panel.orderOut(nil)
-        NSApp.stopModal()
-    }
-
-    func windowWillClose(_ notification: Notification) {
-        finish()
     }
 }
 

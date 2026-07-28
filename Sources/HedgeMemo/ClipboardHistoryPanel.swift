@@ -1627,13 +1627,13 @@ struct ClipboardHistoryPanelView: View {
                 contextMenuTrackingDepth = 0
                 revealedSecretTexts.removeAll(keepingCapacity: false)
             }
-            .alert(
-                L10n.text("粘贴队列"),
-                isPresented: queueErrorPresented
-            ) {
-                Button(L10n.text("好"), role: .cancel) { queueError = nil }
-            } message: {
-                Text(queueError ?? "")
+            .sheet(isPresented: queueErrorPresented) {
+                UnifiedMessagePopupContent(
+                    title: L10n.text("粘贴队列"),
+                    message: queueError ?? "",
+                    onDismiss: { queueError = nil }
+                )
+                .unifiedPopupSurface()
             }
     }
 

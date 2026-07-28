@@ -144,10 +144,16 @@ struct MemePanelView: View {
         .sheet(item: $editingMeme) { meme in
             NoteEditorSheet(meme: meme) { store.updateNote(id: meme.id, note: $0) }
         }
-        .alert(L10n.text("操作失败"), isPresented: $showsError) {
-            Button(L10n.text("好")) { store.clearError() }
-        } message: {
-            Text(store.lastError ?? L10n.text("未知错误"))
+        .sheet(isPresented: $showsError) {
+            UnifiedMessagePopupContent(
+                title: L10n.text("操作失败"),
+                message: store.lastError ?? L10n.text("未知错误"),
+                onDismiss: {
+                    store.clearError()
+                    showsError = false
+                }
+            )
+            .unifiedPopupSurface()
         }
         .onChange(of: store.lastError) { _, error in
             showsError = error != nil
@@ -255,36 +261,21 @@ struct MemePanelView: View {
         }
     }
 
-    /// NSPopover sheets stay in the popover's responder chain. Pressing Return
-    /// there can close the popover before SwiftUI confirms the edit, leaving a
-    /// hidden sheet as the key responder. A small app-modal `NSAlert` is the
-    /// narrow AppKit bridge here: it is frontmost, owns Return itself, and
-    /// returns one value back to the SwiftUI store only after confirmation.
+    /// This stays app-modal because an NSPopover sheet shares the popover's
+    /// responder chain. The shared panel host gives it HedgeMemo's material
+    /// while keeping Return and Escape inside the frontmost prompt.
     @MainActor
     private func presentCategoryEditor(title: String, initialName: String, onSave: @escaping (String) -> Void) {
-        let alert = NSAlert()
-        alert.messageText = title
-        alert.informativeText = L10n.text("输入分类名称后按 Return 保存。")
-        alert.alertStyle = .informational
-        alert.addButton(withTitle: L10n.text("保存"))
-        alert.addButton(withTitle: L10n.text("取消"))
-
-        let field = NSTextField(string: initialName)
-        field.placeholderString = L10n.text("分类名称")
-        field.frame = NSRect(x: 0, y: 0, width: 280, height: 24)
-        alert.accessoryView = field
-        // `NSAlert` otherwise initially focuses its default button. Explicitly
-        // nominate the field so typing and Return stay entirely inside this
-        // frontmost modal session from the first event.
-        alert.window.initialFirstResponder = field
-
-        // Make the native modal dialog the active event target before it runs.
-        // This keeps Return inside the dialog instead of sending it to the
-        // status-item popover's close handler.
-        NSApp.activate(ignoringOtherApps: true)
-        let response = alert.runModal()
-        guard response == .alertFirstButtonReturn else { return }
-        onSave(field.stringValue)
+        UnifiedPopupPanel.requestText(
+            title: title,
+            message: L10n.text("输入分类名称后按 Return 保存。"),
+            placeholder: L10n.text("分类名称"),
+            initialValue: initialName,
+            confirmationTitle: L10n.text("保存")
+        ) { value in
+            guard let value else { return }
+            onSave(value)
+        }
     }
 
     // MARK: - Gesture-driven reordering
@@ -587,5 +578,6 @@ private struct NoteEditorSheet: View {
         }
         .padding(20)
         .frame(width: 340)
+        .unifiedPopupSurface()
     }
 }
