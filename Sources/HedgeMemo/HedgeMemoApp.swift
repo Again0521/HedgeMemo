@@ -6,10 +6,15 @@ import SwiftUI
 final class HedgeMemoAppDelegate: NSObject, NSApplicationDelegate {
     private var services: AppServices?
     private var statusItemController: StatusItemController?
+    private var textCompletionCrashGuard: TextCompletionCrashGuard?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         AppLanguage.bootstrap()
         NSApp.setActivationPolicy(.accessory)
+        // Install before any SwiftUI/AppKit input is created. macOS 27 can
+        // otherwise retain its completion remote view until the next display
+        // wake and abort while reconnecting the menu-bar status item.
+        textCompletionCrashGuard = TextCompletionCrashGuard()
         let services = AppServices()
         services.start()
         let statusItemController = StatusItemController(services: services)
