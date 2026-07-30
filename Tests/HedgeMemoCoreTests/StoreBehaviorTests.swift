@@ -26,6 +26,64 @@ final class StoreBehaviorTests: XCTestCase {
 
     // MARK: - MemeStore
 
+    func testMemeFilterReturnsSharedProjectionInsteadOfMaterializedItemArray() {
+        let items = (0..<20_000).map { index in
+            MemeItem(
+                fileName: "\(index).png",
+                contentHash: "hash-\(index)",
+                note: "item-\(index)",
+                sortOrder: index
+            )
+        }
+
+        let identity = MemeFilteredResults(source: items, positions: nil)
+        XCTAssertEqual(identity.count, 20_000)
+        XCTAssertEqual(identity.retainedPositionCount, 0)
+        XCTAssertEqual(identity.first?.id, items.first?.id)
+        XCTAssertEqual(identity.last?.id, items.last?.id)
+
+        let evenPositions = Array(stride(from: 0, to: items.count, by: 2))
+        let filtered = MemeFilteredResults(
+            source: items,
+            positions: evenPositions
+        )
+        XCTAssertEqual(filtered.count, 10_000)
+        XCTAssertEqual(filtered.retainedPositionCount, 10_000)
+        XCTAssertEqual(filtered[4_999].id, items[9_998].id)
+    }
+
+    func testUnfilteredMemeStoreResultRetainsNoRedundantPositionArray() {
+        let store = makeMemeStore()
+        XCTAssertTrue(store.addImage(Fixture.solidImage(0.1, size: 6), note: "一"))
+        XCTAssertTrue(store.addImage(Fixture.solidImage(0.5, size: 8), note: "二"))
+        XCTAssertTrue(store.addImage(Fixture.solidImage(0.9, size: 10), note: "三"))
+
+        let result = store.filteredMemes(query: "")
+
+        XCTAssertEqual(result.map(\.note), ["一", "二", "三"])
+        XCTAssertEqual(result.retainedPositionCount, 0)
+    }
+
+    func testMemeFilterMemoKeepsOnlyBoundedRecentQueries() {
+        let store = makeMemeStore()
+        XCTAssertTrue(store.addImage(Fixture.solidImage(0.1, size: 6), note: "alpha"))
+        XCTAssertTrue(store.addImage(Fixture.solidImage(0.5, size: 8), note: "beta"))
+        XCTAssertTrue(store.addImage(Fixture.solidImage(0.9, size: 10), note: "gamma"))
+
+        for index in 0..<40 {
+            _ = store.filteredMemes(query: "unique-query-\(index)")
+        }
+
+        XCTAssertLessThanOrEqual(store.filteredMemoMetrics.entryCount, 8)
+        XCTAssertLessThanOrEqual(
+            store.filteredMemoMetrics.retainedPositionCount,
+            100_000
+        )
+        store.releaseTransientCaches()
+        XCTAssertEqual(store.filteredMemoMetrics.entryCount, 0)
+        XCTAssertEqual(store.filteredMemoMetrics.retainedPositionCount, 0)
+    }
+
     func testMemeReorderMovesDraggedItemIntoTargetSlot() {
         let store = makeMemeStore()
         XCTAssertTrue(store.addImage(Fixture.solidImage(0.1, size: 6), note: "一"))
@@ -328,6 +386,83 @@ final class StoreBehaviorTests: XCTestCase {
         XCTAssertEqual(reloaded.filteredMemes(query: "").map(\.note), ["一", "二"])
     }
 
+    func testStreamingMemeArchiveImportPublishesOnePersistedBatch() throws {
+        let repository = MemeRepository(rootURL: tempRoot("stream-archive-target"))
+        let store = MemeStore(repository: repository)
+        let imagesURL = tempRoot("stream-archive-images")
+        try FileManager.default.createDirectory(
+            at: imagesURL,
+            withIntermediateDirectories: true
+        )
+        let png = try XCTUnwrap(Fixture.solidImage(0.4, size: 10).pngData)
+        try Fixture.gifBytes.write(to: imagesURL.appendingPathComponent("first.gif"))
+        try png.write(to: imagesURL.appendingPathComponent("second.png"))
+        let category = MemeCategory(name: "逐条分类")
+        let records = [
+            MemeItem(
+                fileName: "first.gif",
+                contentHash: "stale-first",
+                note: "逐条一",
+                categoryID: category.id
+            ),
+            MemeItem(
+                fileName: "second.png",
+                contentHash: "stale-second",
+                note: "逐条二",
+                categoryID: category.id
+            ),
+        ]
+
+        try store.importArchive(
+            categories: [category],
+            imagesURL: imagesURL
+        ) { consume in
+            for record in records { try consume(record) }
+        }
+
+        let reloaded = MemeStore(
+            repository: MemeRepository(rootURL: repository.rootURL)
+        )
+        XCTAssertEqual(reloaded.categories.map(\.name), ["逐条分类"])
+        XCTAssertEqual(reloaded.filteredMemes(query: "").map(\.note), ["逐条一", "逐条二"])
+        XCTAssertEqual(repository.completedSnapshotWriteCount, 1)
+    }
+
+    func testStreamingMemeArchiveFailureRemovesStagedImagesBeforePublishing() throws {
+        enum ImportFailure: Error { case truncated }
+
+        let repository = MemeRepository(rootURL: tempRoot("stream-archive-rollback"))
+        let store = MemeStore(repository: repository)
+        let imagesURL = tempRoot("stream-archive-rollback-images")
+        try FileManager.default.createDirectory(
+            at: imagesURL,
+            withIntermediateDirectories: true
+        )
+        try Fixture.gifBytes.write(
+            to: imagesURL.appendingPathComponent("first.gif")
+        )
+        let record = MemeItem(
+            fileName: "first.gif",
+            contentHash: "stale-first",
+            note: "不应发布"
+        )
+
+        XCTAssertThrowsError(
+            try store.importArchive(categories: [], imagesURL: imagesURL) {
+                consume in
+                try consume(record)
+                throw ImportFailure.truncated
+            }
+        )
+        XCTAssertTrue(store.filteredMemes(query: "").isEmpty)
+        XCTAssertEqual(
+            try FileManager.default.contentsOfDirectory(
+                atPath: repository.imagesURL.path
+            ),
+            []
+        )
+    }
+
     func testCopyingAMemeNotifiesSoItStaysOutOfHistory() {
         let store = makeMemeStore()
         XCTAssertTrue(store.addImage(Fixture.solidImage(0.5, size: 8), note: "图"))
@@ -437,6 +572,144 @@ final class StoreBehaviorTests: XCTestCase {
             reloaded.entries.first?.sourceBundleURLPath,
             "/System/Applications/Notes.app"
         )
+    }
+
+    func testTenThousandRepeatedMetadataFieldsShareFiveCanonicalStrings() {
+        let store = makeClipboardStore()
+        let displayName = "Example Browser Application"
+        let bundleIdentifier = "com.example.repeated-browser"
+        let bundlePath = "/Applications/Example Browser Application.app"
+        let categoryKey = "custom:7B29CB93-63C8-43F1-A8E6-DA1368104B81"
+        let formatType = "public.example-rich-text-representation"
+
+        func independentlyDecoded(_ value: String) -> String {
+            String(data: Data(value.utf8), encoding: .utf8)!
+        }
+
+        let entries = (0..<10_000).map { index in
+            var entry = ClipboardEntry(
+                kind: .text,
+                text: "entry-\(index)",
+                contentHash: "source-intern-\(index)",
+                sourceApp: independentlyDecoded(displayName),
+                sourceBundleIdentifier: independentlyDecoded(bundleIdentifier),
+                sourceBundleURLPath: independentlyDecoded(bundlePath),
+                manualCategoryStorageValue: independentlyDecoded(categoryKey)
+            )
+            entry.originalFormats = [
+                ClipboardOriginalFormat(
+                    typeIdentifier: independentlyDecoded(formatType),
+                    fileName: "format-\(index).data",
+                    byteCount: index
+                )
+            ]
+            return entry
+        }
+        store.injectPreviewEntries(entries)
+
+        XCTAssertEqual(store.sourceStringInternerMetrics.uniqueStringCount, 5)
+        XCTAssertEqual(
+            store.sourceStringInternerMetrics.canonicalizedAssignmentCount,
+            50_000
+        )
+        XCTAssertEqual(store.sourceStringInternerMetrics.peakUniqueStringCount, 5)
+        XCTAssertTrue(store.entries.allSatisfy {
+            $0.sourceApp == displayName
+                && $0.sourceBundleIdentifier == bundleIdentifier
+                && $0.sourceBundleURLPath == bundlePath
+                && $0.manualCategoryStorageValue == categoryKey
+                && $0.originalFormats?.first?.typeIdentifier == formatType
+        })
+
+        func utf8Address(_ value: String?) -> UInt? {
+            guard let value else { return nil }
+            return value.utf8.withContiguousStorageIfAvailable { buffer in
+                buffer.baseAddress.map { UInt(bitPattern: $0) }
+            } ?? nil
+        }
+
+        XCTAssertEqual(
+            Set(store.entries.compactMap { utf8Address($0.sourceApp) }).count,
+            1
+        )
+        XCTAssertEqual(
+            Set(store.entries.compactMap { utf8Address($0.sourceBundleIdentifier) }).count,
+            1
+        )
+        XCTAssertEqual(
+            Set(store.entries.compactMap { utf8Address($0.sourceBundleURLPath) }).count,
+            1
+        )
+        XCTAssertEqual(
+            Set(store.entries.compactMap {
+                utf8Address($0.manualCategoryStorageValue)
+            }).count,
+            1
+        )
+        XCTAssertEqual(
+            Set(store.entries.compactMap {
+                utf8Address($0.originalFormats?.first?.typeIdentifier)
+            }).count,
+            1
+        )
+    }
+
+    func testSourceFilterCachesStayBoundedAndReleaseCompletely() {
+        let store = makeClipboardStore()
+        store.settings.maxEntries = 10_000
+        let entries = (0..<300).map { index in
+            ClipboardEntry(
+                kind: .text,
+                text: "shared source-filter entry \(index)",
+                contentHash: "source-filter-\(index)",
+                sourceApp: "Application \(index)",
+                sourceBundleIdentifier: "com.example.application-\(index)"
+            )
+        }
+        store.injectPreviewEntries(entries)
+        let categories = (0..<12).map { index in
+            CustomClipboardCategory(
+                name: "Source cache \(index)",
+                matchMode: .all,
+                rules: [
+                    ClipboardClassificationRule(
+                        kind: .contains,
+                        value: "shared source-filter"
+                    )
+                ]
+            )
+        }
+        store.settings.customCategories = categories
+
+        for category in categories {
+            let key = ClipboardCategoryKey.custom(category.id)
+            XCTAssertEqual(
+                store.sourceApplicationsForFiltering(key: key).count,
+                300
+            )
+            XCTAssertFalse(store.hasUnknownSourceForFiltering(key: key))
+        }
+
+        XCTAssertLessThanOrEqual(
+            store.sourceApplicationMemoMetrics.entryCount,
+            8
+        )
+        XCTAssertLessThanOrEqual(
+            store.sourceApplicationMemoMetrics.retainedApplicationCount,
+            2_048
+        )
+        XCTAssertLessThanOrEqual(
+            store.sourceApplicationMemoMetrics.unknownEntryCount,
+            8
+        )
+
+        store.releaseTransientCaches()
+        XCTAssertEqual(store.sourceApplicationMemoMetrics.entryCount, 0)
+        XCTAssertEqual(
+            store.sourceApplicationMemoMetrics.retainedApplicationCount,
+            0
+        )
+        XCTAssertEqual(store.sourceApplicationMemoMetrics.unknownEntryCount, 0)
     }
 
     func testPasteboardCaptureHonorsBlocklistAndAllowlistBeforeRecording() {
@@ -1019,6 +1292,11 @@ final class StoreBehaviorTests: XCTestCase {
         let all = store.orderedEntries(key: .builtin(.text))
         XCTAssertEqual(all.count, 10_000)
         XCTAssertEqual(
+            all.retainedPositionCount,
+            10_000,
+            "the result retains indexes only, never a second 10,000-entry model array"
+        )
+        XCTAssertEqual(
             store.orderedEntries(query: "needle%9999", key: .builtin(.text)).compactMap(\.text),
             ["needle middle 9999 tail"],
             "large-library optimization must preserve ordered-fragment search semantics"
@@ -1028,5 +1306,65 @@ final class StoreBehaviorTests: XCTestCase {
             300,
             "the visible page remains bounded even at the configured history ceiling"
         )
+
+        for index in 0..<40 {
+            _ = store.orderedEntries(
+                query: "missing-query-\(index)",
+                key: .builtin(.text)
+            )
+        }
+        XCTAssertLessThanOrEqual(store.orderedMemoMetrics.entryCount, 8)
+        XCTAssertLessThanOrEqual(
+            store.orderedMemoMetrics.retainedPositionCount,
+            100_000
+        )
+        store.releaseTransientCaches()
+        XCTAssertEqual(store.orderedMemoMetrics.entryCount, 0)
+        XCTAssertEqual(store.orderedMemoMetrics.retainedPositionCount, 0)
+    }
+
+    func testClipboardOrderedResultsMapDesktopPinsAndSecretsLazily() {
+        let ordinary = (0..<20).map { index in
+            ClipboardEntry(
+                kind: .text,
+                text: "ordinary-\(index)",
+                contentHash: "ordinary-\(index)"
+            )
+        }
+        let firstDesktop = ClipboardEntry(
+            kind: .text,
+            text: "desktop-0",
+            contentHash: "desktop-0"
+        )
+        let secondDesktop = ClipboardEntry(
+            kind: .text,
+            text: "desktop-1",
+            contentHash: "desktop-1"
+        )
+        let secret = ClipboardEntry(
+            kind: .text,
+            text: "encrypted-envelope",
+            contentHash: "secret",
+            origin: .concealedPassword
+        )
+        let source = ordinary + [firstDesktop, secondDesktop, secret]
+        let results = ClipboardOrderedResults(
+            source: source,
+            ordinaryPositions: Array(ordinary.indices) + [22],
+            desktopPinnedPositions: [20, 21]
+        ).displayingSecrets([secret.id: "revealed"])
+
+        XCTAssertEqual(results.count, 23)
+        XCTAssertEqual(results.retainedPositionCount, 23)
+        XCTAssertEqual(
+            results[ClipboardHistoryPolicy.desktopPinnedInsertionIndex].id,
+            firstDesktop.id
+        )
+        XCTAssertEqual(
+            results[ClipboardHistoryPolicy.desktopPinnedInsertionIndex + 1].id,
+            secondDesktop.id
+        )
+        XCTAssertEqual(results.last?.text, "revealed")
+        XCTAssertEqual(source.last?.text, "encrypted-envelope")
     }
 }

@@ -373,8 +373,14 @@ await MainActor.run {
         let extracted = try MemeArchiveService.extract(from: archiveURL)
         defer { MemeArchiveService.removeExtraction(extracted.directory) }
         expect(extracted.manifest.formatVersion == MemeArchiveManifest.formatVersion, "ZIP exports must carry the current HedgeMemo manifest")
-        expect(extracted.manifest.memeSnapshot?.memes.isEmpty == false, "ZIP exports must retain selected meme data")
-        expect(extracted.manifest.clipboardSnapshot?.entries.contains(where: { $0.origin == .hedgeMemoScreenshot }) == true, "ZIP exports must retain the screenshot category")
+        var archivedMemes: [MemeItem] = []
+        var archivedClipboardEntries: [ClipboardEntry] = []
+        try MemeArchiveService.forEachMeme(in: extracted) { archivedMemes.append($0) }
+        try MemeArchiveService.forEachClipboardEntry(in: extracted) {
+            archivedClipboardEntries.append($0)
+        }
+        expect(!archivedMemes.isEmpty, "ZIP exports must retain selected meme data")
+        expect(archivedClipboardEntries.contains(where: { $0.origin == .hedgeMemoScreenshot }), "ZIP exports must retain the screenshot category")
     } catch {
         expect(false, "HedgeMemo ZIP export/import must round-trip: \(error.localizedDescription)")
     }

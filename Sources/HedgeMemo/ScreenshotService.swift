@@ -281,7 +281,9 @@ private final class SmartWindowPickerController {
     }
 
     private func finish(window: CapturableWindow?) {
-        overlay?.orderOut(nil)
+        if let overlay {
+            TransientPanelLifetime.release(overlay)
+        }
         overlay = nil
         onComplete(window)
     }
@@ -457,7 +459,9 @@ private final class ManualScreenshotSelectionController {
     }
 
     private func finish(rect: CGRect?) {
-        window?.orderOut(nil)
+        if let window {
+            TransientPanelLifetime.release(window)
+        }
         window = nil
         onComplete(rect)
     }

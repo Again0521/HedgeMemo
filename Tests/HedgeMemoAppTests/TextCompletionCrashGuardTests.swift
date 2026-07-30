@@ -98,4 +98,27 @@ final class TextCompletionCrashGuardTests: XCTestCase {
         XCTAssertTrue(session.panel.collectionBehavior.contains(.moveToActiveSpace))
         XCTAssertTrue(session.panel.collectionBehavior.contains(.fullScreenAuxiliary))
     }
+
+    func testTransientPanelReleaseDetachesHostedContentAndDelegate() {
+        final class Delegate: NSObject, NSWindowDelegate {}
+
+        let panel = NSPanel(
+            contentRect: NSRect(x: 0, y: 0, width: 240, height: 120),
+            styleMask: [.titled],
+            backing: .buffered,
+            defer: false
+        )
+        let delegate = Delegate()
+        let content = NSView()
+        panel.isReleasedWhenClosed = false
+        panel.delegate = delegate
+        panel.contentView = content
+
+        TransientPanelLifetime.release(panel)
+
+        XCTAssertNil(panel.delegate)
+        XCTAssertNil(panel.contentViewController)
+        XCTAssertNil(panel.contentView)
+        XCTAssertFalse(panel.isVisible)
+    }
 }

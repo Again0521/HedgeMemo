@@ -3,6 +3,12 @@ import CryptoKit
 import Foundation
 
 public final class ClipboardHistoryRepository: @unchecked Sendable {
+    private struct PendingSnapshotWrite: @unchecked Sendable {
+        let generation: Int
+        let snapshot: ClipboardHistorySnapshot
+        let completion: @Sendable (String?, Bool) -> Void
+    }
+
     public let rootURL: URL
     public let imagesURL: URL
     public let originalFormatsURL: URL
@@ -10,11 +16,16 @@ public final class ClipboardHistoryRepository: @unchecked Sendable {
     private let legacySnapshotURL: URL
     let databaseURL: URL
     private let database: ClipboardHistoryDatabase
-    private var databaseState: ClipboardHistoryDatabase.State?
+    private lazy var textProvider = ClipboardEntryTextProvider { [database] id in
+        database.loadText(id: id)
+    }
     private let fileManager: FileManager
     private let snapshotIO: RepositoryIOCoordinator
     private let pendingGenerationLock = NSLock()
     private var latestQueuedGeneration = 0
+    private var pendingSnapshotWrite: PendingSnapshotWrite?
+    private var snapshotWriteInFlight = false
+    private var peakRetainedSnapshotCount = 0
     private var completedWriteCount = 0
     private var latestMutationCounts = ClipboardHistoryDatabase.MutationCounts(
         changedEntries: 0,
@@ -54,9 +65,7 @@ public final class ClipboardHistoryRepository: @unchecked Sendable {
         try snapshotIO.sync {
             try prepare()
             if database.exists, try database.isInitialized {
-                let loaded = try database.load()
-                databaseState = loaded.state
-                return loaded.snapshot
+                return try database.load(textProvider: textProvider)
             }
             guard fileManager.fileExists(atPath: legacySnapshotURL.path) else {
                 return ClipboardHistorySnapshot()
@@ -70,47 +79,110 @@ public final class ClipboardHistoryRepository: @unchecked Sendable {
                 from: data
             )
             snapshot.settings.normalize()
-            latestMutationCounts = try database.save(snapshot, state: &databaseState)
+            latestMutationCounts = try database.save(snapshot)
+            snapshot.entries = snapshot.entries.map { entry in
+                var deferred = entry
+                deferred.deferText(
+                    to: textProvider,
+                    automaticCategory: entry.contentCategory
+                )
+                return deferred
+            }
             return snapshot
         }
+    }
+
+    public func releaseTransientTextCache() {
+        textProvider.removeAll()
+    }
+
+    /// Releases both decoded bodies and SQLite's reusable reader page cache.
+    /// Stored models keep their lazy provider, so this has no data or display
+    /// effect; a later access simply opens a fresh bounded reader.
+    public func releaseTransientMemory() {
+        textProvider.removeAll()
+        database.releaseTextReaderConnection()
+    }
+
+    func deferredProjection(of entry: ClipboardEntry) -> ClipboardEntry {
+        var deferred = entry
+        deferred.deferText(
+            to: textProvider,
+            automaticCategory: entry.automaticContentCategory
+        )
+        return deferred
+    }
+
+    /// Switches an already-deferred import entry from its disposable text
+    /// source to the canonical database provider without rebuilding or
+    /// publishing the entry array.
+    func redirectDeferredTextToRepository(for entry: ClipboardEntry) {
+        entry.redirectDeferredText(to: textProvider)
     }
 
     public func save(_ snapshot: ClipboardHistorySnapshot) throws {
         try snapshotIO.sync { try saveImmediately(snapshot) }
     }
 
-    /// Enqueues a snapshot write, skipping generations that a newer enqueued
-    /// snapshot has already superseded.
+    /// Enqueues a snapshot write with a single replaceable pending slot.
     ///
     /// Writes are serialized, so a burst of mutations — a paste queue being
     /// filled, an import, a run of quick copies — used to queue one complete
     /// re-encode of the entire history per mutation, each one obsolete by the
-    /// time it ran. Only the newest pending snapshot is actually encoded; the
-    /// superseded ones report success without doing the work, so callers (and
-    /// the reload-as-barrier contract) still see the latest state on disk.
+    /// time it ran. Each serial-queue marker retains only its generation;
+    /// snapshot arrays and callbacks live in the single pending slot. Together
+    /// with one already-writing generation this bounds retained full-library
+    /// snapshots at two while preserving ordering relative to row deltas.
     public func saveAsync(
         _ snapshot: ClipboardHistorySnapshot,
-        completion: @escaping @Sendable (String?) -> Void
+        completion: @escaping @Sendable (_ errorMessage: String?, _ didWrite: Bool) -> Void
     ) {
-        let generation = pendingGenerationLock.withLock { () -> Int in
+        let (generation, supersededCompletion) = pendingGenerationLock.withLock {
             latestQueuedGeneration += 1
-            return latestQueuedGeneration
+            let generation = latestQueuedGeneration
+            let supersededCompletion = pendingSnapshotWrite?.completion
+            pendingSnapshotWrite = PendingSnapshotWrite(
+                generation: generation,
+                snapshot: snapshot,
+                completion: completion
+            )
+            updatePeakRetainedSnapshotCountLocked()
+            return (generation, supersededCompletion)
         }
+        supersededCompletion?(nil, false)
         snapshotIO.async { [self] in
-            let isSuperseded = pendingGenerationLock.withLock {
-                generation < latestQueuedGeneration
-            }
-            guard !isSuperseded else {
-                completion(nil)
-                return
-            }
-            do {
-                try saveImmediately(snapshot)
-                completion(nil)
-            } catch {
-                completion(error.localizedDescription)
-            }
+            performPendingSnapshotWrite(generation: generation)
         }
+    }
+
+    private func performPendingSnapshotWrite(generation: Int) {
+        let work: PendingSnapshotWrite? = pendingGenerationLock.withLock {
+            guard pendingSnapshotWrite?.generation == generation else {
+                return nil
+            }
+            let work = pendingSnapshotWrite
+            pendingSnapshotWrite = nil
+            snapshotWriteInFlight = true
+            updatePeakRetainedSnapshotCountLocked()
+            return work
+        }
+        guard let work else { return }
+
+        do {
+            try saveImmediately(work.snapshot)
+            work.completion(nil, true)
+        } catch {
+            work.completion(error.localizedDescription, false)
+        }
+        pendingGenerationLock.withLock {
+            snapshotWriteInFlight = false
+        }
+    }
+
+    private func updatePeakRetainedSnapshotCountLocked() {
+        let retained = (snapshotWriteInFlight ? 1 : 0)
+            + (pendingSnapshotWrite == nil ? 0 : 1)
+        peakRetainedSnapshotCount = max(peakRetainedSnapshotCount, retained)
     }
 
     /// Incremental hot-path persistence. Unlike a snapshot generation, a delta
@@ -130,8 +202,7 @@ public final class ClipboardHistoryRepository: @unchecked Sendable {
                     upserts: upserts,
                     deletedIDs: deletedIDs,
                     appendingIDs: appendingIDs,
-                    settings: settings,
-                    state: &databaseState
+                    settings: settings
                 )
                 pendingGenerationLock.withLock { completedWriteCount += 1 }
                 completion(nil)
@@ -152,6 +223,14 @@ public final class ClipboardHistoryRepository: @unchecked Sendable {
         pendingGenerationLock.withLock { completedWriteCount }
     }
 
+    var peakRetainedFullSnapshotCount: Int {
+        pendingGenerationLock.withLock { peakRetainedSnapshotCount }
+    }
+
+    var hasTransientTextReaderConnection: Bool {
+        database.hasTextReaderConnection
+    }
+
     var lastDatabaseMutationCounts: (changedEntries: Int, deletedEntries: Int) {
         snapshotIO.sync {
             (
@@ -161,12 +240,24 @@ public final class ClipboardHistoryRepository: @unchecked Sendable {
         }
     }
 
+    var lastDatabaseBackfillMetrics: (
+        rowCount: Int,
+        peakResidentRowCount: Int
+    ) {
+        snapshotIO.sync {
+            (
+                database.lastBackfillRowCount,
+                database.lastBackfillPeakResidentRowCount
+            )
+        }
+    }
+
     private func saveImmediately(_ snapshot: ClipboardHistorySnapshot) throws {
         try HedgeMemoPerformance.measure("ClipboardSnapshotWrite") {
             try prepare()
             var normalized = snapshot
             normalized.settings.normalize()
-            latestMutationCounts = try database.save(normalized, state: &databaseState)
+            latestMutationCounts = try database.save(normalized)
             pendingGenerationLock.withLock { completedWriteCount += 1 }
         }
     }

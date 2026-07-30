@@ -2,6 +2,29 @@ import AppKit
 import HedgeMemoCore
 import SwiftUI
 
+/// Adds a stable display offset without materializing `(index, element)`
+/// tuples. SwiftUI still keys every row by the entry's real ID.
+private struct IndexedElements<Base: RandomAccessCollection>: RandomAccessCollection
+where Base.Index == Int, Base.Element: Identifiable {
+    struct Item: Identifiable {
+        let offset: Int
+        let element: Base.Element
+        var id: Base.Element.ID { element.id }
+    }
+
+    let base: Base
+
+    var startIndex: Int { base.startIndex }
+    var endIndex: Int { base.endIndex }
+
+    subscript(position: Int) -> Item {
+        Item(
+            offset: base.distance(from: base.startIndex, to: position),
+            element: base[position]
+        )
+    }
+}
+
 /// The slideout is presentation state owned by the one Maccy-style
 /// FloatingPanel.  Keeping it in the same hosting hierarchy is intentional:
 /// one native glass view samples the desktop once for both list and preview.
@@ -314,8 +337,7 @@ final class ClipboardHistoryPanelController: NSObject, NSWindowDelegate {
         // highlighted strings and row state indefinitely. Rebuilding this small
         // transient panel on demand trades a little open-time setup for a much
         // smaller true background footprint.
-        panel.delegate = nil
-        panel.contentView = nil
+        TransientPanelLifetime.release(panel)
         self.panel = nil
         mainSurface = nil
         mainScreenFrame = .zero
@@ -378,7 +400,7 @@ final class ClipboardHistoryPanelController: NSObject, NSWindowDelegate {
                 advancedOptions: store.settings.resolvedAdvancedOptions
             )
             let pageLimit = ClipboardPanelPagination.initialLimit(for: key)
-            let heightEntries = Array(ordered.prefix(min(pageLimit, ordered.count)))
+            let heightEntries = ordered.prefix(min(pageLimit, ordered.count))
             initialContentHeight = ClipboardPanelLayout.contentHeight(for: heightEntries, key: key)
         }
         let initialCategoryBarHeight = ClipboardCategoryBarMetrics.height(
@@ -1203,19 +1225,41 @@ private struct SourceApplicationLabel: View {
 }
 
 @MainActor
-private enum SourceApplicationIcon {
+enum SourceApplicationIcon {
     /// Resolving an icon scans every running app and can touch the filesystem.
     /// Hovering the same handful of source apps repeatedly would redo that work
     /// on each preview, so memoize per name (including the "not found" result,
     /// stored as NSNull) for the session.
-    private static var cache: [String: NSImage?] = [:]
+    private static let cache: NSCache<NSString, NSImage> = {
+        let cache = NSCache<NSString, NSImage>()
+        cache.countLimit = 32
+        cache.totalCostLimit = 16 * 1024 * 1024
+        return cache
+    }()
+    private static var unresolvedNames = Set<String>()
 
     static func image(named name: String?) -> NSImage? {
         guard let name, !name.isEmpty else { return nil }
-        if let cached = cache[name] { return cached }
+        if let cached = cache.object(forKey: name as NSString) { return cached }
+        if unresolvedNames.contains(name) { return nil }
         let resolved = resolve(name: name)
-        cache[name] = resolved
+        if let resolved {
+            let pixels = resolved.representations
+                .map { max(1, $0.pixelsWide) * max(1, $0.pixelsHigh) }
+                .max() ?? 1
+            cache.setObject(resolved, forKey: name as NSString, cost: pixels * 4)
+        } else {
+            // Negative lookups are cheap strings, but still bounded so changing
+            // application installs cannot grow a permanent session table.
+            if unresolvedNames.count >= 64 { unresolvedNames.removeAll(keepingCapacity: true) }
+            unresolvedNames.insert(name)
+        }
         return resolved
+    }
+
+    static func releaseTransientCache() {
+        cache.removeAllObjects()
+        unresolvedNames.removeAll(keepingCapacity: false)
     }
 
     private static func resolve(name: String) -> NSImage? {
@@ -1524,22 +1568,20 @@ struct ClipboardHistoryPanelView: View {
     /// state, so a locked category cannot leak rows through any path.
     private var activeGate: AppLockStore.GateState { lockStore.gateState(forCategory: activeKey) }
     private var isActiveCategoryLocked: Bool { activeGate != .open }
-    private var entries: [ClipboardEntry] {
-        guard !isActiveCategoryLocked else { return [] }
+    private var entries: ClipboardOrderedResults {
+        guard !isActiveCategoryLocked else { return .empty }
         let ordered = store.orderedEntries(
             query: query,
             key: activeKey,
             advancedOptions: advancedOptions
         )
         guard activeKey == .builtin(.password) else { return ordered }
-        return ordered.map {
-            // Never fall back to stored ciphertext in the UI. If decryption
-            // failed or has not completed, `previewText` supplies the mask.
-            $0.displayProjection(revealedSecret: revealedSecretTexts[$0.id])
-        }
+        // Projection stays lazy: only rows/shortcuts actually read by the
+        // panel receive plaintext, and the source Store models remain encrypted.
+        return ordered.displayingSecrets(revealedSecretTexts)
     }
-    private var visibleEntries: [ClipboardEntry] {
-        Array(entries.prefix(min(visibleEntryLimit, entries.count)))
+    private var visibleEntries: ClipboardOrderedResults.SubSequence {
+        entries.prefix(min(visibleEntryLimit, entries.count))
     }
     private var activeSelectionID: UUID? {
         contextMenuEntryID ?? hoveredID ?? keyboardSelectedID
@@ -2118,7 +2160,9 @@ struct ClipboardHistoryPanelView: View {
         // category it projects the revealed text over the whole list — and it
         // was previously reached again from every row's `onAppear`.
         let all = entries
-        let rows = Array(all.prefix(min(visibleEntryLimit, all.count)))
+        let rows = IndexedElements(
+            base: all.prefix(min(visibleEntryLimit, all.count))
+        )
         switch activeKey {
         case .builtin(.image), .builtin(.screenshot):
             LazyVGrid(
@@ -2129,7 +2173,9 @@ struct ClipboardHistoryPanelView: View {
                 alignment: .leading,
                 spacing: ClipboardPanelLayout.imageCellSpacing
             ) {
-                ForEach(Array(rows.enumerated()), id: \.element.id) { index, entry in
+                ForEach(rows) { row in
+                    let index = row.offset
+                    let entry = row.element
                     ImageEntryCell(
                         entry: entry,
                         index: index,
@@ -2150,7 +2196,9 @@ struct ClipboardHistoryPanelView: View {
             }
         default:
             LazyVStack(spacing: ClipboardPanelLayout.listSpacing) {
-                ForEach(Array(rows.enumerated()), id: \.element.id) { index, entry in
+                ForEach(rows) { row in
+                    let index = row.offset
+                    let entry = row.element
                     VStack(spacing: 0) {
                         if entry.kind == .image {
                             CompactImageEntryRow(
@@ -2286,7 +2334,7 @@ struct ClipboardHistoryPanelView: View {
     }
 
     private func validateSelection() {
-        let ids = Set(entries.map(\.id))
+        let ids = Set(entries.lazy.map(\.id))
         if let hoveredID, !ids.contains(hoveredID) { self.hoveredID = nil }
         if let keyboardSelectedID, !ids.contains(keyboardSelectedID) { self.keyboardSelectedID = nil }
     }

@@ -44,7 +44,7 @@ struct MemePanelView: View {
     private var columns: [GridItem] {
         Array(repeating: GridItem(.fixed(tileSide), spacing: tileSpacing), count: columnCount)
     }
-    private var visibleMemes: [MemeItem] { store.filteredMemes(query: query) }
+    private var visibleMemes: MemeFilteredResults { store.filteredMemes(query: query) }
     private var gridHeight: CGFloat { tileSide * 3 + tileSpacing * 2 + 4 }
 
     var body: some View {
@@ -385,9 +385,7 @@ struct MemePanelView: View {
         guard panel.runModal() == .OK else { return }
 
         let targetCategoryID = store.selectedCategoryID
-        let payloads = MemeImageImport.collectPayloads(from: panel.urls)
-        guard !payloads.isEmpty else { return }
-        for payload in payloads {
+        MemeImageImport.forEachPayload(from: panel.urls) { payload in
             _ = store.addImageData(payload, categoryID: targetCategoryID)
         }
     }
@@ -421,25 +419,40 @@ private struct MemeImportTile: View {
     }
 }
 
-private enum MemeImageImport {
-    static func collectPayloads(from selectedURLs: [URL]) -> [ImageAssetData] {
-        let urls = selectedURLs.flatMap(imageFiles(in:))
+enum MemeImageImport {
+    @discardableResult
+    static func forEachPayload(
+        from selectedURLs: [URL],
+        consume: (ImageAssetData) -> Void
+    ) -> Int {
         var seen = Set<URL>()
-        return urls.compactMap { url in
-            guard seen.insert(url.standardizedFileURL).inserted else { return nil }
-            return ImageAssetData(fileURL: url)
+        var importedCount = 0
+        for selectedURL in selectedURLs {
+            forEachImageFile(in: selectedURL) { url in
+                guard seen.insert(url.standardizedFileURL).inserted,
+                      let payload = ImageAssetData(fileURL: url) else { return }
+                consume(payload)
+                importedCount += 1
+            }
         }
+        return importedCount
     }
 
-    private static func imageFiles(in url: URL) -> [URL] {
+    private static func forEachImageFile(in url: URL, consume: (URL) -> Void) {
         var isDirectory: ObjCBool = false
-        guard FileManager.default.fileExists(atPath: url.path, isDirectory: &isDirectory) else { return [] }
-        if !isDirectory.boolValue { return isImageFile(url) ? [url] : [] }
+        guard FileManager.default.fileExists(atPath: url.path, isDirectory: &isDirectory) else { return }
+        if !isDirectory.boolValue {
+            if isImageFile(url) { consume(url) }
+            return
+        }
 
         let keys: Set<URLResourceKey> = [.isRegularFileKey, .contentTypeKey]
         let options: FileManager.DirectoryEnumerationOptions = [.skipsHiddenFiles, .skipsPackageDescendants]
         let enumerator = FileManager.default.enumerator(at: url, includingPropertiesForKeys: Array(keys), options: options)
-        return (enumerator?.allObjects as? [URL] ?? []).filter(isImageFile)
+        guard let enumerator else { return }
+        for case let candidate as URL in enumerator where isImageFile(candidate) {
+            consume(candidate)
+        }
     }
 
     private static func isImageFile(_ url: URL) -> Bool {

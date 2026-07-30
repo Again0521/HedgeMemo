@@ -58,7 +58,8 @@ enum CodeHighlighter {
     // bodies on the main thread in practice.
     nonisolated(unsafe) private static let highlightCache: NSCache<NSString, HighlightBox> = {
         let cache = NSCache<NSString, HighlightBox>()
-        cache.countLimit = 600
+        cache.countLimit = 256
+        cache.totalCostLimit = 16 * 1024 * 1024
         return cache
     }()
 
@@ -82,8 +83,17 @@ enum CodeHighlighter {
         let result = HedgeMemoPerformance.measure("CodePreviewHighlight") {
             computeHighlight(code, theme: theme)
         }
-        highlightCache.setObject(HighlightBox(result), forKey: key)
+        // AttributedString storage varies with the number of attribute runs.
+        // Six bytes per UTF-8 byte is deliberately conservative and, together
+        // with the hard count limit, bounds this process-lifetime cache without
+        // changing the highlighted output.
+        let estimatedCost = max(256, code.utf8.count * 6)
+        highlightCache.setObject(HighlightBox(result), forKey: key, cost: estimatedCost)
         return result
+    }
+
+    static func releaseTransientCache() {
+        highlightCache.removeAllObjects()
     }
 
     private static func computeHighlight(_ code: String, theme: CodeHighlightTheme) -> AttributedString {

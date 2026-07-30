@@ -33,6 +33,7 @@ final class UnifiedPopupSession: NSObject, NSWindowDelegate {
     }
 
     func present() {
+        defer { TransientPanelLifetime.release(panel) }
         NSApp.activate(ignoringOtherApps: true)
         panel.center()
         TextCompletionCrashGuard.prepareToOrderOnScreen(panel)

@@ -216,8 +216,7 @@ final class StatusItemController: NSObject {
 
     private func hideKeyboardMemePanel() {
         guard let panel = keyboardMemePanel else { return }
-        panel.orderOut(nil)
-        panel.contentView = nil
+        TransientPanelLifetime.release(panel)
         keyboardMemePanel = nil
         if !popover.isShown { stopOutsideClickMonitor() }
         services.memeStore.releaseTransientCaches()

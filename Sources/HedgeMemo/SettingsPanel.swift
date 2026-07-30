@@ -128,6 +128,12 @@ final class SettingsWindowController: NSObject, NSWindowDelegate {
     }
 
     func windowWillClose(_ notification: Notification) {
+        if let panel {
+            // The close animation is already in progress. Detach the hosting
+            // tree without recursively closing so settings-only view state and
+            // subscriptions do not remain resident between openings.
+            TransientPanelLifetime.release(panel, close: false)
+        }
         panel = nil
     }
 }

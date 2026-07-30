@@ -172,10 +172,11 @@ final class ClipboardRichTextTests: XCTestCase {
         let targetRepository = ClipboardHistoryRepository(rootURL: tempRoot("archive-target"))
         let targetStore = ClipboardHistoryStore(repository: targetRepository)
         try targetStore.importArchive(
-            try XCTUnwrap(extracted.manifest.clipboardSnapshot),
             imagesURL: extracted.directory.appendingPathComponent("clipboard-images", isDirectory: true),
             originalFormatsURL: extracted.directory.appendingPathComponent("clipboard-formats", isDirectory: true)
-        )
+        ) { consume in
+            try MemeArchiveService.forEachClipboardEntry(in: extracted, consume)
+        }
 
         let output = NSPasteboard.withUniqueName()
         XCTAssertTrue(targetStore.copyToPasteboard(try XCTUnwrap(targetStore.entries.first), to: output))

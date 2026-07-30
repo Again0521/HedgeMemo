@@ -18,18 +18,47 @@ enum LibraryActions {
             defer { MemeArchiveService.removeExtraction(extracted.directory) }
             guard let selection = ArchiveImportSelectionPanel.run(manifest: extracted.manifest) else { return }
             let memeImagesDirectory = extracted.manifest.formatVersion == 1 ? "images" : "meme-images"
-            let memeSnapshot = filteredMemeSnapshot(from: extracted.manifest.memeSnapshot, selection: selection)
-            let clipboardSnapshot = filteredClipboardSnapshot(from: extracted.manifest.clipboardSnapshot, selection: selection)
-            if let memeSnapshot {
-                let manifest = MemeArchiveManifest(memeSnapshot: memeSnapshot, clipboardSnapshot: nil)
-                memeStore.importArchive(manifest, imagesURL: extracted.directory.appendingPathComponent(memeImagesDirectory, isDirectory: true))
+            let selectedMemeCategories =
+                extracted.manifest.availableMemeCategories.filter {
+                    selection.memeCategoryIDs.contains($0.id)
+                }
+            if selection.includesMemes,
+               extracted.manifest.containsMemeRecords
+                || !selectedMemeCategories.isEmpty {
+                try memeStore.importArchive(
+                    categories: selectedMemeCategories,
+                    imagesURL: extracted.directory.appendingPathComponent(
+                        memeImagesDirectory,
+                        isDirectory: true
+                    )
+                ) { consume in
+                    try MemeArchiveService.forEachMeme(in: extracted) { meme in
+                        let selected = meme.categoryID.map(
+                            selection.memeCategoryIDs.contains
+                        ) ?? selection.includeUncategorizedMemes
+                        if selected { try consume(meme) }
+                    }
+                }
             }
-            if let clipboardSnapshot {
+            if selection.includesClipboard,
+               extracted.manifest.containsClipboardRecords {
+                let keys = selection.clipboardCategoryKeys.compactMap(
+                    ClipboardCategoryKey.init(storageValue:)
+                )
+                let customs =
+                    extracted.manifest.availableClipboardSettings?.customCategories ?? []
                 try clipboardStore.importArchive(
-                    clipboardSnapshot,
                     imagesURL: extracted.directory.appendingPathComponent("clipboard-images", isDirectory: true),
                     originalFormatsURL: extracted.directory.appendingPathComponent("clipboard-formats", isDirectory: true)
-                )
+                ) { consume in
+                    try MemeArchiveService.forEachClipboardEntry(in: extracted) { entry in
+                        if keys.contains(where: {
+                            entry.matches(key: $0, customCategories: customs)
+                        }) {
+                            try consume(entry)
+                        }
+                    }
+                }
             }
         } catch {
             memeStore.report(error)

@@ -15,16 +15,27 @@ public enum MemeRepositoryError: LocalizedError {
 }
 
 public final class MemeRepository: @unchecked Sendable {
+    private struct PendingSnapshotWrite: @unchecked Sendable {
+        let generation: Int
+        let snapshot: MemeSnapshot
+        let completion: @Sendable (String?, Bool) -> Void
+    }
+
     public let rootURL: URL
     public let imagesURL: URL
     private let legacySnapshotURL: URL
     let databaseURL: URL
     private let database: MemeDatabase
-    private var databaseState: MemeDatabase.State?
+    private lazy var textProvider = MemeTextProvider { [database] id in
+        database.loadText(id: id)
+    }
     private let fileManager: FileManager
     private let snapshotIO: RepositoryIOCoordinator
     private let pendingGenerationLock = NSLock()
     private var latestQueuedGeneration = 0
+    private var pendingSnapshotWrite: PendingSnapshotWrite?
+    private var snapshotWriteInFlight = false
+    private var peakRetainedSnapshotCount = 0
     private var completedWriteCount = 0
     private var latestMutationCounts = MemeDatabase.MutationCounts(
         changedCategories: 0,
@@ -64,18 +75,36 @@ public final class MemeRepository: @unchecked Sendable {
         try snapshotIO.sync {
             try prepare()
             if database.exists, try database.isInitialized {
-                let loaded = try database.load()
-                databaseState = loaded.state
-                return loaded.snapshot
+                return try database.load(textProvider: textProvider)
             }
             guard fileManager.fileExists(atPath: legacySnapshotURL.path) else {
                 return MemeSnapshot()
             }
             let data = try Data(contentsOf: legacySnapshotURL, options: .mappedIfSafe)
-            let snapshot = try JSONDecoder.memeDecoder.decode(MemeSnapshot.self, from: data)
-            latestMutationCounts = try database.save(snapshot, state: &databaseState)
+            var snapshot = try JSONDecoder.memeDecoder.decode(MemeSnapshot.self, from: data)
+            latestMutationCounts = try database.save(snapshot)
+            snapshot.memes = snapshot.memes.map { meme in
+                var deferred = meme
+                deferred.deferText(to: textProvider)
+                return deferred
+            }
             return snapshot
         }
+    }
+
+    public func releaseTransientTextCache() {
+        textProvider.removeAll()
+    }
+
+    public func releaseTransientMemory() {
+        textProvider.removeAll()
+        database.releaseTextReaderConnection()
+    }
+
+    func deferredProjection(of meme: MemeItem) -> MemeItem {
+        var deferred = meme
+        deferred.deferText(to: textProvider)
+        return deferred
     }
 
     public func loadPage(
@@ -117,33 +146,60 @@ public final class MemeRepository: @unchecked Sendable {
         try snapshotIO.sync { try saveImmediately(snapshot) }
     }
 
-    /// Enqueues a library write, skipping generations a newer enqueued
-    /// snapshot has already superseded. Bulk edits (an import, a multi-item
-    /// move or delete, a drag reorder) otherwise queued one full re-encode of
-    /// the library per step, each obsolete before it ran.
+    /// Keeps only the newest not-yet-started full snapshot. Queue markers hold
+    /// generation numbers rather than the replaced arrays, so a burst retains
+    /// at most one in-flight and one pending library while row-delta ordering
+    /// remains unchanged.
     public func saveAsync(
         _ snapshot: MemeSnapshot,
-        completion: @escaping @Sendable (String?) -> Void
+        completion: @escaping @Sendable (_ errorMessage: String?, _ didWrite: Bool) -> Void
     ) {
-        let generation = pendingGenerationLock.withLock { () -> Int in
+        let (generation, supersededCompletion) = pendingGenerationLock.withLock {
             latestQueuedGeneration += 1
-            return latestQueuedGeneration
+            let generation = latestQueuedGeneration
+            let supersededCompletion = pendingSnapshotWrite?.completion
+            pendingSnapshotWrite = PendingSnapshotWrite(
+                generation: generation,
+                snapshot: snapshot,
+                completion: completion
+            )
+            updatePeakRetainedSnapshotCountLocked()
+            return (generation, supersededCompletion)
         }
+        supersededCompletion?(nil, false)
         snapshotIO.async { [self] in
-            let isSuperseded = pendingGenerationLock.withLock {
-                generation < latestQueuedGeneration
-            }
-            guard !isSuperseded else {
-                completion(nil)
-                return
-            }
-            do {
-                try saveImmediately(snapshot)
-                completion(nil)
-            } catch {
-                completion(error.localizedDescription)
-            }
+            performPendingSnapshotWrite(generation: generation)
         }
+    }
+
+    private func performPendingSnapshotWrite(generation: Int) {
+        let work: PendingSnapshotWrite? = pendingGenerationLock.withLock {
+            guard pendingSnapshotWrite?.generation == generation else {
+                return nil
+            }
+            let work = pendingSnapshotWrite
+            pendingSnapshotWrite = nil
+            snapshotWriteInFlight = true
+            updatePeakRetainedSnapshotCountLocked()
+            return work
+        }
+        guard let work else { return }
+
+        do {
+            try saveImmediately(work.snapshot)
+            work.completion(nil, true)
+        } catch {
+            work.completion(error.localizedDescription, false)
+        }
+        pendingGenerationLock.withLock {
+            snapshotWriteInFlight = false
+        }
+    }
+
+    private func updatePeakRetainedSnapshotCountLocked() {
+        let retained = (snapshotWriteInFlight ? 1 : 0)
+            + (pendingSnapshotWrite == nil ? 0 : 1)
+        peakRetainedSnapshotCount = max(peakRetainedSnapshotCount, retained)
     }
 
     public func saveDeltaAsync(
@@ -164,8 +220,7 @@ public final class MemeRepository: @unchecked Sendable {
                     memeUpserts: memeUpserts,
                     deletedMemeIDs: deletedMemeIDs,
                     appendingCategoryIDs: appendingCategoryIDs,
-                    appendingMemeIDs: appendingMemeIDs,
-                    state: &databaseState
+                    appendingMemeIDs: appendingMemeIDs
                 )
                 pendingGenerationLock.withLock { completedWriteCount += 1 }
                 completion(nil)
@@ -181,6 +236,14 @@ public final class MemeRepository: @unchecked Sendable {
 
     var completedSnapshotWriteCount: Int {
         pendingGenerationLock.withLock { completedWriteCount }
+    }
+
+    var peakRetainedFullSnapshotCount: Int {
+        pendingGenerationLock.withLock { peakRetainedSnapshotCount }
+    }
+
+    var hasTransientTextReaderConnection: Bool {
+        database.hasTextReaderConnection
     }
 
     var lastDatabaseMutationCounts: (
@@ -199,10 +262,22 @@ public final class MemeRepository: @unchecked Sendable {
         }
     }
 
+    var lastDatabaseBackfillMetrics: (
+        rowCount: Int,
+        peakResidentRowCount: Int
+    ) {
+        snapshotIO.sync {
+            (
+                database.lastBackfillRowCount,
+                database.lastBackfillPeakResidentRowCount
+            )
+        }
+    }
+
     private func saveImmediately(_ snapshot: MemeSnapshot) throws {
         try HedgeMemoPerformance.measure("MemeSnapshotWrite") {
             try prepare()
-            latestMutationCounts = try database.save(snapshot, state: &databaseState)
+            latestMutationCounts = try database.save(snapshot)
             pendingGenerationLock.withLock { completedWriteCount += 1 }
         }
     }

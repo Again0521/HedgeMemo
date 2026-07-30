@@ -30,6 +30,7 @@ final class AppServices: ObservableObject {
     private var clipboardMonitoringSuspendedForMemeCapture = false
     private let screenshotService = ScreenshotService()
     private let screenshotEditor = ScreenshotEditorPanelController()
+    private var transientMemoryCoordinator: TransientMemoryCoordinator?
     private var cancellables = Set<AnyCancellable>()
     private var didStart = false
 
@@ -98,6 +99,12 @@ final class AppServices: ObservableObject {
             // panel opens.
             clipboardStore.warmContentClassification()
         }
+        let transientMemoryCoordinator = TransientMemoryCoordinator(
+            clipboardStore: clipboardStore,
+            memeStore: memeStore
+        )
+        transientMemoryCoordinator.start()
+        self.transientMemoryCoordinator = transientMemoryCoordinator
 
         let panelController = ClipboardHistoryPanelController(
             store: clipboardStore,
@@ -159,6 +166,11 @@ final class AppServices: ObservableObject {
 
         clipboardPanelController = panelController
         hotKeyController = hotKey
+    }
+
+    func stopTransientMemoryManagement() {
+        transientMemoryCoordinator?.stop()
+        transientMemoryCoordinator = nil
     }
 
     private func configureMemeCapture(enabled: Bool) {

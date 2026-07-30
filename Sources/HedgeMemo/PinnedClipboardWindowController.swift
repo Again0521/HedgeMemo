@@ -157,7 +157,7 @@ private final class PinnedClipboardWindow {
     }
 
     func close() {
-        panel.orderOut(nil)
+        TransientPanelLifetime.release(panel)
     }
 
     func updateCodeHighlightTheme(_ theme: CodeHighlightTheme) {

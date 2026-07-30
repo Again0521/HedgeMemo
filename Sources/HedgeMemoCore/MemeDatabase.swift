@@ -1,14 +1,7 @@
 import Foundation
 import SQLite3
 
-final class MemeDatabase {
-    struct State {
-        var categoryFingerprints: [UUID: Int]
-        var categoryPositions: [UUID: Int64]
-        var memeFingerprints: [UUID: Int]
-        var memePositions: [UUID: Int64]
-    }
-
+final class MemeDatabase: @unchecked Sendable {
     struct MutationCounts: Equatable {
         let changedCategories: Int
         let deletedCategories: Int
@@ -17,6 +10,10 @@ final class MemeDatabase {
     }
 
     private let url: URL
+    private let textReaderLock = NSLock()
+    private var textReaderConnection: SQLiteConnection?
+    private(set) var lastBackfillRowCount = 0
+    private(set) var lastBackfillPeakResidentRowCount = 0
 
     init(url: URL) {
         self.url = url
@@ -39,50 +36,185 @@ final class MemeDatabase {
         }
     }
 
-    func load() throws -> (snapshot: MemeSnapshot, state: State) {
+    func load(
+        textProvider: MemeTextProvider? = nil
+    ) throws -> MemeSnapshot {
         let connection = try SQLiteConnection(url: url)
         try prepareSchema(connection)
+        lastBackfillRowCount = 0
+        lastBackfillPeakResidentRowCount = 0
 
         var categories: [MemeCategory] = []
-        var categoryFingerprints: [UUID: Int] = [:]
-        var categoryPositions: [UUID: Int64] = [:]
         let categoryStatement = try connection.prepare(
-            "SELECT payload, position FROM meme_categories ORDER BY position ASC"
+            "SELECT payload FROM meme_categories ORDER BY position ASC"
         )
         defer { sqlite3_finalize(categoryStatement) }
         while sqlite3_step(categoryStatement) == SQLITE_ROW {
             let data = try rowData(statement: categoryStatement, column: 0)
             let category = try Self.decoder.decode(MemeCategory.self, from: data)
-            let position = sqlite3_column_int64(categoryStatement, 1)
             categories.append(category)
-            categoryFingerprints[category.id] = Self.fingerprint(category)
-            categoryPositions[category.id] = position
         }
 
         var memes: [MemeItem] = []
-        var memeFingerprints: [UUID: Int] = [:]
-        var memePositions: [UUID: Int64] = [:]
+        let needsBackfill = try hasMissingHeader(
+            table: "meme_items",
+            connection: connection
+        )
+        let stageBackfill: OpaquePointer?
+        if needsBackfill {
+            try connection.execute(
+                """
+                CREATE TEMP TABLE meme_body_backfill (
+                    id TEXT PRIMARY KEY NOT NULL,
+                    header_payload BLOB NOT NULL,
+                    note_body TEXT NOT NULL,
+                    ocr_body TEXT NOT NULL
+                )
+                """
+            )
+            stageBackfill = try connection.prepare(
+                """
+                INSERT INTO meme_body_backfill (
+                    id, header_payload, note_body, ocr_body
+                ) VALUES (?, ?, ?, ?)
+                """
+            )
+        } else {
+            stageBackfill = nil
+        }
+        defer {
+            if let stageBackfill { sqlite3_finalize(stageBackfill) }
+        }
         let memeStatement = try connection.prepare(
-            "SELECT payload, position FROM meme_items ORDER BY position ASC"
+            """
+            SELECT header_payload, payload
+            FROM meme_items
+            ORDER BY position ASC
+            """
         )
         defer { sqlite3_finalize(memeStatement) }
-        while sqlite3_step(memeStatement) == SQLITE_ROW {
-            let data = try rowData(statement: memeStatement, column: 0)
-            let meme = try Self.decoder.decode(MemeItem.self, from: data)
-            let position = sqlite3_column_int64(memeStatement, 1)
-            memes.append(meme)
-            memeFingerprints[meme.id] = Self.fingerprint(meme)
-            memePositions[meme.id] = position
+        if needsBackfill {
+            try connection.execute("BEGIN IMMEDIATE TRANSACTION")
+        }
+        do {
+            while sqlite3_step(memeStatement) == SQLITE_ROW {
+                let hasHeader = sqlite3_column_type(memeStatement, 0) != SQLITE_NULL
+                let payloadColumn: Int32 = hasHeader ? 0 : 1
+                let data = try rowData(
+                    statement: memeStatement,
+                    column: payloadColumn
+                )
+                var meme = try Self.decoder.decode(MemeItem.self, from: data)
+                if !hasHeader, let stageBackfill {
+                    lastBackfillRowCount += 1
+                    lastBackfillPeakResidentRowCount = 1
+                    sqlite3_reset(stageBackfill)
+                    sqlite3_clear_bindings(stageBackfill)
+                    try connection.bind(meme.id.uuidString, to: 1, in: stageBackfill)
+                    try connection.bind(
+                        try Self.encoder.encode(meme.metadataProjection),
+                        to: 2,
+                        in: stageBackfill
+                    )
+                    try connection.bind(meme.note, to: 3, in: stageBackfill)
+                    try connection.bind(meme.ocrText, to: 4, in: stageBackfill)
+                    try connection.stepDone(stageBackfill)
+                }
+                if let textProvider { meme.deferText(to: textProvider) }
+                memes.append(meme)
+            }
+            guard sqlite3_errcode(connection.handle) == SQLITE_OK
+                    || sqlite3_errcode(connection.handle) == SQLITE_DONE else {
+                throw ClipboardHistoryDatabaseError.execute(
+                    connection.errorMessage
+                )
+            }
+            if needsBackfill {
+                try applyStagedBodyBackfill(connection: connection)
+                try connection.execute("COMMIT")
+            }
+        } catch {
+            if needsBackfill { try? connection.execute("ROLLBACK") }
+            throw error
         }
 
-        return (
-            MemeSnapshot(categories: categories, memes: memes),
-            State(
-                categoryFingerprints: categoryFingerprints,
-                categoryPositions: categoryPositions,
-                memeFingerprints: memeFingerprints,
-                memePositions: memePositions
+        return MemeSnapshot(categories: categories, memes: memes)
+    }
+
+    func loadText(id: UUID) -> MemeTextBody? {
+        textReaderLock.lock()
+        defer { textReaderLock.unlock() }
+        do {
+            let connection: SQLiteConnection
+            if let existing = textReaderConnection {
+                connection = existing
+            } else {
+                let created = try SQLiteConnection(url: url)
+                try prepareSchema(created)
+                textReaderConnection = created
+                connection = created
+            }
+            let statement = try connection.prepare(
+                """
+                SELECT note_body, ocr_body, payload
+                FROM meme_items
+                WHERE id = ?
+                LIMIT 1
+                """
             )
+            defer { sqlite3_finalize(statement) }
+            try connection.bind(id.uuidString, to: 1, in: statement)
+            guard sqlite3_step(statement) == SQLITE_ROW else { return nil }
+            if sqlite3_column_type(statement, 0) != SQLITE_NULL,
+               sqlite3_column_type(statement, 1) != SQLITE_NULL {
+                return MemeTextBody(
+                    note: Self.rowString(statement: statement, column: 0),
+                    ocrText: Self.rowString(statement: statement, column: 1)
+                )
+            }
+            let item = try Self.decoder.decode(
+                MemeItem.self,
+                from: try rowData(statement: statement, column: 2)
+            )
+            return MemeTextBody(note: item.note, ocrText: item.ocrText)
+        } catch {
+            return nil
+        }
+    }
+
+    func releaseTextReaderConnection() {
+        textReaderLock.withLock {
+            textReaderConnection = nil
+        }
+    }
+
+    var hasTextReaderConnection: Bool {
+        textReaderLock.withLock { textReaderConnection != nil }
+    }
+
+    private func applyStagedBodyBackfill(
+        connection: SQLiteConnection
+    ) throws {
+        try connection.execute(
+            """
+            UPDATE meme_items
+            SET header_payload = (
+                    SELECT header_payload
+                    FROM meme_body_backfill
+                    WHERE meme_body_backfill.id = meme_items.id
+                ),
+                note_body = (
+                    SELECT note_body
+                    FROM meme_body_backfill
+                    WHERE meme_body_backfill.id = meme_items.id
+                ),
+                ocr_body = (
+                    SELECT ocr_body
+                    FROM meme_body_backfill
+                    WHERE meme_body_backfill.id = meme_items.id
+                )
+            WHERE id IN (SELECT id FROM meme_body_backfill)
+            """
         )
     }
 
@@ -198,102 +330,152 @@ final class MemeDatabase {
         return count
     }
 
-    func save(_ snapshot: MemeSnapshot, state: inout State?) throws -> MutationCounts {
+    func save(_ snapshot: MemeSnapshot) throws -> MutationCounts {
         let connection = try SQLiteConnection(url: url)
         try prepareSchema(connection)
-        if state == nil {
-            state = try load().state
+        var changedCategoryCount = 0
+        var deletedCategoryCount = 0
+        var changedMemeCount = 0
+        var deletedMemeCount = 0
+        if let firstMeme = snapshot.memes.first {
+            _ = loadText(id: firstMeme.id)
         }
-        let previous = state ?? State(
-            categoryFingerprints: [:],
-            categoryPositions: [:],
-            memeFingerprints: [:],
-            memePositions: [:]
-        )
-
-        let categoryChanges = changes(
-            values: snapshot.categories,
-            previousFingerprints: previous.categoryFingerprints,
-            previousPositions: previous.categoryPositions
-        )
-        let memeChanges = changes(
-            values: snapshot.memes,
-            previousFingerprints: previous.memeFingerprints,
-            previousPositions: previous.memePositions
-        )
 
         try connection.execute("BEGIN IMMEDIATE TRANSACTION")
         do {
-            try delete(
-                ids: categoryChanges.deletedIDs,
-                table: "meme_categories",
-                connection: connection
+            try connection.execute(
+                "CREATE TEMP TABLE snapshot_meme_category_ids (id TEXT PRIMARY KEY NOT NULL)"
             )
-            try delete(
-                ids: memeChanges.deletedIDs,
-                table: "meme_items",
-                connection: connection
+            try connection.execute(
+                "CREATE TEMP TABLE snapshot_meme_item_ids (id TEXT PRIMARY KEY NOT NULL)"
             )
 
-            if !categoryChanges.changed.isEmpty {
-                let statement = try connection.prepare(
-                    """
-                    INSERT INTO meme_categories (id, payload, position, created_at)
-                    VALUES (?, ?, ?, ?)
-                    ON CONFLICT(id) DO UPDATE SET
-                        payload = excluded.payload,
-                        position = excluded.position,
-                        created_at = excluded.created_at
-                    """
+            let rememberCategory = try connection.prepare(
+                "INSERT INTO snapshot_meme_category_ids (id) VALUES (?)"
+            )
+            defer { sqlite3_finalize(rememberCategory) }
+            let categoryUpsert = try connection.prepare(
+                """
+                INSERT INTO meme_categories (id, payload, position, created_at)
+                VALUES (?, ?, ?, ?)
+                ON CONFLICT(id) DO UPDATE SET
+                    payload = excluded.payload,
+                    position = excluded.position,
+                    created_at = excluded.created_at
+                WHERE meme_categories.payload IS NOT excluded.payload
+                   OR meme_categories.position != excluded.position
+                """
+            )
+            defer { sqlite3_finalize(categoryUpsert) }
+            for (index, category) in snapshot.categories.enumerated() {
+                sqlite3_reset(rememberCategory)
+                sqlite3_clear_bindings(rememberCategory)
+                try connection.bind(
+                    category.id.uuidString,
+                    to: 1,
+                    in: rememberCategory
                 )
-                defer { sqlite3_finalize(statement) }
-                for change in categoryChanges.changed {
-                    sqlite3_reset(statement)
-                    sqlite3_clear_bindings(statement)
-                    try connection.bind(change.value.id.uuidString, to: 1, in: statement)
-                    try connection.bind(try Self.encoder.encode(change.value), to: 2, in: statement)
-                    try connection.bind(change.position, to: 3, in: statement)
-                    try connection.bind(change.value.createdAt.timeIntervalSince1970, to: 4, in: statement)
-                    try connection.stepDone(statement)
-                }
+                try connection.stepDone(rememberCategory)
+
+                sqlite3_reset(categoryUpsert)
+                sqlite3_clear_bindings(categoryUpsert)
+                try connection.bind(category.id.uuidString, to: 1, in: categoryUpsert)
+                try connection.bind(
+                    try Self.encoder.encode(category),
+                    to: 2,
+                    in: categoryUpsert
+                )
+                try connection.bind(Int64(index), to: 3, in: categoryUpsert)
+                try connection.bind(
+                    category.createdAt.timeIntervalSince1970,
+                    to: 4,
+                    in: categoryUpsert
+                )
+                try connection.stepDone(categoryUpsert)
+                changedCategoryCount += Int(sqlite3_changes(connection.handle))
             }
 
-            if !memeChanges.changed.isEmpty {
-                let statement = try connection.prepare(
-                    """
-                    INSERT INTO meme_items (
-                        id, payload, position, content_hash, category_id,
-                        sort_order, created_at, updated_at
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-                    ON CONFLICT(id) DO UPDATE SET
-                        payload = excluded.payload,
-                        position = excluded.position,
-                        content_hash = excluded.content_hash,
-                        category_id = excluded.category_id,
-                        sort_order = excluded.sort_order,
-                        created_at = excluded.created_at,
-                        updated_at = excluded.updated_at
-                    """
-                )
-                defer { sqlite3_finalize(statement) }
-                for change in memeChanges.changed {
-                    sqlite3_reset(statement)
-                    sqlite3_clear_bindings(statement)
-                    try connection.bind(change.value.id.uuidString, to: 1, in: statement)
-                    try connection.bind(try Self.encoder.encode(change.value), to: 2, in: statement)
-                    try connection.bind(change.position, to: 3, in: statement)
-                    try connection.bind(change.value.contentHash, to: 4, in: statement)
-                    if let categoryID = change.value.categoryID {
-                        try connection.bind(categoryID.uuidString, to: 5, in: statement)
-                    } else if sqlite3_bind_null(statement, 5) != SQLITE_OK {
-                        throw ClipboardHistoryDatabaseError.bind(connection.errorMessage)
-                    }
-                    try connection.bind(change.value.sortOrder, to: 6, in: statement)
-                    try connection.bind(change.value.createdAt.timeIntervalSince1970, to: 7, in: statement)
-                    try connection.bind(change.value.updatedAt.timeIntervalSince1970, to: 8, in: statement)
-                    try connection.stepDone(statement)
+            let rememberMeme = try connection.prepare(
+                "INSERT INTO snapshot_meme_item_ids (id) VALUES (?)"
+            )
+            defer { sqlite3_finalize(rememberMeme) }
+            let memeUpsert = try connection.prepare(
+                """
+                INSERT INTO meme_items (
+                    id, payload, header_payload, note_body, ocr_body,
+                    position, content_hash, category_id,
+                    sort_order, created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(id) DO UPDATE SET
+                    payload = excluded.payload,
+                    header_payload = excluded.header_payload,
+                    note_body = excluded.note_body,
+                    ocr_body = excluded.ocr_body,
+                    position = excluded.position,
+                    content_hash = excluded.content_hash,
+                    category_id = excluded.category_id,
+                    sort_order = excluded.sort_order,
+                    created_at = excluded.created_at,
+                    updated_at = excluded.updated_at
+                WHERE meme_items.payload IS NOT excluded.payload
+                   OR meme_items.position != excluded.position
+                """
+            )
+            defer { sqlite3_finalize(memeUpsert) }
+            for (index, meme) in snapshot.memes.enumerated() {
+                sqlite3_reset(rememberMeme)
+                sqlite3_clear_bindings(rememberMeme)
+                try connection.bind(meme.id.uuidString, to: 1, in: rememberMeme)
+                try connection.stepDone(rememberMeme)
+
+                sqlite3_reset(memeUpsert)
+                sqlite3_clear_bindings(memeUpsert)
+                let row = try Self.encodedRow(meme)
+                try connection.bind(meme.id.uuidString, to: 1, in: memeUpsert)
+                try connection.bind(row.payload, to: 2, in: memeUpsert)
+                try connection.bind(row.header, to: 3, in: memeUpsert)
+                try connection.bind(row.note, to: 4, in: memeUpsert)
+                try connection.bind(row.ocrText, to: 5, in: memeUpsert)
+                try connection.bind(Int64(index), to: 6, in: memeUpsert)
+                try connection.bind(meme.contentHash, to: 7, in: memeUpsert)
+                if let categoryID = meme.categoryID {
+                    try connection.bind(
+                        categoryID.uuidString,
+                        to: 8,
+                        in: memeUpsert
+                    )
+                } else if sqlite3_bind_null(memeUpsert, 8) != SQLITE_OK {
+                    throw ClipboardHistoryDatabaseError.bind(connection.errorMessage)
                 }
+                try connection.bind(meme.sortOrder, to: 9, in: memeUpsert)
+                try connection.bind(
+                    meme.createdAt.timeIntervalSince1970,
+                    to: 10,
+                    in: memeUpsert
+                )
+                try connection.bind(
+                    meme.updatedAt.timeIntervalSince1970,
+                    to: 11,
+                    in: memeUpsert
+                )
+                try connection.stepDone(memeUpsert)
+                changedMemeCount += Int(sqlite3_changes(connection.handle))
             }
+
+            try connection.execute(
+                """
+                DELETE FROM meme_items
+                WHERE id NOT IN (SELECT id FROM snapshot_meme_item_ids)
+                """
+            )
+            deletedMemeCount = Int(sqlite3_changes(connection.handle))
+            try connection.execute(
+                """
+                DELETE FROM meme_categories
+                WHERE id NOT IN (SELECT id FROM snapshot_meme_category_ids)
+                """
+            )
+            deletedCategoryCount = Int(sqlite3_changes(connection.handle))
             try markInitialized(connection)
             try connection.execute("COMMIT")
         } catch {
@@ -301,17 +483,11 @@ final class MemeDatabase {
             throw error
         }
 
-        state = State(
-            categoryFingerprints: categoryChanges.fingerprints,
-            categoryPositions: categoryChanges.positions,
-            memeFingerprints: memeChanges.fingerprints,
-            memePositions: memeChanges.positions
-        )
         return MutationCounts(
-            changedCategories: categoryChanges.changed.count,
-            deletedCategories: categoryChanges.deletedIDs.count,
-            changedMemes: memeChanges.changed.count,
-            deletedMemes: memeChanges.deletedIDs.count
+            changedCategories: changedCategoryCount,
+            deletedCategories: deletedCategoryCount,
+            changedMemes: changedMemeCount,
+            deletedMemes: deletedMemeCount
         )
     }
 
@@ -321,20 +497,10 @@ final class MemeDatabase {
         memeUpserts: [MemeItem],
         deletedMemeIDs: [UUID],
         appendingCategoryIDs: Set<UUID>,
-        appendingMemeIDs: Set<UUID>,
-        state: inout State?
+        appendingMemeIDs: Set<UUID>
     ) throws -> MutationCounts {
         let connection = try SQLiteConnection(url: url)
         try prepareSchema(connection)
-        if state == nil {
-            state = try load().state
-        }
-        var current = state ?? State(
-            categoryFingerprints: [:],
-            categoryPositions: [:],
-            memeFingerprints: [:],
-            memePositions: [:]
-        )
         let categoryUpsertIDs = Set(categoryUpserts.map(\.id))
         let memeUpsertIDs = Set(memeUpserts.map(\.id))
         let effectiveDeletedCategories = deletedCategoryIDs.filter {
@@ -344,31 +510,35 @@ final class MemeDatabase {
             !memeUpsertIDs.contains($0)
         }
 
-        var nextCategoryPosition = (current.categoryPositions.values.max() ?? -1) + 1
-        var nextMemePosition = (current.memePositions.values.max() ?? -1) + 1
+        var nextCategoryPosition: Int64 = 0
+        var nextMemePosition: Int64 = 0
 
         try connection.execute("BEGIN IMMEDIATE TRANSACTION")
         do {
+            nextCategoryPosition = try nextPosition(
+                table: "meme_categories",
+                connection: connection
+            )
+            nextMemePosition = try nextPosition(
+                table: "meme_items",
+                connection: connection
+            )
             try delete(
                 ids: effectiveDeletedCategories,
                 table: "meme_categories",
                 connection: connection
             )
-            for id in effectiveDeletedCategories {
-                current.categoryFingerprints.removeValue(forKey: id)
-                current.categoryPositions.removeValue(forKey: id)
-            }
             try delete(
                 ids: effectiveDeletedMemes,
                 table: "meme_items",
                 connection: connection
             )
-            for id in effectiveDeletedMemes {
-                current.memeFingerprints.removeValue(forKey: id)
-                current.memePositions.removeValue(forKey: id)
-            }
 
             if !categoryUpserts.isEmpty {
+                let existingPosition = try connection.prepare(
+                    "SELECT position FROM meme_categories WHERE id = ? LIMIT 1"
+                )
+                defer { sqlite3_finalize(existingPosition) }
                 let statement = try connection.prepare(
                     """
                     INSERT INTO meme_categories (id, payload, position, created_at)
@@ -383,7 +553,11 @@ final class MemeDatabase {
                 for category in categoryUpserts {
                     let position: Int64
                     if !appendingCategoryIDs.contains(category.id),
-                       let existing = current.categoryPositions[category.id] {
+                       let existing = try storedPosition(
+                            id: category.id,
+                            statement: existingPosition,
+                            connection: connection
+                       ) {
                         position = existing
                     } else {
                         position = nextCategoryPosition
@@ -396,20 +570,26 @@ final class MemeDatabase {
                     try connection.bind(position, to: 3, in: statement)
                     try connection.bind(category.createdAt.timeIntervalSince1970, to: 4, in: statement)
                     try connection.stepDone(statement)
-                    current.categoryFingerprints[category.id] = Self.fingerprint(category)
-                    current.categoryPositions[category.id] = position
                 }
             }
 
             if !memeUpserts.isEmpty {
+                let existingPosition = try connection.prepare(
+                    "SELECT position FROM meme_items WHERE id = ? LIMIT 1"
+                )
+                defer { sqlite3_finalize(existingPosition) }
                 let statement = try connection.prepare(
                     """
                     INSERT INTO meme_items (
-                        id, payload, position, content_hash, category_id,
+                        id, payload, header_payload, note_body, ocr_body,
+                        position, content_hash, category_id,
                         sort_order, created_at, updated_at
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     ON CONFLICT(id) DO UPDATE SET
                         payload = excluded.payload,
+                        header_payload = excluded.header_payload,
+                        note_body = excluded.note_body,
+                        ocr_body = excluded.ocr_body,
                         position = excluded.position,
                         content_hash = excluded.content_hash,
                         category_id = excluded.category_id,
@@ -422,7 +602,11 @@ final class MemeDatabase {
                 for meme in memeUpserts {
                     let position: Int64
                     if !appendingMemeIDs.contains(meme.id),
-                       let existing = current.memePositions[meme.id] {
+                       let existing = try storedPosition(
+                            id: meme.id,
+                            statement: existingPosition,
+                            connection: connection
+                       ) {
                         position = existing
                     } else {
                         position = nextMemePosition
@@ -430,21 +614,23 @@ final class MemeDatabase {
                     }
                     sqlite3_reset(statement)
                     sqlite3_clear_bindings(statement)
+                    let row = try Self.encodedRow(meme)
                     try connection.bind(meme.id.uuidString, to: 1, in: statement)
-                    try connection.bind(try Self.encoder.encode(meme), to: 2, in: statement)
-                    try connection.bind(position, to: 3, in: statement)
-                    try connection.bind(meme.contentHash, to: 4, in: statement)
+                    try connection.bind(row.payload, to: 2, in: statement)
+                    try connection.bind(row.header, to: 3, in: statement)
+                    try connection.bind(row.note, to: 4, in: statement)
+                    try connection.bind(row.ocrText, to: 5, in: statement)
+                    try connection.bind(position, to: 6, in: statement)
+                    try connection.bind(meme.contentHash, to: 7, in: statement)
                     if let categoryID = meme.categoryID {
-                        try connection.bind(categoryID.uuidString, to: 5, in: statement)
-                    } else if sqlite3_bind_null(statement, 5) != SQLITE_OK {
+                        try connection.bind(categoryID.uuidString, to: 8, in: statement)
+                    } else if sqlite3_bind_null(statement, 8) != SQLITE_OK {
                         throw ClipboardHistoryDatabaseError.bind(connection.errorMessage)
                     }
-                    try connection.bind(meme.sortOrder, to: 6, in: statement)
-                    try connection.bind(meme.createdAt.timeIntervalSince1970, to: 7, in: statement)
-                    try connection.bind(meme.updatedAt.timeIntervalSince1970, to: 8, in: statement)
+                    try connection.bind(meme.sortOrder, to: 9, in: statement)
+                    try connection.bind(meme.createdAt.timeIntervalSince1970, to: 10, in: statement)
+                    try connection.bind(meme.updatedAt.timeIntervalSince1970, to: 11, in: statement)
                     try connection.stepDone(statement)
-                    current.memeFingerprints[meme.id] = Self.fingerprint(meme)
-                    current.memePositions[meme.id] = position
                 }
             }
             try markInitialized(connection)
@@ -454,7 +640,6 @@ final class MemeDatabase {
             throw error
         }
 
-        state = current
         return MutationCounts(
             changedCategories: categoryUpserts.count,
             deletedCategories: effectiveDeletedCategories.count,
@@ -481,6 +666,9 @@ final class MemeDatabase {
             CREATE TABLE IF NOT EXISTS meme_items (
                 id TEXT PRIMARY KEY NOT NULL,
                 payload BLOB NOT NULL,
+                header_payload BLOB,
+                note_body TEXT,
+                ocr_body TEXT,
                 position INTEGER NOT NULL,
                 content_hash TEXT NOT NULL,
                 category_id TEXT,
@@ -489,6 +677,21 @@ final class MemeDatabase {
                 updated_at REAL NOT NULL
             )
             """
+        )
+        try connection.addColumnIfNeeded(
+            table: "meme_items",
+            column: "header_payload",
+            declaration: "BLOB"
+        )
+        try connection.addColumnIfNeeded(
+            table: "meme_items",
+            column: "note_body",
+            declaration: "TEXT"
+        )
+        try connection.addColumnIfNeeded(
+            table: "meme_items",
+            column: "ocr_body",
+            declaration: "TEXT"
         )
         try connection.execute(
             """
@@ -510,7 +713,7 @@ final class MemeDatabase {
         try connection.execute(
             "CREATE INDEX IF NOT EXISTS meme_items_position_idx ON meme_items(position)"
         )
-        try connection.execute("PRAGMA user_version = 1")
+        try connection.execute("PRAGMA user_version = 2")
     }
 
     private func markInitialized(_ connection: SQLiteConnection) throws {
@@ -545,52 +748,78 @@ final class MemeDatabase {
         return Data(bytes: bytes, count: Int(sqlite3_column_bytes(statement, column)))
     }
 
-    private struct Changes<Value: Hashable & Identifiable> where Value.ID == UUID {
-        let changed: [(value: Value, position: Int64)]
-        let deletedIDs: [UUID]
-        let fingerprints: [UUID: Int]
-        let positions: [UUID: Int64]
-    }
-
-    private func changes<Value: Hashable & Identifiable>(
-        values: [Value],
-        previousFingerprints: [UUID: Int],
-        previousPositions: [UUID: Int64]
-    ) -> Changes<Value> where Value.ID == UUID {
-        var fingerprints: [UUID: Int] = [:]
-        var positions: [UUID: Int64] = [:]
-        var changed: [(value: Value, position: Int64)] = []
-        fingerprints.reserveCapacity(values.count)
-        positions.reserveCapacity(values.count)
-
-        for (index, value) in values.enumerated() {
-            let position = Int64(index)
-            let fingerprint = Self.fingerprint(value)
-            fingerprints[value.id] = fingerprint
-            positions[value.id] = position
-            if previousFingerprints[value.id] != fingerprint
-                || previousPositions[value.id] != position {
-                changed.append((value, position))
-            }
-        }
-        let IDs = Set(fingerprints.keys)
-        return Changes(
-            changed: changed,
-            deletedIDs: previousFingerprints.keys.filter { !IDs.contains($0) },
-            fingerprints: fingerprints,
-            positions: positions
+    private static func rowString(statement: OpaquePointer, column: Int32) -> String {
+        guard let bytes = sqlite3_column_text(statement, column) else { return "" }
+        let count = Int(sqlite3_column_bytes(statement, column))
+        return String(
+            decoding: UnsafeBufferPointer(start: bytes, count: count),
+            as: UTF8.self
         )
     }
 
-    private static func fingerprint<T: Hashable>(_ value: T) -> Int {
-        var hasher = Hasher()
-        value.hash(into: &hasher)
-        return hasher.finalize()
+    private static func encodedRow(
+        _ meme: MemeItem
+    ) throws -> (payload: Data, header: Data, note: String, ocrText: String) {
+        (
+            payload: try encoder.encode(meme),
+            header: try encoder.encode(meme.metadataProjection),
+            note: meme.note,
+            ocrText: meme.ocrText
+        )
+    }
+
+    private func nextPosition(
+        table: String,
+        connection: SQLiteConnection
+    ) throws -> Int64 {
+        let statement = try connection.prepare(
+            "SELECT COALESCE(MAX(position) + 1, 0) FROM \(table)"
+        )
+        defer { sqlite3_finalize(statement) }
+        guard sqlite3_step(statement) == SQLITE_ROW else {
+            throw ClipboardHistoryDatabaseError.execute(connection.errorMessage)
+        }
+        return sqlite3_column_int64(statement, 0)
+    }
+
+    private func hasMissingHeader(
+        table: String,
+        connection: SQLiteConnection
+    ) throws -> Bool {
+        let statement = try connection.prepare(
+            "SELECT 1 FROM \(table) WHERE header_payload IS NULL LIMIT 1"
+        )
+        defer { sqlite3_finalize(statement) }
+        let result = sqlite3_step(statement)
+        if result == SQLITE_ROW { return true }
+        guard result == SQLITE_DONE else {
+            throw ClipboardHistoryDatabaseError.execute(connection.errorMessage)
+        }
+        return false
+    }
+
+    private func storedPosition(
+        id: UUID,
+        statement: OpaquePointer,
+        connection: SQLiteConnection
+    ) throws -> Int64? {
+        sqlite3_reset(statement)
+        sqlite3_clear_bindings(statement)
+        try connection.bind(id.uuidString, to: 1, in: statement)
+        let result = sqlite3_step(statement)
+        if result == SQLITE_ROW {
+            return sqlite3_column_int64(statement, 0)
+        }
+        guard result == SQLITE_DONE else {
+            throw ClipboardHistoryDatabaseError.execute(connection.errorMessage)
+        }
+        return nil
     }
 
     private static let encoder: JSONEncoder = {
         let encoder = JSONEncoder()
         encoder.dateEncodingStrategy = .iso8601
+        encoder.outputFormatting = [.sortedKeys]
         return encoder
     }()
 

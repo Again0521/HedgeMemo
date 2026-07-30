@@ -58,12 +58,203 @@ public struct MemeCategory: Codable, Hashable, Identifiable, Sendable {
     }
 }
 
+/// Stores the SHA-256 values produced by HedgeMemo as four inline machine
+/// words instead of one separately allocated 64-character String per record.
+///
+/// Legacy snapshots and tests may contain arbitrary identifiers in the hash
+/// field, so non-canonical values retain their exact String representation.
+/// Codable models still encode/decode the public string form unchanged.
+struct CompactContentHash: Hashable, Sendable {
+    private enum Storage: Hashable, Sendable {
+        case sha256(UInt64, UInt64, UInt64, UInt64)
+        case verbatim(String)
+    }
+
+    private let storage: Storage
+
+    init(_ value: String) {
+        guard value.utf8.count == 64 else {
+            storage = .verbatim(value)
+            return
+        }
+        var words = (UInt64(0), UInt64(0), UInt64(0), UInt64(0))
+        for (index, byte) in value.utf8.enumerated() {
+            let nibble: UInt64
+            switch byte {
+            case 48...57: nibble = UInt64(byte - 48)
+            case 97...102: nibble = UInt64(byte - 87)
+            default:
+                storage = .verbatim(value)
+                return
+            }
+            switch index / 16 {
+            case 0: words.0 = (words.0 << 4) | nibble
+            case 1: words.1 = (words.1 << 4) | nibble
+            case 2: words.2 = (words.2 << 4) | nibble
+            default: words.3 = (words.3 << 4) | nibble
+            }
+        }
+        storage = .sha256(words.0, words.1, words.2, words.3)
+    }
+
+    var stringValue: String {
+        switch storage {
+        case .verbatim(let value):
+            return value
+        case .sha256(let first, let second, let third, let fourth):
+            var bytes: [UInt8] = []
+            bytes.reserveCapacity(64)
+            Self.appendHexBytes(of: first, to: &bytes)
+            Self.appendHexBytes(of: second, to: &bytes)
+            Self.appendHexBytes(of: third, to: &bytes)
+            Self.appendHexBytes(of: fourth, to: &bytes)
+            return String(decoding: bytes, as: UTF8.self)
+        }
+    }
+
+    /// Exact binary key for the disposable archive-import index. Canonical
+    /// SHA-256 values stay as their 32 raw bytes instead of being rebuilt into
+    /// a 64-byte UTF-8 string; a storage tag keeps arbitrary legacy strings
+    /// collision-free, and the first byte preserves secret/non-secret identity.
+    func archiveDedupKey(isSecret: Bool) -> Data {
+        var key = Data()
+        switch storage {
+        case .sha256(let first, let second, let third, let fourth):
+            key.reserveCapacity(34)
+            key.append(isSecret ? 1 : 0)
+            key.append(0)
+            Self.appendBigEndian(first, to: &key)
+            Self.appendBigEndian(second, to: &key)
+            Self.appendBigEndian(third, to: &key)
+            Self.appendBigEndian(fourth, to: &key)
+        case .verbatim(let value):
+            key.reserveCapacity(2 + value.utf8.count)
+            key.append(isSecret ? 1 : 0)
+            key.append(1)
+            key.append(contentsOf: value.utf8)
+        }
+        return key
+    }
+
+    private static func appendBigEndian(
+        _ value: UInt64,
+        to data: inout Data
+    ) {
+        var bigEndian = value.bigEndian
+        withUnsafeBytes(of: &bigEndian) { bytes in
+            data.append(contentsOf: bytes)
+        }
+    }
+
+    private static func appendHexBytes(
+        of word: UInt64,
+        to bytes: inout [UInt8]
+    ) {
+        for shift in stride(from: 60, through: 0, by: -4) {
+            let nibble = UInt8((word >> UInt64(shift)) & 0xF)
+            bytes.append(nibble < 10 ? 48 + nibble : 87 + nibble)
+        }
+    }
+
+    var usesInlineSHA256Storage: Bool {
+        if case .sha256 = storage { return true }
+        return false
+    }
+
+    static var storageStride: Int { MemoryLayout<Self>.stride }
+}
+
+struct MemeTextBody: Sendable {
+    let note: String
+    let ocrText: String
+}
+
+private final class MemeTextBox: Sendable {
+    let body: MemeTextBody
+
+    init(note: String, ocrText: String) {
+        body = MemeTextBody(note: note, ocrText: ocrText)
+    }
+
+    init(_ body: MemeTextBody) {
+        self.body = body
+    }
+}
+
+final class MemeTextProvider: @unchecked Sendable {
+    private let cache = NSCache<NSUUID, MemeTextBox>()
+    private let loader: @Sendable (UUID) -> MemeTextBody?
+
+    init(loader: @escaping @Sendable (UUID) -> MemeTextBody?) {
+        self.loader = loader
+        cache.countLimit = 512
+        cache.totalCostLimit = 8 * 1024 * 1024
+    }
+
+    func body(for id: UUID) -> MemeTextBody {
+        let key = id as NSUUID
+        if let cached = cache.object(forKey: key) { return cached.body }
+        let body = loader(id) ?? MemeTextBody(note: "", ocrText: "")
+        cache.setObject(
+            MemeTextBox(body),
+            forKey: key,
+            cost: max(1, body.note.utf8.count + body.ocrText.utf8.count)
+        )
+        return body
+    }
+
+    func removeAll() {
+        cache.removeAllObjects()
+    }
+}
+
+private enum MemeTextState: Sendable {
+    case resident(MemeTextBox)
+    case deferred(MemeTextProvider)
+    case metadata
+}
+
 public struct MemeItem: Codable, Hashable, Identifiable, Sendable {
     public let id: UUID
     public var fileName: String
-    public var contentHash: String
-    public var note: String
-    public var ocrText: String
+    var compactContentHash: CompactContentHash
+    public var contentHash: String {
+        get { compactContentHash.stringValue }
+        set { compactContentHash = CompactContentHash(newValue) }
+    }
+    private var textState: MemeTextState
+    public var note: String {
+        get {
+            switch textState {
+            case .resident(let box): box.body.note
+            case .deferred(let provider): provider.body(for: id).note
+            case .metadata: ""
+            }
+        }
+        set {
+            let currentOCR = ocrText
+            textState = .resident(
+                MemeTextBox(note: newValue, ocrText: currentOCR)
+            )
+            updatedAt = .now
+        }
+    }
+    public var ocrText: String {
+        get {
+            switch textState {
+            case .resident(let box): box.body.ocrText
+            case .deferred(let provider): provider.body(for: id).ocrText
+            case .metadata: ""
+            }
+        }
+        set {
+            let currentNote = note
+            textState = .resident(
+                MemeTextBox(note: currentNote, ocrText: newValue)
+            )
+            updatedAt = .now
+        }
+    }
     public var categoryID: UUID?
     public var sortOrder: Int
     public var createdAt: Date
@@ -82,13 +273,97 @@ public struct MemeItem: Codable, Hashable, Identifiable, Sendable {
     ) {
         self.id = id
         self.fileName = fileName
-        self.contentHash = contentHash
-        self.note = note
-        self.ocrText = ocrText
+        self.compactContentHash = CompactContentHash(contentHash)
+        self.textState = .resident(
+            MemeTextBox(note: note, ocrText: ocrText)
+        )
         self.categoryID = categoryID
         self.sortOrder = sortOrder
         self.createdAt = createdAt
         self.updatedAt = updatedAt
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case id, fileName, contentHash, note, ocrText, categoryID
+        case sortOrder, createdAt, updatedAt
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        id = try container.decode(UUID.self, forKey: .id)
+        fileName = try container.decode(String.self, forKey: .fileName)
+        compactContentHash = CompactContentHash(
+            try container.decode(String.self, forKey: .contentHash)
+        )
+        textState = .resident(
+            MemeTextBox(
+                note: try container.decodeIfPresent(
+                    String.self,
+                    forKey: .note
+                ) ?? "",
+                ocrText: try container.decodeIfPresent(
+                    String.self,
+                    forKey: .ocrText
+                ) ?? ""
+            )
+        )
+        categoryID = try container.decodeIfPresent(UUID.self, forKey: .categoryID)
+        sortOrder = try container.decodeIfPresent(Int.self, forKey: .sortOrder) ?? 0
+        createdAt = try container.decode(Date.self, forKey: .createdAt)
+        updatedAt = try container.decode(Date.self, forKey: .updatedAt)
+    }
+
+    public func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(id, forKey: .id)
+        try container.encode(fileName, forKey: .fileName)
+        try container.encode(contentHash, forKey: .contentHash)
+        try container.encode(note, forKey: .note)
+        try container.encode(ocrText, forKey: .ocrText)
+        try container.encodeIfPresent(categoryID, forKey: .categoryID)
+        try container.encode(sortOrder, forKey: .sortOrder)
+        try container.encode(createdAt, forKey: .createdAt)
+        try container.encode(updatedAt, forKey: .updatedAt)
+    }
+
+    public static func == (lhs: MemeItem, rhs: MemeItem) -> Bool {
+        lhs.id == rhs.id
+            && lhs.fileName == rhs.fileName
+            && lhs.compactContentHash == rhs.compactContentHash
+            && lhs.categoryID == rhs.categoryID
+            && lhs.sortOrder == rhs.sortOrder
+            && lhs.createdAt == rhs.createdAt
+            && lhs.updatedAt == rhs.updatedAt
+    }
+
+    public func hash(into hasher: inout Hasher) {
+        hasher.combine(id)
+        hasher.combine(fileName)
+        hasher.combine(compactContentHash)
+        hasher.combine(categoryID)
+        hasher.combine(sortOrder)
+        hasher.combine(createdAt)
+        hasher.combine(updatedAt)
+    }
+
+    mutating func deferText(to provider: MemeTextProvider) {
+        textState = .deferred(provider)
+    }
+
+    var metadataProjection: MemeItem {
+        var projection = self
+        projection.textState = .metadata
+        return projection
+    }
+
+    var decodedStoredTextByteCount: Int {
+        guard case .resident(let box) = textState else { return 0 }
+        return box.body.note.utf8.count + box.body.ocrText.utf8.count
+    }
+
+    static var storageStride: Int { MemoryLayout<Self>.stride }
+    static var textStateStorageStride: Int {
+        MemoryLayout<MemeTextState>.stride
     }
 
     public func matches(query: String) -> Bool {
@@ -99,6 +374,29 @@ public struct MemeItem: Codable, Hashable, Identifiable, Sendable {
         matcher.matches(note) || matcher.matches(ocrText)
     }
 }
+
+#if DEBUG
+/// Pre-1.2.25 stored-field shape for an in-module stride comparison. This type
+/// is excluded from release builds.
+private struct LegacyMemeItemLayout {
+    let id: UUID
+    var fileName: String
+    var compactContentHash: CompactContentHash
+    var storedNote: String
+    var storedOCRText: String
+    var deferredTextProvider: MemeTextProvider?
+    var categoryID: UUID?
+    var sortOrder: Int
+    var createdAt: Date
+    var updatedAt: Date
+}
+
+extension MemeItem {
+    static var legacyStorageStrideForTesting: Int {
+        MemoryLayout<LegacyMemeItemLayout>.stride
+    }
+}
+#endif
 
 public struct MemeSnapshot: Codable, Sendable {
     public var categories: [MemeCategory]
@@ -466,7 +764,18 @@ public struct CustomClipboardCategory: Codable, Equatable, Hashable, Identifiabl
     /// one on every `matches`/`isPatternValid` call — i.e. once per entry per
     /// filter pass. Cache by pattern string so each distinct pattern compiles
     /// once. NSCache is thread-safe.
-    nonisolated(unsafe) private static let regexCache = NSCache<NSString, NSRegularExpression>()
+    nonisolated(unsafe) private static let regexCache: NSCache<NSString, NSRegularExpression> = {
+        let cache = NSCache<NSString, NSRegularExpression>()
+        // A user can edit category rules repeatedly for the entire lifetime of
+        // the menu-bar process. Keep the useful working set, but do not retain
+        // every historical pattern forever.
+        cache.countLimit = 128
+        return cache
+    }()
+
+    fileprivate static func releaseRegexCache() {
+        regexCache.removeAllObjects()
+    }
 
     fileprivate static func compiledRegex(
         for pattern: String,
@@ -791,7 +1100,7 @@ final class TextCategoryCache: @unchecked Sendable {
 
     private let lock = NSLock()
     private var storage: [Key: ClipboardContentCategory] = [:]
-    private static let capacity = 24_000
+    private static let capacity = 12_000
 
     func category(contentHash: String, text: String) -> ClipboardContentCategory {
         let key = Key(contentHash: contentHash, byteCount: text.utf8.count)
@@ -814,6 +1123,29 @@ final class TextCategoryCache: @unchecked Sendable {
         storage[key] = category
         lock.unlock()
         return category
+    }
+
+    func removeAll() {
+        lock.lock()
+        storage.removeAll(keepingCapacity: false)
+        lock.unlock()
+    }
+
+    var entryCount: Int {
+        lock.lock()
+        defer { lock.unlock() }
+        return storage.count
+    }
+}
+
+/// Process-lifetime classification helpers are presentation accelerators, not
+/// user data. The app calls this on memory pressure and when moving into a long
+/// background interval; the next lookup deterministically rebuilds the exact
+/// same result.
+public enum ClipboardRuntimeCaches {
+    public static func removeAll() {
+        CustomClipboardCategory.releaseRegexCache()
+        TextCategoryCache.shared.removeAll()
     }
 }
 
@@ -1145,38 +1477,452 @@ public struct ClipboardHistorySettings: Codable, Equatable, Sendable {
     }
 }
 
+private final class ClipboardTextBox: Sendable {
+    let value: String?
+    init(_ value: String?) { self.value = value }
+}
+
+final class ClipboardEntryTextProvider: @unchecked Sendable {
+    private let cache = NSCache<NSUUID, ClipboardTextBox>()
+    private let sourceLock = NSLock()
+    private var loader: (@Sendable (UUID) -> String?)?
+    private var redirectedProvider: ClipboardEntryTextProvider?
+    private let cachesValues: Bool
+
+    init(
+        cachesValues: Bool = true,
+        loader: @escaping @Sendable (UUID) -> String?
+    ) {
+        self.loader = loader
+        self.cachesValues = cachesValues
+        cache.countLimit = 512
+        cache.totalCostLimit = 12 * 1024 * 1024
+    }
+
+    func text(for id: UUID) -> String? {
+        let source = sourceLock.withLock {
+            (
+                loader: loader,
+                redirectedProvider: redirectedProvider
+            )
+        }
+        if let redirectedProvider = source.redirectedProvider {
+            return redirectedProvider.text(for: id)
+        }
+        guard let loader = source.loader else { return nil }
+        guard cachesValues else { return loader(id) }
+        let key = id as NSUUID
+        if let cached = cache.object(forKey: key) { return cached.value }
+        let value = loader(id)
+        cache.setObject(
+            ClipboardTextBox(value),
+            forKey: key,
+            cost: max(1, value?.utf8.count ?? 1)
+        )
+        return value
+    }
+
+    /// Imported text initially resolves through a disposable SQLite staging
+    /// file. Once the canonical snapshot is durable, release that loader and
+    /// forward the same lightweight model references to the repository
+    /// provider. No observable entry-array mutation is needed.
+    func redirect(to provider: ClipboardEntryTextProvider) {
+        guard self !== provider else { return }
+        sourceLock.withLock {
+            loader = nil
+            redirectedProvider = provider
+        }
+        cache.removeAllObjects()
+    }
+
+    func removeAll() {
+        cache.removeAllObjects()
+    }
+}
+
+private enum ClipboardTextState: Sendable {
+    case resident(ClipboardTextBox)
+    case deferred(ClipboardEntryTextProvider)
+    case metadata
+}
+
+/// Immutable source metadata can be shared by every entry captured from the
+/// same application. Keeping all three strings behind one reference removes
+/// two stored reference slots from every `ClipboardEntry`; mutations create a
+/// replacement box so the public struct retains value semantics.
+final class ClipboardSourceMetadataBox: Hashable, Sendable {
+    let displayName: String?
+    let bundleIdentifier: String?
+    let bundleURLPath: String?
+
+    init(
+        displayName: String?,
+        bundleIdentifier: String?,
+        bundleURLPath: String?
+    ) {
+        self.displayName = displayName
+        self.bundleIdentifier = bundleIdentifier
+        self.bundleURLPath = bundleURLPath
+    }
+
+    static func make(
+        displayName: String?,
+        bundleIdentifier: String?,
+        bundleURLPath: String?
+    ) -> ClipboardSourceMetadataBox? {
+        guard displayName != nil || bundleIdentifier != nil || bundleURLPath != nil else {
+            return nil
+        }
+        return ClipboardSourceMetadataBox(
+            displayName: displayName,
+            bundleIdentifier: bundleIdentifier,
+            bundleURLPath: bundleURLPath
+        )
+    }
+
+    static func == (
+        lhs: ClipboardSourceMetadataBox,
+        rhs: ClipboardSourceMetadataBox
+    ) -> Bool {
+        lhs.displayName == rhs.displayName
+            && lhs.bundleIdentifier == rhs.bundleIdentifier
+            && lhs.bundleURLPath == rhs.bundleURLPath
+    }
+
+    func hash(into hasher: inout Hasher) {
+        hasher.combine(displayName)
+        hasher.combine(bundleIdentifier)
+        hasher.combine(bundleURLPath)
+    }
+}
+
+private final class ClipboardPinStateBox: Sendable {
+    let isPinned: Bool
+    let pinnedOrder: Int?
+    let isDesktopPinned: Bool?
+    let desktopPinnedOrder: Int?
+
+    init(
+        isPinned: Bool,
+        pinnedOrder: Int?,
+        isDesktopPinned: Bool?,
+        desktopPinnedOrder: Int?
+    ) {
+        self.isPinned = isPinned
+        self.pinnedOrder = pinnedOrder
+        self.isDesktopPinned = isDesktopPinned
+        self.desktopPinnedOrder = desktopPinnedOrder
+    }
+}
+
+/// Almost every history row is neither list-pinned nor desktop-pinned. Keep
+/// both the current default (`false`) and legacy missing desktop flag (`nil`)
+/// as allocation-free enum cases; only the small pinned/compatibility subset
+/// needs a box. The box is immutable so copied entries retain value semantics.
+private enum ClipboardPinState: Sendable {
+    case ordinary
+    case legacy
+    case custom(ClipboardPinStateBox)
+
+    static func make(
+        isPinned: Bool,
+        pinnedOrder: Int?,
+        isDesktopPinned: Bool?,
+        desktopPinnedOrder: Int?
+    ) -> ClipboardPinState {
+        if !isPinned, pinnedOrder == nil, desktopPinnedOrder == nil {
+            if isDesktopPinned == false { return .ordinary }
+            if isDesktopPinned == nil { return .legacy }
+        }
+        return .custom(
+            ClipboardPinStateBox(
+                isPinned: isPinned,
+                pinnedOrder: pinnedOrder,
+                isDesktopPinned: isDesktopPinned,
+                desktopPinnedOrder: desktopPinnedOrder
+            )
+        )
+    }
+
+    var values: (
+        isPinned: Bool,
+        pinnedOrder: Int?,
+        isDesktopPinned: Bool?,
+        desktopPinnedOrder: Int?
+    ) {
+        switch self {
+        case .ordinary:
+            (false, nil, false, nil)
+        case .legacy:
+            (false, nil, nil, nil)
+        case .custom(let box):
+            (
+                box.isPinned,
+                box.pinnedOrder,
+                box.isDesktopPinned,
+                box.desktopPinnedOrder
+            )
+        }
+    }
+}
+
+/// The two optional usage statistics have four exact combinations. A value enum
+/// represents all of them without heap allocation and without two independent
+/// Optional payload/tag/alignment regions in every history row.
+private enum ClipboardUsageState: Sendable {
+    case unused
+    case date(Date)
+    case count(Int)
+    case used(Date, Int)
+
+    static func make(
+        lastUsedAt: Date?,
+        useCount: Int?
+    ) -> ClipboardUsageState {
+        switch (lastUsedAt, useCount) {
+        case (nil, nil): .unused
+        case (.some(let date), nil): .date(date)
+        case (nil, .some(let count)): .count(count)
+        case (.some(let date), .some(let count)): .used(date, count)
+        }
+    }
+
+    var values: (lastUsedAt: Date?, useCount: Int?) {
+        switch self {
+        case .unused: (nil, nil)
+        case .date(let date): (date, nil)
+        case .count(let count): (nil, count)
+        case .used(let date, let count): (date, count)
+        }
+    }
+}
+
+/// Packs the entry kind, optional origin and optional cached automatic category
+/// into one byte. These three values have only 2 × 3 × 7 valid combinations;
+/// storing them as three independent enum fields left alignment gaps in every
+/// `ClipboardEntry` held by the history array.
+private struct ClipboardEntryClassificationBits: Hashable, Sendable {
+    private var rawValue: UInt8
+
+    init(
+        kind: ClipboardEntryKind,
+        origin: ClipboardEntryOrigin?,
+        automaticCategory: ClipboardContentCategory?
+    ) {
+        rawValue = 0
+        self.kind = kind
+        self.origin = origin
+        self.automaticCategory = automaticCategory
+    }
+
+    var kind: ClipboardEntryKind {
+        get { rawValue & 0b1 == 0 ? .text : .image }
+        set {
+            rawValue = (rawValue & ~UInt8(0b1))
+                | (newValue == .image ? 1 : 0)
+        }
+    }
+
+    var origin: ClipboardEntryOrigin? {
+        get {
+            switch (rawValue >> 1) & 0b11 {
+            case 1: .hedgeMemoScreenshot
+            case 2: .concealedPassword
+            default: nil
+            }
+        }
+        set {
+            let code: UInt8
+            switch newValue {
+            case .hedgeMemoScreenshot: code = 1
+            case .concealedPassword: code = 2
+            case nil: code = 0
+            }
+            rawValue = (rawValue & ~UInt8(0b110)) | (code << 1)
+        }
+    }
+
+    var automaticCategory: ClipboardContentCategory? {
+        get {
+            switch (rawValue >> 3) & 0b111 {
+            case 1: .text
+            case 2: .code
+            case 3: .link
+            case 4: .image
+            case 5: .screenshot
+            case 6: .password
+            default: nil
+            }
+        }
+        set {
+            let code: UInt8
+            switch newValue {
+            case .text: code = 1
+            case .code: code = 2
+            case .link: code = 3
+            case .image: code = 4
+            case .screenshot: code = 5
+            case .password: code = 6
+            case nil: code = 0
+            }
+            rawValue = (rawValue & ~UInt8(0b11_1000)) | (code << 3)
+        }
+    }
+}
+
 public struct ClipboardEntry: Codable, Hashable, Identifiable, Sendable {
     public let id: UUID
-    public var kind: ClipboardEntryKind
-    public var text: String?
+    private var classificationBits: ClipboardEntryClassificationBits
+    public var kind: ClipboardEntryKind {
+        get { classificationBits.kind }
+        set { classificationBits.kind = newValue }
+    }
+    private var textState: ClipboardTextState
+    public var text: String? {
+        get {
+            switch textState {
+            case .resident(let box): box.value
+            case .deferred(let provider): provider.text(for: id)
+            case .metadata: nil
+            }
+        }
+        set {
+            textState = .resident(ClipboardTextBox(newValue))
+            automaticContentCategoryValue = nil
+        }
+    }
     public var imageFileName: String?
-    public var contentHash: String
+    var compactContentHash: CompactContentHash
+    public var contentHash: String {
+        get { compactContentHash.stringValue }
+        set { compactContentHash = CompactContentHash(newValue) }
+    }
     public var createdAt: Date
     public var updatedAt: Date
-    public var lastUsedAt: Date?
-    public var useCount: Int?
-    public var sourceApp: String?
+    private var usageState: ClipboardUsageState
+    public var lastUsedAt: Date? {
+        get { usageState.values.lastUsedAt }
+        set {
+            usageState = ClipboardUsageState.make(
+                lastUsedAt: newValue,
+                useCount: usageState.values.useCount
+            )
+        }
+    }
+    public var useCount: Int? {
+        get { usageState.values.useCount }
+        set {
+            usageState = ClipboardUsageState.make(
+                lastUsedAt: usageState.values.lastUsedAt,
+                useCount: newValue
+            )
+        }
+    }
+    private var sourceMetadata: ClipboardSourceMetadataBox?
+    public var sourceApp: String? {
+        get { sourceMetadata?.displayName }
+        set {
+            replaceSourceMetadata(
+                displayName: newValue,
+                bundleIdentifier: sourceBundleIdentifier,
+                bundleURLPath: sourceBundleURLPath
+            )
+        }
+    }
     /// Stable source identity added after `sourceApp`. Optional fields keep old
     /// clipboard-history snapshots source-compatible.
-    public var sourceBundleIdentifier: String?
-    public var sourceBundleURLPath: String?
+    public var sourceBundleIdentifier: String? {
+        get { sourceMetadata?.bundleIdentifier }
+        set {
+            replaceSourceMetadata(
+                displayName: sourceApp,
+                bundleIdentifier: newValue,
+                bundleURLPath: sourceBundleURLPath
+            )
+        }
+    }
+    public var sourceBundleURLPath: String? {
+        get { sourceMetadata?.bundleURLPath }
+        set {
+            replaceSourceMetadata(
+                displayName: sourceApp,
+                bundleIdentifier: sourceBundleIdentifier,
+                bundleURLPath: newValue
+            )
+        }
+    }
     /// Original RTF/RTFD/HTML representations, stored as sidecar files.
     /// Optional keeps snapshots written before rich-text capture compatible.
     public var originalFormats: [ClipboardOriginalFormat]?
-    public var isPinned: Bool
-    public var pinnedOrder: Int?
+    private var pinState: ClipboardPinState
+    public var isPinned: Bool {
+        get { pinState.values.isPinned }
+        set {
+            let current = pinState.values
+            replacePinState(
+                isPinned: newValue,
+                pinnedOrder: current.pinnedOrder,
+                isDesktopPinned: current.isDesktopPinned,
+                desktopPinnedOrder: current.desktopPinnedOrder
+            )
+        }
+    }
+    public var pinnedOrder: Int? {
+        get { pinState.values.pinnedOrder }
+        set {
+            let current = pinState.values
+            replacePinState(
+                isPinned: current.isPinned,
+                pinnedOrder: newValue,
+                isDesktopPinned: current.isDesktopPinned,
+                desktopPinnedOrder: current.desktopPinnedOrder
+            )
+        }
+    }
     /// Independent from clipboard ordering/quick-slot pinning. Optional keeps
     /// snapshots written by older versions source-compatible when decoded.
-    public var isDesktopPinned: Bool?
+    public var isDesktopPinned: Bool? {
+        get { pinState.values.isDesktopPinned }
+        set {
+            let current = pinState.values
+            replacePinState(
+                isPinned: current.isPinned,
+                pinnedOrder: current.pinnedOrder,
+                isDesktopPinned: newValue,
+                desktopPinnedOrder: current.desktopPinnedOrder
+            )
+        }
+    }
     /// Stable first-pin order for the temporary desktop-pinned section in the
     /// clipboard panel. Optional preserves snapshots written before that section
     /// existed; the store migrates missing values on load.
-    public var desktopPinnedOrder: Int?
-    public var origin: ClipboardEntryOrigin?
+    public var desktopPinnedOrder: Int? {
+        get { pinState.values.desktopPinnedOrder }
+        set {
+            let current = pinState.values
+            replacePinState(
+                isPinned: current.isPinned,
+                pinnedOrder: current.pinnedOrder,
+                isDesktopPinned: current.isDesktopPinned,
+                desktopPinnedOrder: newValue
+            )
+        }
+    }
+    public var origin: ClipboardEntryOrigin? {
+        get { classificationBits.origin }
+        set { classificationBits.origin = newValue }
+    }
     /// Optional storage value of a user-selected category. Nil keeps automatic
     /// content/regex classification. A string keeps older snapshots compatible
     /// and supports both built-in and custom category keys.
     public var manualCategoryStorageValue: String?
+    /// Cached automatic classification. Persisting this small value lets the
+    /// process keep text bodies out of memory while filtering built-in
+    /// categories. Optional preserves snapshots created by older releases.
+    private var automaticContentCategoryValue: ClipboardContentCategory? {
+        get { classificationBits.automaticCategory }
+        set { classificationBits.automaticCategory = newValue }
+    }
 
     public init(
         id: UUID = UUID(),
@@ -1200,24 +1946,286 @@ public struct ClipboardEntry: Codable, Hashable, Identifiable, Sendable {
         manualCategoryStorageValue: String? = nil
     ) {
         self.id = id
-        self.kind = kind
-        self.text = text
+        self.classificationBits = ClipboardEntryClassificationBits(
+            kind: kind,
+            origin: origin,
+            automaticCategory: Self.automaticCategory(
+                kind: kind,
+                text: text,
+                origin: origin
+            )
+        )
+        self.textState = .resident(ClipboardTextBox(text))
         self.imageFileName = imageFileName
-        self.contentHash = contentHash
+        self.compactContentHash = CompactContentHash(contentHash)
         self.createdAt = createdAt
         self.updatedAt = updatedAt
-        self.lastUsedAt = lastUsedAt
-        self.useCount = useCount
-        self.sourceApp = sourceApp
-        self.sourceBundleIdentifier = sourceBundleIdentifier
-        self.sourceBundleURLPath = sourceBundleURLPath
+        self.usageState = ClipboardUsageState.make(
+            lastUsedAt: lastUsedAt,
+            useCount: useCount
+        )
+        self.sourceMetadata = ClipboardSourceMetadataBox.make(
+            displayName: sourceApp,
+            bundleIdentifier: sourceBundleIdentifier,
+            bundleURLPath: sourceBundleURLPath
+        )
         self.originalFormats = originalFormats
-        self.isPinned = isPinned
-        self.pinnedOrder = pinnedOrder
-        self.isDesktopPinned = isDesktopPinned
-        self.desktopPinnedOrder = desktopPinnedOrder
-        self.origin = origin
+        self.pinState = ClipboardPinState.make(
+            isPinned: isPinned,
+            pinnedOrder: pinnedOrder,
+            isDesktopPinned: isDesktopPinned,
+            desktopPinnedOrder: desktopPinnedOrder
+        )
         self.manualCategoryStorageValue = manualCategoryStorageValue
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case id, kind, text, imageFileName, contentHash, createdAt, updatedAt
+        case lastUsedAt, useCount, sourceApp, sourceBundleIdentifier
+        case sourceBundleURLPath, originalFormats, isPinned, pinnedOrder
+        case isDesktopPinned, desktopPinnedOrder, origin
+        case manualCategoryStorageValue, automaticContentCategoryStorageValue
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        id = try container.decode(UUID.self, forKey: .id)
+        let decodedKind = try container.decode(
+            ClipboardEntryKind.self,
+            forKey: .kind
+        )
+        textState = .resident(
+            ClipboardTextBox(
+                try container.decodeIfPresent(String.self, forKey: .text)
+            )
+        )
+        imageFileName = try container.decodeIfPresent(String.self, forKey: .imageFileName)
+        compactContentHash = CompactContentHash(
+            try container.decode(String.self, forKey: .contentHash)
+        )
+        createdAt = try container.decode(Date.self, forKey: .createdAt)
+        updatedAt = try container.decode(Date.self, forKey: .updatedAt)
+        usageState = ClipboardUsageState.make(
+            lastUsedAt: try container.decodeIfPresent(
+                Date.self,
+                forKey: .lastUsedAt
+            ),
+            useCount: try container.decodeIfPresent(
+                Int.self,
+                forKey: .useCount
+            )
+        )
+        sourceMetadata = ClipboardSourceMetadataBox.make(
+            displayName: try container.decodeIfPresent(String.self, forKey: .sourceApp),
+            bundleIdentifier: try container.decodeIfPresent(
+                String.self,
+                forKey: .sourceBundleIdentifier
+            ),
+            bundleURLPath: try container.decodeIfPresent(
+                String.self,
+                forKey: .sourceBundleURLPath
+            )
+        )
+        originalFormats = try container.decodeIfPresent([ClipboardOriginalFormat].self, forKey: .originalFormats)
+        pinState = ClipboardPinState.make(
+            isPinned: try container.decodeIfPresent(
+                Bool.self,
+                forKey: .isPinned
+            ) ?? false,
+            pinnedOrder: try container.decodeIfPresent(
+                Int.self,
+                forKey: .pinnedOrder
+            ),
+            isDesktopPinned: try container.decodeIfPresent(
+                Bool.self,
+                forKey: .isDesktopPinned
+            ),
+            desktopPinnedOrder: try container.decodeIfPresent(
+                Int.self,
+                forKey: .desktopPinnedOrder
+            )
+        )
+        let decodedOrigin = try container.decodeIfPresent(
+            ClipboardEntryOrigin.self,
+            forKey: .origin
+        )
+        manualCategoryStorageValue = try container.decodeIfPresent(
+            String.self,
+            forKey: .manualCategoryStorageValue
+        )
+        let decodedAutomaticCategory = try container.decodeIfPresent(
+            String.self,
+            forKey: .automaticContentCategoryStorageValue
+        ).flatMap(ClipboardContentCategory.init(rawValue:))
+        classificationBits = ClipboardEntryClassificationBits(
+            kind: decodedKind,
+            origin: decodedOrigin,
+            automaticCategory: decodedAutomaticCategory
+        )
+    }
+
+    public func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(id, forKey: .id)
+        try container.encode(kind, forKey: .kind)
+        try container.encodeIfPresent(text, forKey: .text)
+        try container.encodeIfPresent(imageFileName, forKey: .imageFileName)
+        try container.encode(contentHash, forKey: .contentHash)
+        try container.encode(createdAt, forKey: .createdAt)
+        try container.encode(updatedAt, forKey: .updatedAt)
+        try container.encodeIfPresent(lastUsedAt, forKey: .lastUsedAt)
+        try container.encodeIfPresent(useCount, forKey: .useCount)
+        try container.encodeIfPresent(sourceApp, forKey: .sourceApp)
+        try container.encodeIfPresent(sourceBundleIdentifier, forKey: .sourceBundleIdentifier)
+        try container.encodeIfPresent(sourceBundleURLPath, forKey: .sourceBundleURLPath)
+        try container.encodeIfPresent(originalFormats, forKey: .originalFormats)
+        try container.encode(isPinned, forKey: .isPinned)
+        try container.encodeIfPresent(pinnedOrder, forKey: .pinnedOrder)
+        try container.encodeIfPresent(isDesktopPinned, forKey: .isDesktopPinned)
+        try container.encodeIfPresent(desktopPinnedOrder, forKey: .desktopPinnedOrder)
+        try container.encodeIfPresent(origin, forKey: .origin)
+        try container.encodeIfPresent(manualCategoryStorageValue, forKey: .manualCategoryStorageValue)
+        try container.encodeIfPresent(
+            automaticContentCategoryValue?.rawValue,
+            forKey: .automaticContentCategoryStorageValue
+        )
+    }
+
+    public static func == (lhs: ClipboardEntry, rhs: ClipboardEntry) -> Bool {
+        lhs.id == rhs.id
+            && lhs.classificationBits == rhs.classificationBits
+            && lhs.imageFileName == rhs.imageFileName
+            && lhs.compactContentHash == rhs.compactContentHash
+            && lhs.createdAt == rhs.createdAt
+            && lhs.updatedAt == rhs.updatedAt
+            && lhs.lastUsedAt == rhs.lastUsedAt
+            && lhs.useCount == rhs.useCount
+            && lhs.sourceApp == rhs.sourceApp
+            && lhs.sourceBundleIdentifier == rhs.sourceBundleIdentifier
+            && lhs.sourceBundleURLPath == rhs.sourceBundleURLPath
+            && lhs.originalFormats == rhs.originalFormats
+            && lhs.isPinned == rhs.isPinned
+            && lhs.pinnedOrder == rhs.pinnedOrder
+            && lhs.isDesktopPinned == rhs.isDesktopPinned
+            && lhs.desktopPinnedOrder == rhs.desktopPinnedOrder
+            && lhs.manualCategoryStorageValue == rhs.manualCategoryStorageValue
+    }
+
+    public func hash(into hasher: inout Hasher) {
+        hasher.combine(id)
+        hasher.combine(classificationBits)
+        hasher.combine(imageFileName)
+        hasher.combine(compactContentHash)
+        hasher.combine(createdAt)
+        hasher.combine(updatedAt)
+        hasher.combine(lastUsedAt)
+        hasher.combine(useCount)
+        hasher.combine(sourceApp)
+        hasher.combine(sourceBundleIdentifier)
+        hasher.combine(sourceBundleURLPath)
+        hasher.combine(originalFormats)
+        hasher.combine(isPinned)
+        hasher.combine(pinnedOrder)
+        hasher.combine(isDesktopPinned)
+        hasher.combine(desktopPinnedOrder)
+        hasher.combine(manualCategoryStorageValue)
+    }
+
+    mutating func deferText(
+        to provider: ClipboardEntryTextProvider,
+        automaticCategory: ClipboardContentCategory
+    ) {
+        automaticContentCategoryValue = automaticCategory
+        textState = .deferred(provider)
+    }
+
+    var metadataProjection: ClipboardEntry {
+        var projection = self
+        projection.textState = .metadata
+        return projection
+    }
+
+    /// Resolves a deferred body once for a database row. Encoding `self`
+    /// directly and then reading `text` separately asks a non-caching import
+    /// provider for the same potentially large string twice.
+    var persistenceProjection: (entry: ClipboardEntry, text: String?) {
+        let resolvedText = text
+        var projection = self
+        projection.textState = .resident(
+            ClipboardTextBox(resolvedText)
+        )
+        return (projection, resolvedText)
+    }
+
+    func redirectDeferredText(to provider: ClipboardEntryTextProvider) {
+        guard case .deferred(let currentProvider) = textState else { return }
+        currentProvider.redirect(to: provider)
+    }
+
+    var decodedStoredText: String? {
+        guard case .resident(let box) = textState else { return nil }
+        return box.value
+    }
+
+    var automaticContentCategory: ClipboardContentCategory {
+        if let cached = automaticContentCategoryValue {
+            return cached
+        }
+        return Self.automaticCategory(kind: kind, text: text, origin: origin)
+    }
+
+    static var storageStride: Int { MemoryLayout<Self>.stride }
+    static var textStateStorageStride: Int {
+        MemoryLayout<ClipboardTextState>.stride
+    }
+    static var sourceMetadataStorageStride: Int {
+        MemoryLayout<ClipboardSourceMetadataBox?>.stride
+    }
+    #if DEBUG
+    static var pinStateStorageStride: Int {
+        MemoryLayout<ClipboardPinState>.stride
+    }
+    static var usageStateStorageStride: Int {
+        MemoryLayout<ClipboardUsageState>.stride
+    }
+    var hasAllocatedPinStateForTesting: Bool {
+        if case .custom = pinState { return true }
+        return false
+    }
+    #endif
+
+    var sourceMetadataBoxForInterning: ClipboardSourceMetadataBox? {
+        sourceMetadata
+    }
+
+    mutating func replaceSourceMetadata(
+        displayName: String?,
+        bundleIdentifier: String?,
+        bundleURLPath: String?
+    ) {
+        sourceMetadata = ClipboardSourceMetadataBox.make(
+            displayName: displayName,
+            bundleIdentifier: bundleIdentifier,
+            bundleURLPath: bundleURLPath
+        )
+    }
+
+    mutating func reuseSourceMetadataBox(_ box: ClipboardSourceMetadataBox?) {
+        sourceMetadata = box
+    }
+
+    private mutating func replacePinState(
+        isPinned: Bool,
+        pinnedOrder: Int?,
+        isDesktopPinned: Bool?,
+        desktopPinnedOrder: Int?
+    ) {
+        pinState = ClipboardPinState.make(
+            isPinned: isPinned,
+            pinnedOrder: pinnedOrder,
+            isDesktopPinned: isDesktopPinned,
+            desktopPinnedOrder: desktopPinnedOrder
+        )
     }
 
     /// Persisted password entries default to a mask. Once the password category
@@ -1287,11 +2295,24 @@ public struct ClipboardEntry: Codable, Hashable, Identifiable, Sendable {
         if origin == .concealedPassword { return .password }
         if case .builtin(let category) = manualCategoryKey { return category }
         if origin == .hedgeMemoScreenshot { return .screenshot }
+        return automaticContentCategory
+    }
+
+    private static func automaticCategory(
+        kind: ClipboardEntryKind,
+        text: String?,
+        origin: ClipboardEntryOrigin?
+    ) -> ClipboardContentCategory {
+        if origin == .concealedPassword { return .password }
+        if origin == .hedgeMemoScreenshot { return .screenshot }
         switch kind {
         case .image:
             return .image
         case .text:
-            return TextCategoryCache.shared.category(contentHash: contentHash, text: text ?? "")
+            let value = text ?? ""
+            if ClipboardLinkDetector.isLink(value) { return .link }
+            if ClipboardCodeDetector.isCode(value) { return .code }
+            return .text
         }
     }
 
@@ -1347,6 +2368,143 @@ public struct ClipboardEntry: Codable, Hashable, Identifiable, Sendable {
         }
     }
 }
+
+#if DEBUG
+/// Exact pre-1.2.24 stored-field shape used only by layout tests. Keeping the
+/// comparison in the same compiler/module makes the byte delta authoritative;
+/// this type is absent from release builds.
+private struct LegacyClipboardEntryLayout {
+    let id: UUID
+    var kind: ClipboardEntryKind
+    var storedText: String?
+    var deferredTextProvider: ClipboardEntryTextProvider?
+    var imageFileName: String?
+    var compactContentHash: CompactContentHash
+    var createdAt: Date
+    var updatedAt: Date
+    var lastUsedAt: Date?
+    var useCount: Int?
+    var sourceApp: String?
+    var sourceBundleIdentifier: String?
+    var sourceBundleURLPath: String?
+    var originalFormats: [ClipboardOriginalFormat]?
+    var isPinned: Bool
+    var pinnedOrder: Int?
+    var isDesktopPinned: Bool?
+    var desktopPinnedOrder: Int?
+    var origin: ClipboardEntryOrigin?
+    var manualCategoryStorageValue: String?
+    var automaticContentCategoryStorageValue: String?
+}
+
+/// Exact 1.2.25 layout after classification packing but before the resident /
+/// deferred / metadata text-state union.
+private struct LegacyClipboardEntryTextLayout {
+    let id: UUID
+    var classificationBits: ClipboardEntryClassificationBits
+    var storedText: String?
+    var deferredTextProvider: ClipboardEntryTextProvider?
+    var imageFileName: String?
+    var compactContentHash: CompactContentHash
+    var createdAt: Date
+    var updatedAt: Date
+    var lastUsedAt: Date?
+    var useCount: Int?
+    var sourceApp: String?
+    var sourceBundleIdentifier: String?
+    var sourceBundleURLPath: String?
+    var originalFormats: [ClipboardOriginalFormat]?
+    var isPinned: Bool
+    var pinnedOrder: Int?
+    var isDesktopPinned: Bool?
+    var desktopPinnedOrder: Int?
+    var manualCategoryStorageValue: String?
+}
+
+/// Exact 1.2.26 layout before the three source strings were coalesced behind a
+/// shared immutable metadata reference.
+private struct LegacyClipboardEntrySourceLayout {
+    let id: UUID
+    var classificationBits: ClipboardEntryClassificationBits
+    var textState: ClipboardTextState
+    var imageFileName: String?
+    var compactContentHash: CompactContentHash
+    var createdAt: Date
+    var updatedAt: Date
+    var lastUsedAt: Date?
+    var useCount: Int?
+    var sourceApp: String?
+    var sourceBundleIdentifier: String?
+    var sourceBundleURLPath: String?
+    var originalFormats: [ClipboardOriginalFormat]?
+    var isPinned: Bool
+    var pinnedOrder: Int?
+    var isDesktopPinned: Bool?
+    var desktopPinnedOrder: Int?
+    var manualCategoryStorageValue: String?
+}
+
+/// Exact 1.2.27 layout before quick-pin and desktop-pin fields were coalesced
+/// into their common-case allocation-free state.
+private struct LegacyClipboardEntryPinLayout {
+    let id: UUID
+    var classificationBits: ClipboardEntryClassificationBits
+    var textState: ClipboardTextState
+    var imageFileName: String?
+    var compactContentHash: CompactContentHash
+    var createdAt: Date
+    var updatedAt: Date
+    var lastUsedAt: Date?
+    var useCount: Int?
+    var sourceMetadata: ClipboardSourceMetadataBox?
+    var originalFormats: [ClipboardOriginalFormat]?
+    var isPinned: Bool
+    var pinnedOrder: Int?
+    var isDesktopPinned: Bool?
+    var desktopPinnedOrder: Int?
+    var manualCategoryStorageValue: String?
+}
+
+/// Exact 1.2.28 layout before the two optional usage statistics were represented
+/// as one four-case, heap-free value state.
+private struct LegacyClipboardEntryUsageLayout {
+    let id: UUID
+    var classificationBits: ClipboardEntryClassificationBits
+    var textState: ClipboardTextState
+    var imageFileName: String?
+    var compactContentHash: CompactContentHash
+    var createdAt: Date
+    var updatedAt: Date
+    var lastUsedAt: Date?
+    var useCount: Int?
+    var sourceMetadata: ClipboardSourceMetadataBox?
+    var originalFormats: [ClipboardOriginalFormat]?
+    var pinState: ClipboardPinState
+    var manualCategoryStorageValue: String?
+}
+
+extension ClipboardEntry {
+    static var legacyStorageStrideForTesting: Int {
+        MemoryLayout<LegacyClipboardEntryLayout>.stride
+    }
+
+    static var legacyTextStorageStrideForTesting: Int {
+        MemoryLayout<LegacyClipboardEntryTextLayout>.stride
+    }
+
+    static var legacySourceStorageStrideForTesting: Int {
+        MemoryLayout<LegacyClipboardEntrySourceLayout>.stride
+    }
+
+    static var legacyPinStorageStrideForTesting: Int {
+        MemoryLayout<LegacyClipboardEntryPinLayout>.stride
+    }
+
+    static var legacyUsageStorageStrideForTesting: Int {
+        MemoryLayout<LegacyClipboardEntryUsageLayout>.stride
+    }
+}
+#endif
 
 public struct ClipboardHistorySnapshot: Codable, Sendable {
     public var entries: [ClipboardEntry]

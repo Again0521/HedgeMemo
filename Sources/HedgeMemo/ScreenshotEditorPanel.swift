@@ -83,7 +83,9 @@ final class ScreenshotEditorPanelController {
     }
 
     private func dismissAndTakeCompletion() -> ((NSImage?) -> Void)? {
-        panel?.orderOut(nil)
+        if let panel {
+            TransientPanelLifetime.release(panel)
+        }
         panel = nil
         let completion = onComplete
         onComplete = nil

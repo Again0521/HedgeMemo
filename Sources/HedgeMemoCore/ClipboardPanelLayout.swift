@@ -140,15 +140,21 @@ public enum ClipboardPanelLayout {
     }
 
     /// Height of the scrolling content for the given entries in a category.
-    public static func contentHeight(for entries: [ClipboardEntry], key: ClipboardCategoryKey?) -> CGFloat {
+    public static func contentHeight<Entries: Collection>(
+        for entries: Entries,
+        key: ClipboardCategoryKey?
+    ) -> CGFloat where Entries.Element == ClipboardEntry {
         guard !entries.isEmpty else { return emptyStateHeight }
         switch key {
         case .builtin(.image), .builtin(.screenshot):
             let rows = Int(ceil(Double(entries.count) / Double(imageColumns)))
             return CGFloat(rows) * imageCellSide + CGFloat(rows - 1) * imageCellSpacing
         case .builtin(.code):
-            let rows = entries.map { codeRowHeight(lineCount: previewLineCount($0.text)) }
-            return rows.reduce(0, +) + CGFloat(entries.count - 1) * codeSeparatorHeight
+            var rowHeight: CGFloat = 0
+            for entry in entries {
+                rowHeight += codeRowHeight(lineCount: previewLineCount(entry.text))
+            }
+            return rowHeight + CGFloat(entries.count - 1) * codeSeparatorHeight
         default:
             return CGFloat(entries.count) * textRowHeight + CGFloat(entries.count - 1) * listSpacing
         }

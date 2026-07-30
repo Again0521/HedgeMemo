@@ -91,8 +91,8 @@ cat >"$INFO_PLIST" <<PLIST
 <string>zh-Hans</string>
 </array>
 <key>CFBundleIconFile</key><string>AppIcon</string>
-<key>CFBundleShortVersionString</key><string>1.2.5</string>
-<key>CFBundleVersion</key><string>1.2.5</string>
+<key>CFBundleShortVersionString</key><string>1.2.31</string>
+<key>CFBundleVersion</key><string>1.2.31</string>
 <key>LSMinimumSystemVersion</key><string>$MIN_SYSTEM_VERSION</string>
 <key>LSUIElement</key><true/>
 <key>CFBundleDisplayName</key><string>$APP_NAME</string>
@@ -140,9 +140,22 @@ codesign --verify --deep --strict "$APP_BUNDLE"
 mkdir -p "$DIST_DIR"
 rm -rf "$DIST_APP"
 /usr/bin/ditto --noextattr --noqtn "$APP_BUNDLE" "$DIST_APP"
-xattr -d com.apple.FinderInfo "$DIST_APP" 2>/dev/null || true
-xattr -d com.apple.fileprovider.fpfs#P "$DIST_APP" 2>/dev/null || true
-codesign --verify --deep --strict "$DIST_APP"
+# Finder/File Provider can attach metadata to nested resource bundles as well
+# as the app root while `ditto` is still walking the tree. It can also race the
+# cleanup itself, so couple cleanup and verification in a bounded retry loop.
+# Extended attributes are not signed app content.
+dist_verified=false
+for _ in 1 2 3 4 5; do
+  xattr -cr "$DIST_APP"
+  if codesign --verify --deep --strict "$DIST_APP"; then
+    dist_verified=true
+    break
+  fi
+done
+if [[ "$dist_verified" != true ]]; then
+  echo "Unable to verify $DIST_APP after removing File Provider metadata" >&2
+  exit 1
+fi
 
 if [[ "$MODE" == "--package" || "$MODE" == "package" ]]; then
   echo "Prepared $DIST_APP without installing or launching it"

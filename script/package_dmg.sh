@@ -7,7 +7,7 @@ set -euo pipefail
 # signing path for the DMG itself.
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 APP_NAME="HedgeMemo"
-VERSION="1.2.5"
+VERSION="1.2.31"
 DIST_DIR="$ROOT_DIR/dist"
 DIST_APP="$DIST_DIR/$APP_NAME.app"
 DMG_PATH="$DIST_DIR/$APP_NAME-$VERSION.dmg"

@@ -34,6 +34,15 @@ final class CodeHighlighterTests: XCTestCase {
         )
     }
 
+    func testReleasingHighlightCacheDoesNotChangeRenderedAttributes() {
+        let code = "struct Result { let value = parse(\"42\") // stable }"
+        let before = CodeHighlighter.highlight(code, theme: .githubLight)
+        CodeHighlighter.releaseTransientCache()
+        let after = CodeHighlighter.highlight(code, theme: .githubLight)
+
+        XCTAssertEqual(before, after)
+    }
+
     private func assertIncrementalMatchesFull(
         initial: String,
         replacing needle: String,

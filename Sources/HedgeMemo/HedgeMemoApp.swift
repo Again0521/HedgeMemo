@@ -66,6 +66,7 @@ final class HedgeMemoAppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func applicationWillTerminate(_ notification: Notification) {
+        services?.stopTransientMemoryManagement()
         services?.clipboardStore.flushPendingSave()
         services?.memeStore.flushPendingSave()
     }

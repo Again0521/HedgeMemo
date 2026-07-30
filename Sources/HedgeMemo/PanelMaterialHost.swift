@@ -61,6 +61,25 @@ enum PanelMaterialHost {
     }
 }
 
+/// Fully tears down one-shot AppKit windows after their visible operation
+/// finishes. `orderOut` only hides a window; AppKit can continue retaining its
+/// hosting tree, decoded images and SwiftUI state while the process runs.
+///
+/// Detaching the tree before closing keeps dismissal visually identical while
+/// making every rebuildable backing allocation eligible for release.
+@MainActor
+enum TransientPanelLifetime {
+    static func release(_ window: NSWindow, close: Bool = true) {
+        window.orderOut(nil)
+        window.delegate = nil
+        window.contentViewController = nil
+        window.contentView = nil
+        if close {
+            window.close()
+        }
+    }
+}
+
 /// Shared presentation treatment for SwiftUI sheets. The sheet window supplies
 /// lifecycle and keyboard routing; this modifier supplies the same adjustable
 /// material and compact control density as HedgeMemo's standalone panels.

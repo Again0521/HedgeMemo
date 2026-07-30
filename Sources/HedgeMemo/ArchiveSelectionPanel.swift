@@ -55,12 +55,10 @@ enum ArchiveExportSelectionPanel {
 @MainActor
 enum ArchiveImportSelectionPanel {
     static func run(manifest: MemeArchiveManifest) -> ArchiveImportSelection? {
-        let memeSnapshot = manifest.memeSnapshot
-        let clipboardSnapshot = manifest.clipboardSnapshot
-        let memeCategories = memeSnapshot?.categories ?? []
-        let uncategorizedMemes = memeSnapshot?.memes.contains(where: { $0.categoryID == nil }) == true
-        let clipboardKeys = archiveClipboardKeys(in: clipboardSnapshot)
-        let customs = clipboardSnapshot?.settings.customCategories ?? []
+        let memeCategories = manifest.availableMemeCategories
+        let uncategorizedMemes = manifest.hasUncategorizedMemes
+        let clipboardKeys = manifest.availableClipboardCategoryKeys
+        let customs = manifest.availableClipboardSettings?.customCategories ?? []
         let session = UnifiedPopupSession(
             title: L10n.text("选择导入内容"),
             size: ArchiveSelectionMetrics.size(
@@ -89,19 +87,6 @@ enum ArchiveImportSelectionPanel {
         PanelMaterialHost.install(root, in: session.panel, cornerRadius: 14)
         session.present()
         return result
-    }
-
-    private static func archiveClipboardKeys(in snapshot: ClipboardHistorySnapshot?) -> [ClipboardCategoryKey] {
-        guard let snapshot else { return [] }
-        var keys = ClipboardContentCategory.allCases
-            .filter { category in snapshot.entries.contains { $0.contentCategory == category } }
-            .map(ClipboardCategoryKey.builtin)
-        let customs = snapshot.settings.customCategories ?? []
-        keys += customs.compactMap { custom in
-            let key = ClipboardCategoryKey.custom(custom.id)
-            return snapshot.entries.contains { $0.matches(key: key, customCategories: customs) } ? key : nil
-        }
-        return keys
     }
 }
 

@@ -84,6 +84,22 @@ final class ImageThumbnailCache: @unchecked Sendable {
         DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: work)
     }
 
+    /// Memory pressure and system sleep are stronger signals than the ordinary
+    /// short panel-close grace period. Cancel queued work and release decoded
+    /// pixels immediately; source files and GIF data remain untouched on disk.
+    func purgeImmediately() {
+        lifecycleLock.withLock {
+            lifecycleGeneration &+= 1
+            idlePurgeWork?.cancel()
+            idlePurgeWork = nil
+        }
+        decodeQueue.cancelAllOperations()
+        cache.removeAllObjects()
+        decodeQueue.addBarrierBlock { [weak self] in
+            self?.cache.removeAllObjects()
+        }
+    }
+
     private func isCurrentLifecycle(_ ticket: UInt) -> Bool {
         lifecycleLock.withLock { lifecycleGeneration == ticket }
     }
