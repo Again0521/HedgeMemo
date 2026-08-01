@@ -143,8 +143,17 @@ PLIST
 xattr -cr "$APP_BUNDLE"
 # A stable identity is required: an ad-hoc fallback changes the cdhash every
 # build and makes macOS regard the update as a new screen-recording client.
-SIGN_IDENTITY="HedgeMemo Local Signing"
-if security find-certificate -c "$SIGN_IDENTITY" >/dev/null 2>&1; then
+# A distribution build supplies an Apple-issued Developer ID identity through
+# the environment; local builds retain the stable development identity.
+SIGN_IDENTITY="${HEDGEMEMO_SIGN_IDENTITY:-HedgeMemo Local Signing}"
+if [[ -n "${HEDGEMEMO_SIGN_IDENTITY:-}" ]]; then
+  if ! security find-identity -v -p codesigning | grep -F "\"$SIGN_IDENTITY\"" >/dev/null; then
+    echo "Missing valid Developer ID signing identity '$SIGN_IDENTITY'." >&2
+    exit 1
+  fi
+  codesign --force --deep --options runtime --timestamp \
+    --sign "$SIGN_IDENTITY" --identifier "$BUNDLE_ID" "$APP_BUNDLE"
+elif security find-certificate -c "$SIGN_IDENTITY" >/dev/null 2>&1; then
   codesign --force --deep --sign "$SIGN_IDENTITY" --identifier "$BUNDLE_ID" "$APP_BUNDLE"
 else
   echo "Missing stable signing identity '$SIGN_IDENTITY'. Run ./script/setup_signing.sh once before packaging." >&2

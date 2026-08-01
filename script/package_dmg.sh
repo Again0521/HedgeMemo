@@ -8,6 +8,9 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 APP_NAME="HedgeMemo"
 VERSION="1.2.6"
+DIST_IDENTITY="${HEDGEMEMO_SIGN_IDENTITY:-}"
+NOTARY_PROFILE="${HEDGEMEMO_NOTARY_PROFILE:-}"
+IS_DISTRIBUTION="${HEDGEMEMO_DISTRIBUTION:-0}"
 DIST_DIR="$ROOT_DIR/dist"
 DIST_APP="$DIST_DIR/$APP_NAME.app"
 DMG_PATH="$DIST_DIR/$APP_NAME-$VERSION.dmg"
@@ -17,6 +20,17 @@ cleanup() {
   rm -rf "$STAGING_DIR"
 }
 trap cleanup EXIT
+
+if [[ "$IS_DISTRIBUTION" == "1" ]]; then
+  if [[ "$DIST_IDENTITY" != Developer\ ID\ Application:* ]]; then
+    echo "Distribution requires HEDGEMEMO_SIGN_IDENTITY='Developer ID Application: …'." >&2
+    exit 1
+  fi
+  if [[ -z "$NOTARY_PROFILE" ]]; then
+    echo "Distribution requires HEDGEMEMO_NOTARY_PROFILE for xcrun notarytool." >&2
+    exit 1
+  fi
+fi
 
 "$ROOT_DIR/script/build_and_run.sh" --package
 
@@ -57,6 +71,16 @@ else
     -ov \
     -format UDZO \
     "$DMG_PATH"
+fi
+
+if [[ "$IS_DISTRIBUTION" == "1" ]]; then
+  codesign --force --timestamp --sign "$DIST_IDENTITY" "$DMG_PATH"
+  xcrun notarytool submit "$DMG_PATH" --keychain-profile "$NOTARY_PROFILE" --wait
+  xcrun stapler staple "$DMG_PATH"
+  xcrun stapler validate "$DMG_PATH"
+  spctl -a -t open --context context:primary-signature -vv "$DMG_PATH"
+else
+  echo "Created a local-test DMG. Set HEDGEMEMO_DISTRIBUTION=1 with Developer ID and notary credentials for cross-Mac distribution."
 fi
 
 # `dist` lives under a File Provider-backed Documents checkout. The provider
