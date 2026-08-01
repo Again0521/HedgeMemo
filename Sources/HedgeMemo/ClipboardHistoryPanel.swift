@@ -328,6 +328,25 @@ final class ClipboardHistoryPanelController: NSObject, NSWindowDelegate {
         show()
     }
 
+    func previewLifecycleStress(iterations: Int = 100) {
+        func cycle(_ remaining: Int) {
+            guard remaining > 0 else {
+                hide()
+                print("CLIPBOARD LIFECYCLE STRESS PASSED: \(iterations) cycles")
+                return
+            }
+            show()
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.04) { [weak self] in
+                guard let self else { return }
+                self.hide()
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.04) {
+                    cycle(remaining - 1)
+                }
+            }
+        }
+        cycle(iterations)
+    }
+
     func hide() {
         hideDetail()
         stopClickOutsideMonitor()
@@ -417,6 +436,7 @@ final class ClipboardHistoryPanelController: NSObject, NSWindowDelegate {
         // Match the reference popup's activation contract. The material is
         // fixed by PanelMaterialHost; becoming key must not replace it with a
         // second focus/hover surface.
+        TextCompletionCrashGuard.prepareToOrderOnScreen(panel)
         panel.makeKeyAndOrderFront(nil)
         panel.orderFrontRegardless()
         startClickOutsideMonitor()

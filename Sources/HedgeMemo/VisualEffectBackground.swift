@@ -61,9 +61,7 @@ struct PanelSearchField: View {
             Image(systemName: "magnifyingglass")
                 .font(.system(size: 12, weight: .medium))
                 .foregroundStyle(.secondary)
-            TextField(placeholder, text: $text)
-                .textFieldStyle(.plain)
-                .font(.system(size: 13))
+            PanelSearchTextInput(placeholder: placeholder, text: $text)
             if !text.isEmpty {
                 Button {
                     text = ""
@@ -85,6 +83,84 @@ struct PanelSearchField: View {
             RoundedRectangle(cornerRadius: NativePanelMetrics.compactCornerRadius, style: .continuous)
                 .strokeBorder(.separator.opacity(0.72), lineWidth: 1)
         )
+    }
+}
+
+/// Creates the panel search editor with remote completion disabled before the
+/// field ever joins a window. Applying the same settings after SwiftUI has
+/// materialized its `TextField` is too late on macOS 27: SafariPlatformSupport
+/// may already have attached an out-of-process completion view.
+private struct PanelSearchTextInput: NSViewRepresentable {
+    let placeholder: String
+    @Binding var text: String
+
+    func makeCoordinator() -> Coordinator { Coordinator(text: $text) }
+
+    func makeNSView(context: Context) -> CrashSafePanelTextField {
+        let field = CrashSafePanelTextField()
+        field.delegate = context.coordinator
+        field.placeholderString = placeholder
+        field.stringValue = text
+        return field
+    }
+
+    func updateNSView(_ field: CrashSafePanelTextField, context: Context) {
+        context.coordinator.text = $text
+        field.placeholderString = placeholder
+        if field.stringValue != text { field.stringValue = text }
+        field.disableRemoteInputServices()
+    }
+
+    @MainActor
+    final class Coordinator: NSObject, NSTextFieldDelegate {
+        var text: Binding<String>
+
+        init(text: Binding<String>) { self.text = text }
+
+        func controlTextDidBeginEditing(_ notification: Notification) {
+            guard let field = notification.object as? CrashSafePanelTextField else { return }
+            field.disableRemoteInputServices()
+            if let editor = field.currentEditor() as? NSTextView {
+                TextCompletionCrashGuard.disableRemoteCompletion(for: editor)
+            }
+        }
+
+        func controlTextDidChange(_ notification: Notification) {
+            guard let field = notification.object as? NSTextField else { return }
+            text.wrappedValue = field.stringValue
+        }
+    }
+}
+
+final class CrashSafePanelTextField: NSTextField {
+    override init(frame frameRect: NSRect) {
+        super.init(frame: frameRect)
+        isBordered = false
+        isBezeled = false
+        drawsBackground = false
+        backgroundColor = .clear
+        focusRingType = .none
+        font = .systemFont(ofSize: 13)
+        textColor = .labelColor
+        lineBreakMode = .byTruncatingTail
+        usesSingleLineMode = true
+        if #available(macOS 15.2, *) { allowsWritingTools = false }
+        disableRemoteInputServices()
+    }
+
+    convenience init() { self.init(frame: .zero) }
+
+    required init?(coder: NSCoder) {
+        super.init(coder: coder)
+        disableRemoteInputServices()
+    }
+
+    func disableRemoteInputServices() {
+        isAutomaticTextCompletionEnabled = false
+        contentType = nil
+        if let editor = currentEditor() as? NSTextView {
+            TextCompletionCrashGuard.disableRemoteCompletion(for: editor)
+        }
     }
 }
 

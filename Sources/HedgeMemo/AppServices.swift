@@ -228,6 +228,10 @@ final class AppServices: ObservableObject {
         clipboardPanelController?.previewStress()
     }
 
+    func previewClipboardLifecycleStress() {
+        clipboardPanelController?.previewLifecycleStress()
+    }
+
     func previewClipboardAdvancedMode() {
         clipboardPanelController?.previewAdvancedMode()
     }

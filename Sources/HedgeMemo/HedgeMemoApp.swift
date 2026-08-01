@@ -54,6 +54,11 @@ final class HedgeMemoAppDelegate: NSObject, NSApplicationDelegate {
         if arguments.contains("--preview-clipboard-stress") {
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { services.previewClipboardStress() }
         }
+        if arguments.contains("--preview-clipboard-lifecycle-stress") {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
+                services.previewClipboardLifecycleStress()
+            }
+        }
         if arguments.contains("--preview-clipboard-advanced") {
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
                 services.previewClipboardAdvancedMode()

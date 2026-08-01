@@ -5,13 +5,24 @@ import XCTest
 
 @MainActor
 final class TextCompletionCrashGuardTests: XCTestCase {
+    func testPanelSearchFieldDisablesRemoteServicesBeforeJoiningAWindow() {
+        let field = CrashSafePanelTextField()
+        XCTAssertFalse(field.isAutomaticTextCompletionEnabled)
+        XCTAssertNil(field.contentType)
+        if #available(macOS 15.2, *) { XCTAssertFalse(field.allowsWritingTools) }
+        XCTAssertFalse(field.isBordered)
+        XCTAssertFalse(field.drawsBackground)
+    }
+
     func testDisablesRemoteCompletionThroughoutWindowHierarchy() {
         let root = NSView()
         let container = NSView()
         let field = NSTextField(string: "search")
         let textView = NSTextView()
         field.isAutomaticTextCompletionEnabled = true
+        field.contentType = .password
         textView.isAutomaticTextCompletionEnabled = true
+        textView.contentType = .oneTimeCode
         container.addSubview(field)
         container.addSubview(textView)
         root.addSubview(container)
@@ -19,7 +30,9 @@ final class TextCompletionCrashGuardTests: XCTestCase {
         TextCompletionCrashGuard.disableRemoteCompletion(in: root)
 
         XCTAssertFalse(field.isAutomaticTextCompletionEnabled)
+        XCTAssertNil(field.contentType)
         XCTAssertFalse(textView.isAutomaticTextCompletionEnabled)
+        XCTAssertNil(textView.contentType)
     }
 
     func testDisablesAnActiveFieldEditorAsWellAsItsField() {
@@ -36,11 +49,15 @@ final class TextCompletionCrashGuardTests: XCTestCase {
         XCTAssertTrue(window.makeFirstResponder(field))
         let editor = field.currentEditor() as? NSTextView
         editor?.isAutomaticTextCompletionEnabled = true
+        field.contentType = .password
+        editor?.contentType = .oneTimeCode
 
         TextCompletionCrashGuard.disableRemoteCompletion(in: window)
 
         XCTAssertFalse(field.isAutomaticTextCompletionEnabled)
+        XCTAssertNil(field.contentType)
         XCTAssertFalse(editor?.isAutomaticTextCompletionEnabled ?? true)
+        XCTAssertNil(editor?.contentType)
     }
 
     func testPreparingAWindowEndsOldEditingBeforeDestinationIsOrdered() {
@@ -56,7 +73,9 @@ final class TextCompletionCrashGuardTests: XCTestCase {
         XCTAssertTrue(source.makeFirstResponder(sourceField))
         let sourceEditor = sourceField.currentEditor() as? NSTextView
         sourceField.isAutomaticTextCompletionEnabled = true
+        sourceField.contentType = .password
         sourceEditor?.isAutomaticTextCompletionEnabled = true
+        sourceEditor?.contentType = .oneTimeCode
 
         let destination = NSWindow(
             contentRect: NSRect(x: 0, y: 0, width: 240, height: 80),
@@ -68,6 +87,7 @@ final class TextCompletionCrashGuardTests: XCTestCase {
             frame: NSRect(x: 20, y: 20, width: 200, height: 24)
         )
         destinationField.isAutomaticTextCompletionEnabled = true
+        destinationField.contentType = .password
         destination.contentView = destinationField
 
         TextCompletionCrashGuard.prepareToOrderOnScreen(
@@ -76,9 +96,12 @@ final class TextCompletionCrashGuardTests: XCTestCase {
         )
 
         XCTAssertFalse(sourceField.isAutomaticTextCompletionEnabled)
+        XCTAssertNil(sourceField.contentType)
         XCTAssertFalse(sourceEditor?.isAutomaticTextCompletionEnabled ?? true)
+        XCTAssertNil(sourceEditor?.contentType)
         XCTAssertFalse(source.firstResponder is NSTextView)
         XCTAssertFalse(destinationField.isAutomaticTextCompletionEnabled)
+        XCTAssertNil(destinationField.contentType)
     }
 
     func testUnifiedPopupSessionUsesSharedPanelChrome() {

@@ -93,6 +93,11 @@ final class TextCompletionCrashGuard {
 
     static func disableRemoteCompletion(for field: NSTextField) {
         field.isAutomaticTextCompletionEnabled = false
+        // A nil semantic content type prevents SafariPlatformSupport from
+        // attaching its credential / one-time-code NSRemoteView to transient
+        // search and PIN fields. The remote view can otherwise survive the
+        // panel that created it and throw when a later panel is ordered.
+        field.contentType = nil
         if let editor = field.currentEditor() as? NSTextView {
             disableRemoteCompletion(for: editor)
         }
@@ -100,6 +105,7 @@ final class TextCompletionCrashGuard {
 
     static func disableRemoteCompletion(for textView: NSTextView) {
         textView.isAutomaticTextCompletionEnabled = false
+        textView.contentType = nil
     }
 
     /// Must run before an AppKit/SwiftUI window is ordered on screen.
