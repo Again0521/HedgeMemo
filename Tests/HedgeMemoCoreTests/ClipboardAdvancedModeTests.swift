@@ -296,6 +296,7 @@ final class ClipboardAdvancedModeTests: XCTestCase {
             bundleIdentifier: "com.example.passwords",
             displayName: "Passwords"
         )
+        store.setCategory(.builtin(.password), enabled: true)
         XCTAssertTrue(store.addPassword("secret", source: passwordManager))
         XCTAssertFalse(
             store.sourceApplicationsForFiltering()

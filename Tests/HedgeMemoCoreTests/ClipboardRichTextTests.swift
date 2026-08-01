@@ -101,6 +101,7 @@ final class ClipboardRichTextTests: XCTestCase {
         XCTAssertTrue(try store.addRichText(rich, source: nil))
         entry = try XCTUnwrap(store.entries.first(where: { $0.text == "formatted" }))
         formatURL = try repository.originalFormatURL(for: XCTUnwrap(entry.originalFormats?.first))
+        store.setCategory(.builtin(.password), enabled: true)
         XCTAssertTrue(store.setManualCategory(id: entry.id, key: .builtin(.password)))
         let protected = try XCTUnwrap(store.entries.first(where: { $0.id == entry.id }))
         XCTAssertTrue(protected.isSecret)

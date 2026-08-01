@@ -22,6 +22,23 @@ final class ClipboardSettingsTests: XCTestCase {
         XCTAssertEqual(settings.categoryOrder, ClipboardContentCategory.allCases.map(\.rawValue))
     }
 
+    func testPasswordCategoryIsDisabledByDefault() {
+        let settings = ClipboardHistorySettings()
+
+        XCTAssertFalse(settings.isCategoryEnabled(.builtin(.password)))
+        XCTAssertFalse(settings.enabledCategoryKeys.contains(.builtin(.password)))
+        XCTAssertTrue(settings.isCategoryEnabled(.builtin(.text)))
+    }
+
+    func testExplicitLegacyCategoryStateIsPreserved() {
+        let settings = ClipboardHistorySettings(disabledCategoryKeys: nil)
+
+        XCTAssertTrue(
+            settings.isCategoryEnabled(.builtin(.password)),
+            "a legacy or explicit stored value must not be changed destructively during an update"
+        )
+    }
+
     func testMaxEntriesSnapsToNearestChoice() {
         XCTAssertEqual(ClipboardHistorySettings(maxEntries: 130).maxEntries, 100)
         XCTAssertEqual(ClipboardHistorySettings(maxEntries: 280).maxEntries, 300)

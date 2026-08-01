@@ -1328,7 +1328,11 @@ public struct ClipboardHistorySettings: Codable, Equatable, Sendable {
         lastCategory: String? = ClipboardCategoryKey.builtin(.text).storageValue,
         categoryOrder: [String]? = nil,
         customCategories: [CustomClipboardCategory]? = nil,
-        disabledCategoryKeys: [String]? = nil,
+        // Password-manager copies are privacy-sensitive and recording them is
+        // opt-in. Hide the corresponding empty category by default as well;
+        // passing an explicit value (including legacy nil decoded from disk)
+        // continues to preserve an existing user's category choices.
+        disabledCategoryKeys: [String]? = [ClipboardContentCategory.password.rawValue],
         codeHighlightTheme: CodeHighlightTheme? = .system,
         appFilterMode: ClipboardAppFilterMode? = .disabled,
         appFilterApplications: [ClipboardSourceApplication]? = nil,

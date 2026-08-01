@@ -987,6 +987,7 @@ final class StoreBehaviorTests: XCTestCase {
         let root = tempRoot("clip-manual-password")
         let repository = ClipboardHistoryRepository(rootURL: root)
         let store = ClipboardHistoryStore(repository: repository)
+        store.setCategory(.builtin(.password), enabled: true)
         XCTAssertTrue(store.addText("manual secret"))
         let id = store.entries.first!.id
 

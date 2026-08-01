@@ -74,6 +74,15 @@ final class StatusItemController: NSObject {
         NotificationCenter.default.publisher(for: AppLanguage.didChangeNotification)
             .sink { [weak self] _ in self?.refreshLocalizedStatusItem() }
             .store(in: &cancellables)
+
+        // A global mouse monitor is normally enough to dismiss a shortcut
+        // panel when another application is clicked. AppKit can occasionally
+        // switch the active application without delivering that mouse event to
+        // our monitor (for example through the Dock or another system-owned
+        // surface), so application deactivation is the authoritative fallback.
+        NotificationCenter.default.publisher(for: NSApplication.didResignActiveNotification)
+            .sink { [weak self] _ in self?.closeMemePanel() }
+            .store(in: &cancellables)
     }
 
     private func refreshLocalizedStatusItem() {
@@ -150,13 +159,16 @@ final class StatusItemController: NSObject {
         }
         installMemeContent()
         ImageThumbnailCache.shared.beginInteractiveUse()
+        // Install dismissal before ordering the surface on screen. Otherwise a
+        // very fast click can land in the small gap between presentation and
+        // monitor registration, leaving an orphaned panel visible.
+        startOutsideClickMonitor()
         NSApp.activate(ignoringOtherApps: true)
         popover.show(relativeTo: rect, of: view, preferredEdge: preferredEdge)
         clampPopoverToScreen()
         // AppKit may still adjust the popover frame right after `show`;
         // re-clamp once that settles so the final position is on screen too.
         DispatchQueue.main.async { [weak self] in self?.clampPopoverToScreen() }
-        startOutsideClickMonitor()
     }
 
     private func showKeyboardMemePanel(near mouseLocation: NSPoint) {
@@ -173,10 +185,10 @@ final class StatusItemController: NSObject {
         frame.origin.y = min(max(mouseLocation.y - frame.height + 8, visible.minY), visible.maxY - frame.height)
         panel.setFrame(frame, display: true)
         ImageThumbnailCache.shared.beginInteractiveUse()
+        startOutsideClickMonitor()
         NSApp.activate(ignoringOtherApps: true)
         panel.makeKeyAndOrderFront(nil)
         panel.orderFrontRegardless()
-        startOutsideClickMonitor()
     }
 
     private func makeKeyboardMemePanel() -> NSPanel {
@@ -284,7 +296,11 @@ final class StatusItemController: NSObject {
            eventWindow === popoverWindow || eventWindow.sheetParent === popoverWindow {
             return true
         }
-        return eventWindow === keyboardMemePanel
+        if let keyboardMemePanel,
+           eventWindow === keyboardMemePanel || eventWindow.sheetParent === keyboardMemePanel {
+            return true
+        }
+        return false
     }
 
     private func closeMemePanel() {

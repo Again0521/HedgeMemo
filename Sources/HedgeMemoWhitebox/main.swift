@@ -534,6 +534,10 @@ await MainActor.run {
         "password capture is off by default and requires explicit opt-in"
     )
     expect(
+        !ClipboardHistorySettings().isCategoryEnabled(.builtin(.password)),
+        "the password category is hidden by default until password capture is explicitly enabled"
+    )
+    expect(
         AppLockSettings().isCategoryLocked(.builtin(.password)),
         "…and that default is only safe because the category ships locked"
     )
