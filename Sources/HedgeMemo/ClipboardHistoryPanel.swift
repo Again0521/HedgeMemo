@@ -2,8 +2,8 @@ import AppKit
 import HedgeMemoCore
 import SwiftUI
 
-/// Adds a stable display offset without materializing `(index, element)`
-/// tuples. SwiftUI still keys every row by the entry's real ID.
+/// Adds a stable display offset before the bounded visible page is handed to
+/// SwiftUI. SwiftUI still keys every row by the entry's real ID.
 private struct IndexedElements<Base: RandomAccessCollection>: RandomAccessCollection
 where Base.Index == Int, Base.Element: Identifiable {
     struct Item: Identifiable {
@@ -1768,7 +1768,7 @@ struct ClipboardHistoryPanelView: View {
             } else {
             ScrollViewReader { proxy in
                 ScrollView {
-                    content
+                    content(proxy: proxy)
                 }
                 .scrollIndicators(showsScrollIndicators ? .automatic : .hidden)
                 .onChange(of: activeSelectionID) { _, id in
@@ -1968,6 +1968,43 @@ struct ClipboardHistoryPanelView: View {
         visibleEntryLimit = min(entries.count, ((index / pageSize) + 1) * pageSize)
     }
 
+    /// macOS 27's default accessibility action asks LazyVStack's ForEach for
+    /// collection offsets while the paged prefix is changing and traps inside
+    /// `ForEachState.item(at:offset:)`. Keep VoiceOver/AX scrolling functional,
+    /// but advance it through the same bounded pages as pointer scrolling and
+    /// wait until the current accessibility traversal has returned before
+    /// mutating SwiftUI state or issuing ScrollViewProxy work.
+    private func scheduleAccessibilityScroll(
+        _ edge: Edge,
+        proxy: ScrollViewProxy
+    ) {
+        DispatchQueue.main.async {
+            let all = entries
+            guard !all.isEmpty else { return }
+
+            switch edge {
+            case .top:
+                proxy.scrollTo(all[all.startIndex].id, anchor: .top)
+            case .bottom:
+                let currentLimit = min(visibleEntryLimit, all.count)
+                let nextLimit = ClipboardPanelPagination.nextLimit(
+                    current: currentLimit,
+                    total: all.count,
+                    key: activeKey
+                )
+                if nextLimit != visibleEntryLimit {
+                    visibleEntryLimit = nextLimit
+                }
+                let targetID = all[all.index(all.startIndex, offsetBy: nextLimit - 1)].id
+                DispatchQueue.main.async {
+                    proxy.scrollTo(targetID, anchor: .bottom)
+                }
+            case .leading, .trailing:
+                break
+            }
+        }
+    }
+
     private func title(for key: ClipboardCategoryKey) -> String {
         ClipboardCategoryBarMetrics.title(for: key, settings: store.settings)
     }
@@ -2155,14 +2192,20 @@ struct ClipboardHistoryPanelView: View {
     }
 
     @ViewBuilder
-    private var content: some View {
+    private func content(proxy: ScrollViewProxy) -> some View {
         // Resolved once per pass. `entries` is not free — for the password
         // category it projects the revealed text over the whole list — and it
         // was previously reached again from every row's `onAppear`.
         let all = entries
-        let rows = IndexedElements(
+        // Materialize only the bounded visible page. Passing the custom lazy
+        // RandomAccessCollection directly into ForEach lets macOS 27's
+        // accessibility scroll path hold offsets across separate collection
+        // evaluations; it can then trap inside ForEachState.item(at:offset:).
+        // A stable Array costs only a few dozen KiB at the 300-row maximum and
+        // contains deferred metadata, never decoded text bodies.
+        let rows = Array(IndexedElements(
             base: all.prefix(min(visibleEntryLimit, all.count))
-        )
+        ))
         switch activeKey {
         case .builtin(.image), .builtin(.screenshot):
             LazyVGrid(
@@ -2191,8 +2234,22 @@ struct ClipboardHistoryPanelView: View {
                         EntryHoverTrackingOverlay { updateHover($0, entry: entry) }
                     }
                     .contextMenu { entryMenu(entry) }
-                    .onAppear { loadNextPageIfNeeded(atIndex: index, total: all.count) }
+                    .onAppear {
+                        // Accessibility can synchronously enumerate every
+                        // visible ForEach item while performing a scroll
+                        // action. Growing the prefix inside that enumeration
+                        // changes ForEach's bounds mid-read and traps in
+                        // ForEachState.item(at:offset:). Advance on the next
+                        // main-loop turn so the current traversal finishes
+                        // against one stable collection snapshot.
+                        DispatchQueue.main.async {
+                            loadNextPageIfNeeded(atIndex: index, total: all.count)
+                        }
+                    }
                 }
+            }
+            .accessibilityScrollAction { edge in
+                scheduleAccessibilityScroll(edge, proxy: proxy)
             }
         default:
             LazyVStack(spacing: ClipboardPanelLayout.listSpacing) {
@@ -2248,10 +2305,37 @@ struct ClipboardHistoryPanelView: View {
                         EntryHoverTrackingOverlay { updateHover($0, entry: entry) }
                     }
                     .contextMenu { entryMenu(entry) }
-                    .onAppear { loadNextPageIfNeeded(atIndex: index, total: all.count) }
+                    .onAppear {
+                        DispatchQueue.main.async {
+                            loadNextPageIfNeeded(atIndex: index, total: all.count)
+                        }
+                    }
+                }
+            }
+            .accessibilityRepresentation {
+                VStack(spacing: 0) {
+                    ForEach(rows) { row in
+                        Text(accessibilityRowLabel(for: row.element))
+                            .accessibilityIdentifier(row.element.id.uuidString)
+                    }
+                }
+                .accessibilityScrollAction { edge in
+                    scheduleAccessibilityScroll(edge, proxy: proxy)
                 }
             }
         }
+    }
+
+    private func accessibilityRowLabel(for entry: ClipboardEntry) -> String {
+        if entry.isSecret { return L10n.text("已隐藏的密码") }
+        guard entry.kind == .text, let text = entry.text else {
+            return L10n.text("图片")
+        }
+        guard let start = text.firstIndex(where: { !$0.isWhitespace }) else {
+            return L10n.text("空白文字")
+        }
+        return String(text[start...].prefix(300))
+            .replacingOccurrences(of: "\n", with: " ")
     }
 
     @ViewBuilder

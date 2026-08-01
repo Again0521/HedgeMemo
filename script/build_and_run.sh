@@ -13,6 +13,9 @@ DIST_APP="$DIST_DIR/$APP_NAME.app"
 # can attach Finder metadata to a bundle between xattr cleanup and codesign,
 # making an otherwise valid build fail strict verification nondeterministically.
 PACKAGE_DIR="/private/tmp/hedgememo-package-$$"
+RELEASE_BUILD_DIR="$PACKAGE_DIR/swift-build"
+ARM_RELEASE_BUILD_DIR="$PACKAGE_DIR/swift-build-arm64"
+INTEL_RELEASE_BUILD_DIR="$PACKAGE_DIR/swift-build-x86_64"
 APP_BUNDLE="$PACKAGE_DIR/$APP_NAME.app"
 APP_CONTENTS="$APP_BUNDLE/Contents"
 APP_MACOS="$APP_CONTENTS/MacOS"
@@ -38,10 +41,30 @@ cd "$ROOT_DIR"
 # DWARF source paths pointing back into the repository under Documents; macOS
 # may resolve those paths while validating/symbolicating each newly signed app,
 # which produces a fresh Documents-folder prompt after every rebuild.
-swift build -c release --product "$APP_NAME"
-BUILD_DIR="$(swift build -c release --show-bin-path)"
-BUILD_BINARY="$BUILD_DIR/$APP_NAME"
-LOCALIZATION_BUNDLE="$BUILD_DIR/HedgeMemo_HedgeMemoCore.bundle"
+# SwiftPM's generated resource accessor embeds its build-directory fallback as
+# a string literal. Build releases in the disposable packaging directory so a
+# shipped binary never records the repository path or the current user name.
+# Distribution packages are Universal 2; routine local runs stay native so the
+# developer loop does not pay for a second architecture on every launch.
+if [[ "$MODE" == "--package" || "$MODE" == "package" ]]; then
+  swift build -c release --triple arm64-apple-macosx14.0 \
+    --scratch-path "$ARM_RELEASE_BUILD_DIR" --product "$APP_NAME"
+  ARM_BUILD_DIR="$(swift build -c release --triple arm64-apple-macosx14.0 \
+    --scratch-path "$ARM_RELEASE_BUILD_DIR" --show-bin-path)"
+  swift build -c release --triple x86_64-apple-macosx14.0 \
+    --scratch-path "$INTEL_RELEASE_BUILD_DIR" --product "$APP_NAME"
+  INTEL_BUILD_DIR="$(swift build -c release --triple x86_64-apple-macosx14.0 \
+    --scratch-path "$INTEL_RELEASE_BUILD_DIR" --show-bin-path)"
+  BUILD_BINARY="$PACKAGE_DIR/$APP_NAME-universal"
+  /usr/bin/lipo -create "$ARM_BUILD_DIR/$APP_NAME" "$INTEL_BUILD_DIR/$APP_NAME" \
+    -output "$BUILD_BINARY"
+  LOCALIZATION_BUNDLE="$ARM_BUILD_DIR/HedgeMemo_HedgeMemoCore.bundle"
+else
+  swift build -c release --scratch-path "$RELEASE_BUILD_DIR" --product "$APP_NAME"
+  BUILD_DIR="$(swift build -c release --scratch-path "$RELEASE_BUILD_DIR" --show-bin-path)"
+  BUILD_BINARY="$BUILD_DIR/$APP_NAME"
+  LOCALIZATION_BUNDLE="$BUILD_DIR/HedgeMemo_HedgeMemoCore.bundle"
+fi
 
 rm -rf "$APP_BUNDLE"
 mkdir -p "$APP_MACOS" "$APP_RESOURCES"
@@ -91,8 +114,8 @@ cat >"$INFO_PLIST" <<PLIST
 <string>zh-Hans</string>
 </array>
 <key>CFBundleIconFile</key><string>AppIcon</string>
-<key>CFBundleShortVersionString</key><string>1.2.31</string>
-<key>CFBundleVersion</key><string>1.2.31</string>
+<key>CFBundleShortVersionString</key><string>1.2.6</string>
+<key>CFBundleVersion</key><string>1.2.6</string>
 <key>LSMinimumSystemVersion</key><string>$MIN_SYSTEM_VERSION</string>
 <key>LSUIElement</key><true/>
 <key>CFBundleDisplayName</key><string>$APP_NAME</string>

@@ -246,6 +246,12 @@ public final class MemeRepository: @unchecked Sendable {
         database.hasTextReaderConnection
     }
 
+    #if DEBUG
+    var textReaderConnectionOpenCount: Int {
+        database.textReaderConnectionOpenCount
+    }
+    #endif
+
     var lastDatabaseMutationCounts: (
         changedCategories: Int,
         deletedCategories: Int,

@@ -203,6 +203,15 @@ final class MemeTextProvider: @unchecked Sendable {
         return body
     }
 
+    /// Reuses a body already loaded for the UI, but does not let a cold
+    /// database snapshot fill the bounded display cache with every row it
+    /// serializes.
+    func bodyForPersistence(for id: UUID) -> MemeTextBody {
+        let key = id as NSUUID
+        if let cached = cache.object(forKey: key) { return cached.body }
+        return loader(id) ?? MemeTextBody(note: "", ocrText: "")
+    }
+
     func removeAll() {
         cache.removeAllObjects()
     }
@@ -354,6 +363,29 @@ public struct MemeItem: Codable, Hashable, Identifiable, Sendable {
         var projection = self
         projection.textState = .metadata
         return projection
+    }
+
+    var requiresDeferredTextRead: Bool {
+        if case .deferred = textState { return true }
+        return false
+    }
+
+    /// Resolves both deferred text columns once while keeping cold snapshot
+    /// writes out of the display cache. The resident projection also prevents
+    /// Codable from asking the provider again for note and OCR separately.
+    var persistenceProjection: (meme: MemeItem, body: MemeTextBody) {
+        let body: MemeTextBody
+        switch textState {
+        case .resident(let box):
+            body = box.body
+        case .deferred(let provider):
+            body = provider.bodyForPersistence(for: id)
+        case .metadata:
+            body = MemeTextBody(note: "", ocrText: "")
+        }
+        var projection = self
+        projection.textState = .resident(MemeTextBox(body))
+        return (projection, body)
     }
 
     var decodedStoredTextByteCount: Int {
@@ -1522,6 +1554,24 @@ final class ClipboardEntryTextProvider: @unchecked Sendable {
         return value
     }
 
+    /// Reuses a value already loaded for the UI, but does not let a cold
+    /// database snapshot fill the display cache with every body it writes.
+    func textForPersistence(for id: UUID) -> String? {
+        let source = sourceLock.withLock {
+            (
+                loader: loader,
+                redirectedProvider: redirectedProvider
+            )
+        }
+        if let redirectedProvider = source.redirectedProvider {
+            return redirectedProvider.textForPersistence(for: id)
+        }
+        guard let loader = source.loader else { return nil }
+        let key = id as NSUUID
+        if let cached = cache.object(forKey: key) { return cached.value }
+        return loader(id)
+    }
+
     /// Imported text initially resolves through a disposable SQLite staging
     /// file. Once the canonical snapshot is durable, release that loader and
     /// forward the same lightweight model references to the repository
@@ -2145,11 +2195,24 @@ public struct ClipboardEntry: Codable, Hashable, Identifiable, Sendable {
         return projection
     }
 
+    var requiresDeferredTextRead: Bool {
+        if case .deferred = textState { return true }
+        return false
+    }
+
     /// Resolves a deferred body once for a database row. Encoding `self`
     /// directly and then reading `text` separately asks a non-caching import
     /// provider for the same potentially large string twice.
     var persistenceProjection: (entry: ClipboardEntry, text: String?) {
-        let resolvedText = text
+        let resolvedText: String?
+        switch textState {
+        case .resident(let box):
+            resolvedText = box.value
+        case .deferred(let provider):
+            resolvedText = provider.textForPersistence(for: id)
+        case .metadata:
+            resolvedText = nil
+        }
         var projection = self
         projection.textState = .resident(
             ClipboardTextBox(resolvedText)

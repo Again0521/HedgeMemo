@@ -12,6 +12,9 @@ final class MemeDatabase: @unchecked Sendable {
     private let url: URL
     private let textReaderLock = NSLock()
     private var textReaderConnection: SQLiteConnection?
+    #if DEBUG
+    private(set) var textReaderConnectionOpenCount = 0
+    #endif
     private(set) var lastBackfillRowCount = 0
     private(set) var lastBackfillPeakResidentRowCount = 0
 
@@ -145,15 +148,7 @@ final class MemeDatabase: @unchecked Sendable {
         textReaderLock.lock()
         defer { textReaderLock.unlock() }
         do {
-            let connection: SQLiteConnection
-            if let existing = textReaderConnection {
-                connection = existing
-            } else {
-                let created = try SQLiteConnection(url: url)
-                try prepareSchema(created)
-                textReaderConnection = created
-                connection = created
-            }
+            let connection = try textReaderConnectionLocked()
             let statement = try connection.prepare(
                 """
                 SELECT note_body, ocr_body, payload
@@ -180,6 +175,26 @@ final class MemeDatabase: @unchecked Sendable {
         } catch {
             return nil
         }
+    }
+
+    /// Opens and configures the reader before a write transaction without
+    /// fetching (and immediately discarding) one potentially large body.
+    private func prepareTextReaderConnection() {
+        textReaderLock.lock()
+        defer { textReaderLock.unlock() }
+        _ = try? textReaderConnectionLocked()
+    }
+
+    /// Caller must hold `textReaderLock`.
+    private func textReaderConnectionLocked() throws -> SQLiteConnection {
+        if let existing = textReaderConnection { return existing }
+        let created = try SQLiteConnection(url: url)
+        try prepareSchema(created)
+        textReaderConnection = created
+        #if DEBUG
+        textReaderConnectionOpenCount += 1
+        #endif
+        return created
     }
 
     func releaseTextReaderConnection() {
@@ -337,8 +352,15 @@ final class MemeDatabase: @unchecked Sendable {
         var deletedCategoryCount = 0
         var changedMemeCount = 0
         var deletedMemeCount = 0
-        if let firstMeme = snapshot.memes.first {
-            _ = loadText(id: firstMeme.id)
+        // Prepare the shared reader before the writer transaction without
+        // decoding one throwaway note/OCR body. Close its 512 KiB pager when
+        // this background snapshot finishes; deferred access reopens it.
+        let preparedTextReader = snapshot.memes.contains(
+            where: \.requiresDeferredTextRead
+        )
+        if preparedTextReader { prepareTextReaderConnection() }
+        defer {
+            if preparedTextReader { releaseTextReaderConnection() }
         }
 
         try connection.execute("BEGIN IMMEDIATE TRANSACTION")
@@ -422,44 +444,49 @@ final class MemeDatabase: @unchecked Sendable {
                 """
             )
             defer { sqlite3_finalize(memeUpsert) }
+            // A repository queue owns one autorelease pool for the whole save.
+            // Drain JSON/UUID/SQLite bridge temporaries after every row so a
+            // giant snapshot does not retain them until the transaction ends.
             for (index, meme) in snapshot.memes.enumerated() {
-                sqlite3_reset(rememberMeme)
-                sqlite3_clear_bindings(rememberMeme)
-                try connection.bind(meme.id.uuidString, to: 1, in: rememberMeme)
-                try connection.stepDone(rememberMeme)
+                try autoreleasepool {
+                    sqlite3_reset(rememberMeme)
+                    sqlite3_clear_bindings(rememberMeme)
+                    try connection.bind(meme.id.uuidString, to: 1, in: rememberMeme)
+                    try connection.stepDone(rememberMeme)
 
-                sqlite3_reset(memeUpsert)
-                sqlite3_clear_bindings(memeUpsert)
-                let row = try Self.encodedRow(meme)
-                try connection.bind(meme.id.uuidString, to: 1, in: memeUpsert)
-                try connection.bind(row.payload, to: 2, in: memeUpsert)
-                try connection.bind(row.header, to: 3, in: memeUpsert)
-                try connection.bind(row.note, to: 4, in: memeUpsert)
-                try connection.bind(row.ocrText, to: 5, in: memeUpsert)
-                try connection.bind(Int64(index), to: 6, in: memeUpsert)
-                try connection.bind(meme.contentHash, to: 7, in: memeUpsert)
-                if let categoryID = meme.categoryID {
+                    sqlite3_reset(memeUpsert)
+                    sqlite3_clear_bindings(memeUpsert)
+                    let row = try Self.encodedRow(meme)
+                    try connection.bind(meme.id.uuidString, to: 1, in: memeUpsert)
+                    try connection.bind(row.payload, to: 2, in: memeUpsert)
+                    try connection.bind(row.header, to: 3, in: memeUpsert)
+                    try connection.bind(row.note, to: 4, in: memeUpsert)
+                    try connection.bind(row.ocrText, to: 5, in: memeUpsert)
+                    try connection.bind(Int64(index), to: 6, in: memeUpsert)
+                    try connection.bind(meme.contentHash, to: 7, in: memeUpsert)
+                    if let categoryID = meme.categoryID {
+                        try connection.bind(
+                            categoryID.uuidString,
+                            to: 8,
+                            in: memeUpsert
+                        )
+                    } else if sqlite3_bind_null(memeUpsert, 8) != SQLITE_OK {
+                        throw ClipboardHistoryDatabaseError.bind(connection.errorMessage)
+                    }
+                    try connection.bind(meme.sortOrder, to: 9, in: memeUpsert)
                     try connection.bind(
-                        categoryID.uuidString,
-                        to: 8,
+                        meme.createdAt.timeIntervalSince1970,
+                        to: 10,
                         in: memeUpsert
                     )
-                } else if sqlite3_bind_null(memeUpsert, 8) != SQLITE_OK {
-                    throw ClipboardHistoryDatabaseError.bind(connection.errorMessage)
+                    try connection.bind(
+                        meme.updatedAt.timeIntervalSince1970,
+                        to: 11,
+                        in: memeUpsert
+                    )
+                    try connection.stepDone(memeUpsert)
+                    changedMemeCount += Int(sqlite3_changes(connection.handle))
                 }
-                try connection.bind(meme.sortOrder, to: 9, in: memeUpsert)
-                try connection.bind(
-                    meme.createdAt.timeIntervalSince1970,
-                    to: 10,
-                    in: memeUpsert
-                )
-                try connection.bind(
-                    meme.updatedAt.timeIntervalSince1970,
-                    to: 11,
-                    in: memeUpsert
-                )
-                try connection.stepDone(memeUpsert)
-                changedMemeCount += Int(sqlite3_changes(connection.handle))
             }
 
             try connection.execute(
@@ -599,38 +626,41 @@ final class MemeDatabase: @unchecked Sendable {
                     """
                 )
                 defer { sqlite3_finalize(statement) }
+                // Archive imports can deliver a giant delta in one call too.
                 for meme in memeUpserts {
-                    let position: Int64
-                    if !appendingMemeIDs.contains(meme.id),
-                       let existing = try storedPosition(
-                            id: meme.id,
-                            statement: existingPosition,
-                            connection: connection
-                       ) {
-                        position = existing
-                    } else {
-                        position = nextMemePosition
-                        nextMemePosition += 1
+                    try autoreleasepool {
+                        let position: Int64
+                        if !appendingMemeIDs.contains(meme.id),
+                           let existing = try storedPosition(
+                                id: meme.id,
+                                statement: existingPosition,
+                                connection: connection
+                           ) {
+                            position = existing
+                        } else {
+                            position = nextMemePosition
+                            nextMemePosition += 1
+                        }
+                        sqlite3_reset(statement)
+                        sqlite3_clear_bindings(statement)
+                        let row = try Self.encodedRow(meme)
+                        try connection.bind(meme.id.uuidString, to: 1, in: statement)
+                        try connection.bind(row.payload, to: 2, in: statement)
+                        try connection.bind(row.header, to: 3, in: statement)
+                        try connection.bind(row.note, to: 4, in: statement)
+                        try connection.bind(row.ocrText, to: 5, in: statement)
+                        try connection.bind(position, to: 6, in: statement)
+                        try connection.bind(meme.contentHash, to: 7, in: statement)
+                        if let categoryID = meme.categoryID {
+                            try connection.bind(categoryID.uuidString, to: 8, in: statement)
+                        } else if sqlite3_bind_null(statement, 8) != SQLITE_OK {
+                            throw ClipboardHistoryDatabaseError.bind(connection.errorMessage)
+                        }
+                        try connection.bind(meme.sortOrder, to: 9, in: statement)
+                        try connection.bind(meme.createdAt.timeIntervalSince1970, to: 10, in: statement)
+                        try connection.bind(meme.updatedAt.timeIntervalSince1970, to: 11, in: statement)
+                        try connection.stepDone(statement)
                     }
-                    sqlite3_reset(statement)
-                    sqlite3_clear_bindings(statement)
-                    let row = try Self.encodedRow(meme)
-                    try connection.bind(meme.id.uuidString, to: 1, in: statement)
-                    try connection.bind(row.payload, to: 2, in: statement)
-                    try connection.bind(row.header, to: 3, in: statement)
-                    try connection.bind(row.note, to: 4, in: statement)
-                    try connection.bind(row.ocrText, to: 5, in: statement)
-                    try connection.bind(position, to: 6, in: statement)
-                    try connection.bind(meme.contentHash, to: 7, in: statement)
-                    if let categoryID = meme.categoryID {
-                        try connection.bind(categoryID.uuidString, to: 8, in: statement)
-                    } else if sqlite3_bind_null(statement, 8) != SQLITE_OK {
-                        throw ClipboardHistoryDatabaseError.bind(connection.errorMessage)
-                    }
-                    try connection.bind(meme.sortOrder, to: 9, in: statement)
-                    try connection.bind(meme.createdAt.timeIntervalSince1970, to: 10, in: statement)
-                    try connection.bind(meme.updatedAt.timeIntervalSince1970, to: 11, in: statement)
-                    try connection.stepDone(statement)
                 }
             }
             try markInitialized(connection)
@@ -760,11 +790,12 @@ final class MemeDatabase: @unchecked Sendable {
     private static func encodedRow(
         _ meme: MemeItem
     ) throws -> (payload: Data, header: Data, note: String, ocrText: String) {
-        (
-            payload: try encoder.encode(meme),
+        let persistence = meme.persistenceProjection
+        return (
+            payload: try encoder.encode(persistence.meme),
             header: try encoder.encode(meme.metadataProjection),
-            note: meme.note,
-            ocrText: meme.ocrText
+            note: persistence.body.note,
+            ocrText: persistence.body.ocrText
         )
     }
 

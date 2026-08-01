@@ -41,6 +41,9 @@ final class ClipboardHistoryDatabase: @unchecked Sendable {
     private let url: URL
     private let textReaderLock = NSLock()
     private var textReaderConnection: SQLiteConnection?
+    #if DEBUG
+    private(set) var textReaderConnectionOpenCount = 0
+    #endif
     private(set) var lastBackfillRowCount = 0
     private(set) var lastBackfillPeakResidentRowCount = 0
 
@@ -201,15 +204,7 @@ final class ClipboardHistoryDatabase: @unchecked Sendable {
         textReaderLock.lock()
         defer { textReaderLock.unlock() }
         do {
-            let connection: SQLiteConnection
-            if let existing = textReaderConnection {
-                connection = existing
-            } else {
-                let created = try SQLiteConnection(url: url)
-                try created.prepareSchema()
-                textReaderConnection = created
-                connection = created
-            }
+            let connection = try textReaderConnectionLocked()
             let statement = try connection.prepare(
                 "SELECT text_body, payload FROM clipboard_entries WHERE id = ? LIMIT 1"
             )
@@ -233,6 +228,26 @@ final class ClipboardHistoryDatabase: @unchecked Sendable {
         } catch {
             return nil
         }
+    }
+
+    /// Opens and configures the reader before a write transaction without
+    /// fetching (and immediately discarding) one potentially large body.
+    private func prepareTextReaderConnection() {
+        textReaderLock.lock()
+        defer { textReaderLock.unlock() }
+        _ = try? textReaderConnectionLocked()
+    }
+
+    /// Caller must hold `textReaderLock`.
+    private func textReaderConnectionLocked() throws -> SQLiteConnection {
+        if let existing = textReaderConnection { return existing }
+        let created = try SQLiteConnection(url: url)
+        try created.prepareSchema()
+        textReaderConnection = created
+        #if DEBUG
+        textReaderConnectionOpenCount += 1
+        #endif
+        return created
     }
 
     /// Deferred bodies use one reusable reader while a panel is active. Close
@@ -285,11 +300,16 @@ final class ClipboardHistoryDatabase: @unchecked Sendable {
         var normalizedSettings = snapshot.settings
         normalizedSettings.normalize()
         let settingsData = try Self.encoder.encode(normalizedSettings)
-        // A deferred entry resolves its body through the shared read
-        // connection. Open/configure that connection before taking the write
-        // transaction; otherwise its first PRAGMA can wait behind our writer.
-        if let firstEntry = snapshot.entries.first {
-            _ = loadText(id: firstEntry.id)
+        // A deferred entry resolves its body through the shared reader. Open
+        // and configure it before taking the write transaction so its first
+        // PRAGMA cannot wait behind our writer, then release its 512 KiB pager
+        // as soon as this background snapshot finishes.
+        let preparedTextReader = snapshot.entries.contains(
+            where: \.requiresDeferredTextRead
+        )
+        if preparedTextReader { prepareTextReaderConnection() }
+        defer {
+            if preparedTextReader { releaseTextReaderConnection() }
         }
 
         try connection.execute("BEGIN IMMEDIATE TRANSACTION")
@@ -332,42 +352,47 @@ final class ClipboardHistoryDatabase: @unchecked Sendable {
             )
             defer { sqlite3_finalize(upsert) }
 
+            // A repository queue owns one autorelease pool for the whole save.
+            // Drain JSON/UUID/SQLite bridge temporaries after every row so a
+            // giant snapshot does not retain them until the transaction ends.
             for entry in snapshot.entries {
-                sqlite3_reset(rememberID)
-                sqlite3_clear_bindings(rememberID)
-                try connection.bind(entry.id.uuidString, to: 1, in: rememberID)
-                try connection.stepDone(rememberID)
+                try autoreleasepool {
+                    sqlite3_reset(rememberID)
+                    sqlite3_clear_bindings(rememberID)
+                    try connection.bind(entry.id.uuidString, to: 1, in: rememberID)
+                    try connection.stepDone(rememberID)
 
-                let priorPosition = try storedPosition(
-                    id: entry.id,
-                    statement: existingPosition,
-                    connection: connection
-                )
-                let position: Int64
-                if let priorPosition, priorPosition > lastPosition {
-                    position = priorPosition
-                } else {
-                    position = max(nextPosition, lastPosition + 1)
-                    nextPosition = position + 1
+                    let priorPosition = try storedPosition(
+                        id: entry.id,
+                        statement: existingPosition,
+                        connection: connection
+                    )
+                    let position: Int64
+                    if let priorPosition, priorPosition > lastPosition {
+                        position = priorPosition
+                    } else {
+                        position = max(nextPosition, lastPosition + 1)
+                        nextPosition = position + 1
+                    }
+                    lastPosition = position
+
+                    sqlite3_reset(upsert)
+                    sqlite3_clear_bindings(upsert)
+                    let row = try Self.encodedRow(entry)
+                    try connection.bind(entry.id.uuidString, to: 1, in: upsert)
+                    try connection.bind(row.payload, to: 2, in: upsert)
+                    try connection.bind(row.header, to: 3, in: upsert)
+                    try connection.bind(row.text, to: 4, in: upsert)
+                    try connection.bind(row.category, to: 5, in: upsert)
+                    try connection.bind(position, to: 6, in: upsert)
+                    try connection.bind(entry.contentHash, to: 7, in: upsert)
+                    try connection.bind(entry.kind.rawValue, to: 8, in: upsert)
+                    try connection.bind(entry.createdAt.timeIntervalSince1970, to: 9, in: upsert)
+                    try connection.bind(entry.updatedAt.timeIntervalSince1970, to: 10, in: upsert)
+                    try connection.bind(entry.isSecret ? 1 : 0, to: 11, in: upsert)
+                    try connection.stepDone(upsert)
+                    changedEntryCount += Int(sqlite3_changes(connection.handle))
                 }
-                lastPosition = position
-
-                sqlite3_reset(upsert)
-                sqlite3_clear_bindings(upsert)
-                let row = try Self.encodedRow(entry)
-                try connection.bind(entry.id.uuidString, to: 1, in: upsert)
-                try connection.bind(row.payload, to: 2, in: upsert)
-                try connection.bind(row.header, to: 3, in: upsert)
-                try connection.bind(row.text, to: 4, in: upsert)
-                try connection.bind(row.category, to: 5, in: upsert)
-                try connection.bind(position, to: 6, in: upsert)
-                try connection.bind(entry.contentHash, to: 7, in: upsert)
-                try connection.bind(entry.kind.rawValue, to: 8, in: upsert)
-                try connection.bind(entry.createdAt.timeIntervalSince1970, to: 9, in: upsert)
-                try connection.bind(entry.updatedAt.timeIntervalSince1970, to: 10, in: upsert)
-                try connection.bind(entry.isSecret ? 1 : 0, to: 11, in: upsert)
-                try connection.stepDone(upsert)
-                changedEntryCount += Int(sqlite3_changes(connection.handle))
             }
 
             try connection.execute(
@@ -464,34 +489,37 @@ final class ClipboardHistoryDatabase: @unchecked Sendable {
                     """
                 )
                 defer { sqlite3_finalize(upsert) }
+                // Archive imports can deliver a giant delta in one call too.
                 for entry in upserts {
-                    let position: Int64
-                    if !appendingIDs.contains(entry.id),
-                       let existing = try storedPosition(
-                            id: entry.id,
-                            statement: existingPosition,
-                            connection: connection
-                       ) {
-                        position = existing
-                    } else {
-                        position = nextPosition
-                        nextPosition += 1
+                    try autoreleasepool {
+                        let position: Int64
+                        if !appendingIDs.contains(entry.id),
+                           let existing = try storedPosition(
+                                id: entry.id,
+                                statement: existingPosition,
+                                connection: connection
+                           ) {
+                            position = existing
+                        } else {
+                            position = nextPosition
+                            nextPosition += 1
+                        }
+                        sqlite3_reset(upsert)
+                        sqlite3_clear_bindings(upsert)
+                        let row = try Self.encodedRow(entry)
+                        try connection.bind(entry.id.uuidString, to: 1, in: upsert)
+                        try connection.bind(row.payload, to: 2, in: upsert)
+                        try connection.bind(row.header, to: 3, in: upsert)
+                        try connection.bind(row.text, to: 4, in: upsert)
+                        try connection.bind(row.category, to: 5, in: upsert)
+                        try connection.bind(position, to: 6, in: upsert)
+                        try connection.bind(entry.contentHash, to: 7, in: upsert)
+                        try connection.bind(entry.kind.rawValue, to: 8, in: upsert)
+                        try connection.bind(entry.createdAt.timeIntervalSince1970, to: 9, in: upsert)
+                        try connection.bind(entry.updatedAt.timeIntervalSince1970, to: 10, in: upsert)
+                        try connection.bind(entry.isSecret ? 1 : 0, to: 11, in: upsert)
+                        try connection.stepDone(upsert)
                     }
-                    sqlite3_reset(upsert)
-                    sqlite3_clear_bindings(upsert)
-                    let row = try Self.encodedRow(entry)
-                    try connection.bind(entry.id.uuidString, to: 1, in: upsert)
-                    try connection.bind(row.payload, to: 2, in: upsert)
-                    try connection.bind(row.header, to: 3, in: upsert)
-                    try connection.bind(row.text, to: 4, in: upsert)
-                    try connection.bind(row.category, to: 5, in: upsert)
-                    try connection.bind(position, to: 6, in: upsert)
-                    try connection.bind(entry.contentHash, to: 7, in: upsert)
-                    try connection.bind(entry.kind.rawValue, to: 8, in: upsert)
-                    try connection.bind(entry.createdAt.timeIntervalSince1970, to: 9, in: upsert)
-                    try connection.bind(entry.updatedAt.timeIntervalSince1970, to: 10, in: upsert)
-                    try connection.bind(entry.isSecret ? 1 : 0, to: 11, in: upsert)
-                    try connection.stepDone(upsert)
                 }
             }
 

@@ -231,6 +231,12 @@ public final class ClipboardHistoryRepository: @unchecked Sendable {
         database.hasTextReaderConnection
     }
 
+    #if DEBUG
+    var textReaderConnectionOpenCount: Int {
+        database.textReaderConnectionOpenCount
+    }
+    #endif
+
     var lastDatabaseMutationCounts: (changedEntries: Int, deletedEntries: Int) {
         snapshotIO.sync {
             (

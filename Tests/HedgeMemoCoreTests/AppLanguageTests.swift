@@ -3,6 +3,27 @@ import XCTest
 @testable import HedgeMemoCore
 
 final class AppLanguageTests: XCTestCase {
+    func testPackagedLocalizationBundleLoadsFromStandardAppResourcesDirectory() throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("HedgeMemoPackagedLocalization-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let resourceBundle = root.appendingPathComponent(L10n.resourceBundleName, isDirectory: true)
+        let english = resourceBundle.appendingPathComponent("en.lproj", isDirectory: true)
+        try FileManager.default.createDirectory(at: english, withIntermediateDirectories: true)
+        try "\"设置\" = \"Packaged Settings\";\n".write(
+            to: english.appendingPathComponent("Localizable.strings"),
+            atomically: true,
+            encoding: .utf8
+        )
+
+        let bundle = try XCTUnwrap(L10n.packagedResourceBundle(resourcesURL: root))
+        let localized = try XCTUnwrap(
+            bundle.path(forResource: "en", ofType: "lproj").flatMap(Bundle.init(path:))
+        )
+        XCTAssertEqual(localized.localizedString(forKey: "设置", value: nil, table: nil), "Packaged Settings")
+    }
+
     func testChineseLocalesChooseSimplifiedChineseInterface() {
         for identifier in ["zh-Hans-CN", "zh-Hant-TW", "zh-HK"] {
             XCTAssertEqual(

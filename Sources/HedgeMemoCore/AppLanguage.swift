@@ -62,6 +62,8 @@ public enum AppLanguage: String, CaseIterable, Identifiable, Sendable {
 }
 
 public enum L10n {
+    static let resourceBundleName = "HedgeMemo_HedgeMemoCore.bundle"
+
     public static func text(_ key: String, language: AppLanguage = .current) -> String {
         guard let bundle = localizationBundle(for: language) else {
             return key
@@ -78,14 +80,24 @@ public enum L10n {
     /// leak). Try the declared name first, then the lowercased form, so the
     /// lookup succeeds against both the source and the processed bundle.
     private static func localizationBundle(for language: AppLanguage) -> Bundle? {
+        let resources = packagedResourceBundle(resourcesURL: Bundle.main.resourceURL) ?? Bundle.module
         var seen = Set<String>()
         for name in [language.rawValue, language.rawValue.lowercased()] where seen.insert(name).inserted {
-            if let path = Bundle.module.path(forResource: name, ofType: "lproj"),
+            if let path = resources.path(forResource: name, ofType: "lproj"),
                let bundle = Bundle(path: path) {
                 return bundle
             }
         }
         return nil
+    }
+
+    /// SwiftPM's generated `Bundle.module` accessor only checks beside the
+    /// main bundle, while a normal macOS app stores resource bundles under
+    /// `Contents/Resources`. Prefer that standard installed-app location so a
+    /// packaged build does not fall through to SwiftPM's temporary build path.
+    static func packagedResourceBundle(resourcesURL: URL?) -> Bundle? {
+        guard let resourcesURL else { return nil }
+        return Bundle(url: resourcesURL.appendingPathComponent(resourceBundleName, isDirectory: true))
     }
 
     public static func format(

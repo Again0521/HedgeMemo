@@ -42,7 +42,8 @@ final class RepositoryMemoryBoundsTests: XCTestCase {
     func testClipboardIdlePurgeClosesReaderWithoutLosingDeferredText() throws {
         let root = tempRoot("clipboard-reader")
         let body = String(repeating: "延迟剪贴板正文", count: 2_000)
-        try ClipboardHistoryRepository(rootURL: root).save(
+        let seedRepository = ClipboardHistoryRepository(rootURL: root)
+        try seedRepository.save(
             ClipboardHistorySnapshot(entries: [
                 ClipboardEntry(
                     kind: .text,
@@ -51,12 +52,18 @@ final class RepositoryMemoryBoundsTests: XCTestCase {
                 )
             ])
         )
+        XCTAssertFalse(seedRepository.hasTransientTextReaderConnection)
+        XCTAssertEqual(seedRepository.textReaderConnectionOpenCount, 0)
 
         let repository = ClipboardHistoryRepository(rootURL: root)
         let snapshot = try repository.load()
         XCTAssertFalse(repository.hasTransientTextReaderConnection)
+        try repository.save(snapshot)
+        XCTAssertFalse(repository.hasTransientTextReaderConnection)
+        XCTAssertEqual(repository.textReaderConnectionOpenCount, 1)
         XCTAssertEqual(snapshot.entries[0].text, body)
         XCTAssertTrue(repository.hasTransientTextReaderConnection)
+        XCTAssertEqual(repository.textReaderConnectionOpenCount, 2)
 
         repository.releaseTransientMemory()
         XCTAssertFalse(repository.hasTransientTextReaderConnection)
@@ -68,7 +75,8 @@ final class RepositoryMemoryBoundsTests: XCTestCase {
         let root = tempRoot("meme-reader")
         let note = String(repeating: "延迟备注", count: 2_000)
         let ocr = String(repeating: "延迟OCR", count: 2_000)
-        try MemeRepository(rootURL: root).save(
+        let seedRepository = MemeRepository(rootURL: root)
+        try seedRepository.save(
             MemeSnapshot(memes: [
                 MemeItem(
                     fileName: "deferred.png",
@@ -78,13 +86,19 @@ final class RepositoryMemoryBoundsTests: XCTestCase {
                 )
             ])
         )
+        XCTAssertFalse(seedRepository.hasTransientTextReaderConnection)
+        XCTAssertEqual(seedRepository.textReaderConnectionOpenCount, 0)
 
         let repository = MemeRepository(rootURL: root)
         let snapshot = try repository.load()
         XCTAssertFalse(repository.hasTransientTextReaderConnection)
+        try repository.save(snapshot)
+        XCTAssertFalse(repository.hasTransientTextReaderConnection)
+        XCTAssertEqual(repository.textReaderConnectionOpenCount, 1)
         XCTAssertEqual(snapshot.memes[0].note, note)
         XCTAssertEqual(snapshot.memes[0].ocrText, ocr)
         XCTAssertTrue(repository.hasTransientTextReaderConnection)
+        XCTAssertEqual(repository.textReaderConnectionOpenCount, 2)
 
         repository.releaseTransientMemory()
         XCTAssertFalse(repository.hasTransientTextReaderConnection)

@@ -3,6 +3,19 @@ import XCTest
 @testable import HedgeMemoCore
 
 final class MemeItemLayoutTests: XCTestCase {
+    private final class LoadCounter: @unchecked Sendable {
+        private let lock = NSLock()
+        private var value = 0
+
+        func increment() {
+            lock.withLock { value += 1 }
+        }
+
+        var count: Int {
+            lock.withLock { value }
+        }
+    }
+
     func testCompactTextStateReducesEveryMemeItemStride() {
         XCTAssertLessThanOrEqual(MemeItem.textStateStorageStride, 8)
         XCTAssertLessThanOrEqual(MemeItem.storageStride, 128)
@@ -94,6 +107,97 @@ final class MemeItemLayoutTests: XCTestCase {
         XCTAssertEqual(decoded.ocrText, original.ocrText)
         XCTAssertEqual(decoded.fileName, original.fileName)
         XCTAssertEqual(decoded.contentHash, original.contentHash)
+    }
+
+    func testPersistenceProjectionLoadsColdBodyOnceWithoutCachingIt() throws {
+        let id = UUID()
+        let counter = LoadCounter()
+        let provider = MemeTextProvider { requestedID in
+            guard requestedID == id else { return nil }
+            counter.increment()
+            return MemeTextBody(
+                note: "persisted note",
+                ocrText: "persisted OCR"
+            )
+        }
+        var deferred = MemeItem(
+            id: id,
+            fileName: "cold.gif",
+            contentHash: "cold"
+        )
+        deferred.deferText(to: provider)
+
+        let persistence = deferred.persistenceProjection
+        let decoded = try JSONDecoder().decode(
+            MemeItem.self,
+            from: JSONEncoder().encode(persistence.meme)
+        )
+
+        XCTAssertEqual(counter.count, 1)
+        XCTAssertEqual(persistence.body.note, "persisted note")
+        XCTAssertEqual(persistence.body.ocrText, "persisted OCR")
+        XCTAssertEqual(decoded.note, "persisted note")
+        XCTAssertEqual(decoded.ocrText, "persisted OCR")
+        XCTAssertEqual(deferred.decodedStoredTextByteCount, 0)
+
+        XCTAssertEqual(deferred.note, "persisted note")
+        XCTAssertEqual(counter.count, 2)
+        XCTAssertEqual(deferred.ocrText, "persisted OCR")
+        XCTAssertEqual(counter.count, 2)
+    }
+
+    func testPersistenceProjectionReusesWarmDisplayCache() {
+        let id = UUID()
+        let counter = LoadCounter()
+        let provider = MemeTextProvider { requestedID in
+            guard requestedID == id else { return nil }
+            counter.increment()
+            return MemeTextBody(note: "warm note", ocrText: "warm OCR")
+        }
+        var deferred = MemeItem(
+            id: id,
+            fileName: "warm.gif",
+            contentHash: "warm"
+        )
+        deferred.deferText(to: provider)
+
+        XCTAssertEqual(deferred.note, "warm note")
+        XCTAssertEqual(counter.count, 1)
+        let persistence = deferred.persistenceProjection
+        XCTAssertEqual(persistence.body.ocrText, "warm OCR")
+        XCTAssertEqual(counter.count, 1)
+    }
+
+    func testBulkPersistenceDoesNotDisplaceDisplayCacheWithColdBodies() {
+        let counter = LoadCounter()
+        let provider = MemeTextProvider { id in
+            counter.increment()
+            return MemeTextBody(
+                note: "note-\(id.uuidString)",
+                ocrText: "ocr-\(id.uuidString)"
+            )
+        }
+        var items = (0..<400).map { index in
+            MemeItem(
+                fileName: "\(index).gif",
+                contentHash: "bulk-persistence-\(index)"
+            )
+        }
+        for index in items.indices {
+            items[index].deferText(to: provider)
+        }
+
+        for item in items {
+            let persistence = item.persistenceProjection
+            XCTAssertFalse(persistence.body.note.isEmpty)
+            XCTAssertFalse(persistence.body.ocrText.isEmpty)
+        }
+        XCTAssertEqual(counter.count, 400)
+
+        for item in items {
+            XCTAssertFalse(item.note.isEmpty)
+        }
+        XCTAssertEqual(counter.count, 800)
     }
 
     func testTenThousandDeferredItemsRetainNoResidentBodyBytes() {

@@ -3,6 +3,19 @@ import XCTest
 @testable import HedgeMemoCore
 
 final class ClipboardEntryTextStateTests: XCTestCase {
+    private final class LoadCounter: @unchecked Sendable {
+        private let lock = NSLock()
+        private var value = 0
+
+        func increment() {
+            lock.withLock { value += 1 }
+        }
+
+        var count: Int {
+            lock.withLock { value }
+        }
+    }
+
     func testCompactTextStateReducesEveryClipboardEntryStride() {
         XCTAssertLessThanOrEqual(ClipboardEntry.textStateStorageStride, 8)
         XCTAssertLessThanOrEqual(ClipboardEntry.storageStride, 248)
@@ -90,6 +103,92 @@ final class ClipboardEntryTextStateTests: XCTestCase {
         )
         XCTAssertEqual(decoded.text, "projection body")
         XCTAssertEqual(decoded.contentHash, original.contentHash)
+    }
+
+    func testPersistenceProjectionLoadsColdTextOnceWithoutCachingIt() throws {
+        let id = UUID()
+        let counter = LoadCounter()
+        let provider = ClipboardEntryTextProvider { requestedID in
+            guard requestedID == id else { return nil }
+            counter.increment()
+            return "cold clipboard body"
+        }
+        var deferred = ClipboardEntry(
+            id: id,
+            kind: .text,
+            contentHash: "cold-persistence"
+        )
+        deferred.deferText(to: provider, automaticCategory: .text)
+
+        let persistence = deferred.persistenceProjection
+        let decoded = try JSONDecoder().decode(
+            ClipboardEntry.self,
+            from: JSONEncoder().encode(persistence.entry)
+        )
+
+        XCTAssertEqual(counter.count, 1)
+        XCTAssertEqual(persistence.text, "cold clipboard body")
+        XCTAssertEqual(decoded.text, "cold clipboard body")
+        XCTAssertNil(deferred.decodedStoredText)
+
+        XCTAssertEqual(deferred.text, "cold clipboard body")
+        XCTAssertEqual(counter.count, 2)
+        XCTAssertEqual(deferred.text, "cold clipboard body")
+        XCTAssertEqual(counter.count, 2)
+    }
+
+    func testPersistenceProjectionReusesWarmClipboardCache() {
+        let id = UUID()
+        let counter = LoadCounter()
+        let provider = ClipboardEntryTextProvider { requestedID in
+            guard requestedID == id else { return nil }
+            counter.increment()
+            return "warm clipboard body"
+        }
+        var deferred = ClipboardEntry(
+            id: id,
+            kind: .text,
+            contentHash: "warm-persistence"
+        )
+        deferred.deferText(to: provider, automaticCategory: .text)
+
+        XCTAssertEqual(deferred.text, "warm clipboard body")
+        XCTAssertEqual(counter.count, 1)
+        XCTAssertEqual(
+            deferred.persistenceProjection.text,
+            "warm clipboard body"
+        )
+        XCTAssertEqual(counter.count, 1)
+    }
+
+    func testBulkClipboardPersistenceDoesNotPopulateDisplayCache() {
+        let counter = LoadCounter()
+        let provider = ClipboardEntryTextProvider { id in
+            counter.increment()
+            return "clipboard-\(id.uuidString)"
+        }
+        var entries = (0..<400).map { index in
+            ClipboardEntry(
+                kind: .text,
+                contentHash: "bulk-clipboard-persistence-\(index)"
+            )
+        }
+        for index in entries.indices {
+            entries[index].deferText(
+                to: provider,
+                automaticCategory: .text
+            )
+        }
+
+        for entry in entries {
+            XCTAssertFalse(entry.persistenceProjection.text?.isEmpty ?? true)
+        }
+        XCTAssertEqual(counter.count, 400)
+
+        for entry in entries {
+            XCTAssertFalse(entry.text?.isEmpty ?? true)
+        }
+        XCTAssertEqual(counter.count, 800)
     }
 
     func testNilImageNotesAndPasswordBodiesRemainLossless() {
