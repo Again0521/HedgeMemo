@@ -222,6 +222,7 @@ private struct PinnedClipboardNoteView: View {
 
     @FocusState private var isEditorFocused: Bool
     @AppStorage(AppPreferences.showsScrollIndicatorsKey) private var showsScrollIndicators = true
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     var body: some View {
         VStack(spacing: 0) {
@@ -281,7 +282,7 @@ private struct PinnedClipboardNoteView: View {
                     Image(systemName: model.isEditing ? "checkmark" : "pencil")
                         .frame(width: 18, height: 18)
                 }
-                .buttonStyle(.plain)
+                .buttonStyle(ApplePressButtonStyle(pressedScale: 0.88))
                 .foregroundStyle(model.isEditing ? Color.accentColor : Color.secondary)
                 .help(L10n.text(model.isEditing ? "完成编辑" : "编辑"))
                 .accessibilityLabel(L10n.text(model.isEditing ? "完成编辑" : "编辑"))
@@ -290,7 +291,7 @@ private struct PinnedClipboardNoteView: View {
                 Image(systemName: model.isAlwaysOnTop ? "rectangle.fill.on.rectangle.fill" : "rectangle.on.rectangle")
                     .frame(width: 18, height: 18)
             }
-            .buttonStyle(.plain)
+            .buttonStyle(ApplePressButtonStyle(pressedScale: 0.88))
             .foregroundStyle(model.isAlwaysOnTop ? Color.accentColor : Color.secondary)
             .help(L10n.text(model.isAlwaysOnTop ? "取消保持最前" : "保持最前"))
             .accessibilityLabel(L10n.text(model.isAlwaysOnTop ? "取消保持最前" : "保持最前"))
@@ -299,7 +300,7 @@ private struct PinnedClipboardNoteView: View {
                 Image(systemName: "xmark")
                     .frame(width: 18, height: 18)
             }
-            .buttonStyle(.plain)
+            .buttonStyle(ApplePressButtonStyle(pressedScale: 0.88))
             .foregroundStyle(.secondary)
             .help(L10n.text("取消固定"))
             .accessibilityLabel(L10n.text("取消固定"))
@@ -379,20 +380,26 @@ private struct PinnedClipboardNoteView: View {
 
     private func beginEditing() {
         model.draftText = model.displayedText
-        withAnimation(.easeInOut(duration: 0.18)) { model.isEditing = true }
+        withAnimation(AppleInteractionMotion.settle(reduceMotion: reduceMotion, response: 0.24)) {
+            model.isEditing = true
+        }
     }
 
     /// Saving blank text would leave a pointless empty note, so an
     /// all-whitespace draft quietly discards instead of persisting.
     private func saveEditing() {
         let text = model.draftText
-        withAnimation(.easeInOut(duration: 0.18)) { model.isEditing = false }
+        withAnimation(AppleInteractionMotion.dismissal(reduceMotion: reduceMotion)) {
+            model.isEditing = false
+        }
         guard !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
         onSaveText(text)
     }
 
     private func cancelEditing() {
-        withAnimation(.easeInOut(duration: 0.18)) { model.isEditing = false }
+        withAnimation(AppleInteractionMotion.dismissal(reduceMotion: reduceMotion)) {
+            model.isEditing = false
+        }
     }
 }
 

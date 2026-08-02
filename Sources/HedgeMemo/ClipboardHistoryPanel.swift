@@ -508,7 +508,7 @@ final class ClipboardHistoryPanelController: NSObject, NSWindowDelegate {
     private func setPanelFrame(_ frame: NSRect, display: Bool = true, animated: Bool = false) {
         guard let panel else { return }
         pendingProgrammaticFrame = frame
-        if animated {
+        if animated, !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion {
             // Height changes between categories are eased instead of snapping.
             // The hosted content is sized from this window's own geometry (see
             // the GeometryReader in `body`), so it follows the animator frame by
@@ -1004,13 +1004,16 @@ private final class KeyableClipboardPanel: NSPanel {
 /// pointer glides between rows and the card is only re-sized.
 private struct DetailCardPopIn: ViewModifier {
     @State private var appeared = false
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     func body(content: Content) -> some View {
         content
-            .scaleEffect(appeared ? 1 : 0.92)
+            .scaleEffect(reduceMotion || appeared ? 1 : 0.96)
             .opacity(appeared ? 1 : 0)
             .onAppear {
-                withAnimation(.spring(response: 0.3, dampingFraction: 0.74)) {
+                // A programmatic hover preview settles without overshoot;
+                // bounce is reserved for a release after direct manipulation.
+                withAnimation(AppleInteractionMotion.settle(reduceMotion: reduceMotion)) {
                     appeared = true
                 }
             }
@@ -1539,6 +1542,7 @@ struct ClipboardHistoryPanelView: View {
     /// `entries` for search, shortcuts and keyboard navigation.
     @State private var visibleEntryLimit = Int.max
     @AppStorage(AppPreferences.showsScrollIndicatorsKey) private var showsScrollIndicators = true
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     fileprivate init(
         store: ClipboardHistoryStore,
@@ -1832,7 +1836,7 @@ struct ClipboardHistoryPanelView: View {
             // and fades the card out in place (the panel is still expanded) so
             // the follow-up collapse lands on an already-invisible card.
             .opacity(editorClosing ? 0 : 1)
-            .scaleEffect(editorClosing ? 0.94 : 1)
+            .scaleEffect(reduceMotion || !editorClosing ? 1 : 0.96)
         }
     }
 
@@ -2577,8 +2581,11 @@ struct ClipboardHistoryPanelView: View {
             }
         }
         editingEntryID = nil
-        withAnimation(.easeOut(duration: 0.22)) { editorClosing = true }
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.24) {
+        withAnimation(AppleInteractionMotion.dismissal(reduceMotion: reduceMotion)) {
+            editorClosing = true
+        }
+        let dismissalDelay = reduceMotion ? 0.14 : 0.26
+        DispatchQueue.main.asyncAfter(deadline: .now() + dismissalDelay) {
             onDetailEntry(nil)
             // Recompute the list height once collapsed: an edited code entry may
             // now occupy a different number of preview lines.
@@ -2771,7 +2778,7 @@ private struct TextEntryRow: View, Equatable {
                         .frame(width: 18, height: 18)
                         .contentShape(Rectangle())
                 }
-                .buttonStyle(.plain)
+                .buttonStyle(ApplePressButtonStyle(pressedScale: 0.88))
                 .foregroundStyle(.white)
                 .help(L10n.text(entry.isPinned ? "取消剪切板内固定" : "固定到剪切板"))
                 ClipboardPinButton(entry: entry, isSelected: true, action: onTogglePin)
@@ -2857,7 +2864,7 @@ private struct CompactImageEntryRow: View, Equatable {
                         .frame(width: 18, height: 18)
                         .contentShape(Rectangle())
                 }
-                .buttonStyle(.plain)
+                .buttonStyle(ApplePressButtonStyle(pressedScale: 0.88))
                 .foregroundStyle(.white)
                 .help(L10n.text(entry.isPinned ? "取消剪切板内固定" : "固定到剪切板"))
                 ClipboardPinButton(entry: entry, isSelected: true, action: onTogglePin)
@@ -2916,7 +2923,7 @@ private struct CodeEntryRow: View, Equatable {
                         .frame(width: 18, height: 18)
                         .contentShape(Rectangle())
                 }
-                .buttonStyle(.plain)
+                .buttonStyle(ApplePressButtonStyle(pressedScale: 0.88))
                 .foregroundStyle(.white)
                 .help(L10n.text(entry.isPinned ? "取消剪切板内固定" : "固定到剪切板"))
                 ClipboardPinButton(entry: entry, isSelected: true, action: onTogglePin)
@@ -2985,7 +2992,7 @@ private struct ImageEntryCell: View, Equatable {
                             .frame(width: 18, height: 18)
                             .contentShape(Rectangle())
                     }
-                    .buttonStyle(.plain)
+                    .buttonStyle(ApplePressButtonStyle(pressedScale: 0.88))
                     .foregroundStyle(.white)
                     .background(Circle().fill(.black.opacity(0.4)))
                     .help(L10n.text(entry.isPinned ? "取消剪切板内固定" : "固定到剪切板"))
@@ -3033,7 +3040,7 @@ private struct ClipboardPinButton: View {
                 .frame(width: 18, height: 18)
                 .contentShape(Rectangle())
         }
-        .buttonStyle(.plain)
+        .buttonStyle(ApplePressButtonStyle(pressedScale: 0.88))
         .foregroundStyle(isSelected ? Color.white : Color.secondary)
         .help(L10n.text(entry.isDesktopPinned == true ? "取消桌面固定" : "固定到桌面"))
         .accessibilityLabel(L10n.text(entry.isDesktopPinned == true ? "取消桌面固定" : "固定到桌面"))

@@ -70,7 +70,7 @@ struct PanelSearchField: View {
                         .font(.system(size: 12))
                         .foregroundStyle(.secondary)
                 }
-                .buttonStyle(.plain)
+                .buttonStyle(ApplePressButtonStyle(pressedScale: 0.9))
             }
         }
         .padding(.horizontal, 9)
@@ -179,7 +179,7 @@ struct HoverIconButton: View {
                 .foregroundStyle(tint)
                 .frame(width: 26, height: 26)
         }
-        .buttonStyle(.plain)
+        .buttonStyle(ApplePressButtonStyle(pressedScale: 0.9))
         .help(help)
     }
 }

@@ -197,7 +197,7 @@ private struct ScreenshotEditorPanelView: View {
         Button(action: onCancel) {
             Label(L10n.text("截屏"), systemImage: "xmark.circle.fill")
         }
-        .buttonStyle(.plain)
+        .buttonStyle(ApplePressButtonStyle(pressedScale: 0.96))
         .keyboardShortcut(.cancelAction)
         .help(L10n.text("取消截屏"))
         .contentShape(Rectangle())
@@ -486,7 +486,7 @@ private struct ColorSwatch: View {
                         .padding(-2)
                 )
         }
-        .buttonStyle(.plain)
+        .buttonStyle(ApplePressButtonStyle(pressedScale: 0.86))
         .help(" ")
     }
 }

@@ -154,6 +154,7 @@ struct SettingsPanelView: View {
     @State private var isVerifyingPIN = false
     @State private var biometricsAvailable = BiometricAuthenticator.isAvailable
     @StateObject private var launchAtLogin = LaunchAtLoginController()
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @AppStorage(AppPreferences.showsScrollIndicatorsKey) private var showsScrollIndicators = true
     @AppStorage(AppPreferences.interfaceOpacityKey)
     private var interfaceOpacity = AppPreferences.defaultInterfaceOpacity
@@ -236,7 +237,14 @@ struct SettingsPanelView: View {
                         // points the user when a newer version exists.
                         showsUpdateDot: tab == .general && updateCheckStore.hasAvailableUpdate
                     ) {
-                        selectedTab = tab
+                        withAnimation(
+                            AppleInteractionMotion.settle(
+                                reduceMotion: reduceMotion,
+                                response: 0.26
+                            )
+                        ) {
+                            selectedTab = tab
+                        }
                     }
                 }
             }
@@ -1027,7 +1035,7 @@ private struct LockTargetChips: View {
                         )
                         .contentShape(Capsule(style: .continuous))
                 }
-                .buttonStyle(.plain)
+                .buttonStyle(ApplePressButtonStyle(pressedScale: 0.97))
                 // 密码 is always locked, so its chip shows the state but does
                 // not invite a tap that would do nothing.
                 .disabled(fixed)
@@ -1102,6 +1110,7 @@ private struct SettingsTabRow: View {
     var showsUpdateDot = false
     let action: () -> Void
     @State private var isHovering = false
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     var body: some View {
         Button(action: action) {
@@ -1132,8 +1141,12 @@ private struct SettingsTabRow: View {
             )
             .contentShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
         }
-        .buttonStyle(.plain)
+        .buttonStyle(ApplePressButtonStyle(pressedScale: 0.98, pressedOpacity: 0.9))
         .onHover { isHovering = $0 }
+        .animation(
+            AppleInteractionMotion.settle(reduceMotion: reduceMotion, response: 0.18),
+            value: isHovering
+        )
         .accessibilityLabel(tab.title)
         .accessibilityAddTraits(isSelected ? [.isSelected] : [])
     }
@@ -1382,7 +1395,7 @@ private struct CustomCategoryEditorSheet: View {
             } label: {
                 Image(systemName: "minus.circle")
             }
-            .buttonStyle(.plain)
+            .buttonStyle(ApplePressButtonStyle(pressedScale: 0.9))
             .foregroundStyle(.secondary)
             .help(L10n.text("删除条件"))
         }

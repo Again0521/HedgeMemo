@@ -213,7 +213,7 @@ struct PINGateView: View {
             } else {
                 PINDotsField(pin: $confirmation, isFocused: $confirmFocused) { submitSetup() }
                 Button(L10n.text("返回")) { showNewPIN() }
-                    .buttonStyle(.plain)
+                    .buttonStyle(ApplePressButtonStyle(pressedScale: 0.97))
                     .foregroundStyle(Color.accentColor)
             }
 
@@ -228,7 +228,7 @@ struct PINGateView: View {
                     Label(L10n.text("使用触控 ID"), systemImage: "touchid")
                         .font(.system(size: 11))
                 }
-                .buttonStyle(.plain)
+                .buttonStyle(ApplePressButtonStyle(pressedScale: 0.97))
                 .foregroundStyle(Color.accentColor)
                 .disabled(isAuthenticating)
             }

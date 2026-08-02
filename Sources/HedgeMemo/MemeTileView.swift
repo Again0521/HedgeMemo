@@ -15,6 +15,37 @@ enum MemeGridSpace {
     static let name = "memeGrid"
 }
 
+/// Pure drag geometry keeps the floating copy attached to the exact point the
+/// user grabbed instead of snapping the tile center under the pointer.
+enum MemeDragGeometry {
+    static func tileCenter(
+        index: Int,
+        columnCount: Int,
+        tileSide: CGFloat,
+        spacing: CGFloat
+    ) -> CGPoint {
+        let cell = tileSide + spacing
+        return CGPoint(
+            x: CGFloat(index % columnCount) * cell + tileSide / 2,
+            y: CGFloat(index / columnCount) * cell + tileSide / 2
+        )
+    }
+
+    static func grabOffset(startLocation: CGPoint, tileCenter: CGPoint) -> CGSize {
+        CGSize(
+            width: startLocation.x - tileCenter.x,
+            height: startLocation.y - tileCenter.y
+        )
+    }
+
+    static func floatingCenter(pointerLocation: CGPoint, grabOffset: CGSize) -> CGPoint {
+        CGPoint(
+            x: pointerLocation.x - grabOffset.width,
+            y: pointerLocation.y - grabOffset.height
+        )
+    }
+}
+
 /// Equatable over its data (the action closures are recreated by every parent
 /// pass but capture equal values) and installed with `.equatable()`, so a drag
 /// or selection change re-renders only the affected tiles instead of the whole
@@ -43,8 +74,11 @@ struct MemeTileView: View, Equatable {
     let onMove: (UUID?) -> Void
     let onDelete: () -> Void
     /// Reports pointer movement in `MemeGridSpace` while this tile is dragged.
-    let onDragChanged: (UUID, CGPoint) -> Void
+    let onDragChanged: (UUID, CGPoint, CGPoint) -> Void
     let onDragEnded: () -> Void
+
+    @GestureState private var isPressing = false
+    @State private var crossedDragThreshold = false
 
     private var hasNote: Bool {
         !meme.note.isEmpty
@@ -65,18 +99,32 @@ struct MemeTileView: View, Equatable {
         // the slot the meme will land in; a floating copy follows the pointer.
         .opacity(isDragged ? 0.3 : 1)
         .contentShape(Rectangle())
-        // A plain tap keeps working exactly like the old Button: the drag
-        // gesture only claims the interaction after 4pt of movement.
-        .onTapGesture {
-            if isManaging { onSelection(meme.id, NSEvent.modifierFlags) } else { onCopy() }
-        }
-        // A deliberate reorder needs more travel than an ordinary click's
-        // jitter, so a plain selection tap in management mode is never stolen
-        // by this drag and mistaken for a no-op reorder onto the same tile.
+        .appleDirectManipulationFeedback(isPressed: isPressing && !isDragged)
+        // One gesture owns press, tap and reorder. It begins on mouse-down for
+        // immediate feedback, but only becomes a reorder after 10pt of travel.
+        // Until then mouse-up remains the familiar copy/selection action.
         .gesture(
-            DragGesture(minimumDistance: 10, coordinateSpace: .named(MemeGridSpace.name))
-                .onChanged { value in onDragChanged(meme.id, value.location) }
-                .onEnded { _ in onDragEnded() }
+            DragGesture(minimumDistance: 0, coordinateSpace: .named(MemeGridSpace.name))
+                .updating($isPressing) { _, isPressing, _ in isPressing = true }
+                .onChanged { value in
+                    let distance = hypot(value.translation.width, value.translation.height)
+                    if !crossedDragThreshold, distance >= 10 {
+                        crossedDragThreshold = true
+                    }
+                    guard crossedDragThreshold else { return }
+                    onDragChanged(meme.id, value.location, value.startLocation)
+                }
+                .onEnded { _ in
+                    let wasDragging = crossedDragThreshold
+                    crossedDragThreshold = false
+                    if wasDragging {
+                        onDragEnded()
+                    } else if isManaging {
+                        onSelection(meme.id, NSEvent.modifierFlags)
+                    } else {
+                        onCopy()
+                    }
+                }
         )
         .contextMenu { contextMenu }
         .help(isManaging ? L10n.text("点击选择；拖动缩略图排序") : (hasNote ? L10n.format("备注拖动排序格式", meme.note) : L10n.text("点击复制；拖动排序")))

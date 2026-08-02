@@ -22,6 +22,9 @@ struct MemePanelView: View {
     @State private var draggedID: UUID?
     /// Pointer position in `MemeGridSpace` while a reorder drag is active.
     @State private var dragLocation: CGPoint = .zero
+    /// Difference between the pointer-down location and the tile center. The
+    /// floating copy preserves it instead of snapping its center to the cursor.
+    @State private var dragGrabOffset: CGSize = .zero
     /// A prospective insertion is visual state only. Persisting a new order
     /// while the pointer is still moving makes a slow drag repeatedly rebuild
     /// the grid, which is the source of the visible tile jitter.
@@ -33,6 +36,7 @@ struct MemePanelView: View {
     @State private var editingMeme: MemeItem?
     @State private var showsError = false
     @AppStorage(AppPreferences.showsScrollIndicatorsKey) private var showsScrollIndicators = true
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     // Three visible rows of square tiles; the grid scrolls beyond that.
     private let tileSide: CGFloat = 92
@@ -96,8 +100,13 @@ struct MemePanelView: View {
                                 onEditNote: { editingMeme = meme },
                                 onMove: { store.move(ids: [meme.id], to: $0) },
                                 onDelete: { store.delete(ids: [meme.id]) },
-                                onDragChanged: { id, location in
-                                    handleDragChanged(id: id, location: location, proxy: proxy)
+                                onDragChanged: { id, location, startLocation in
+                                    handleDragChanged(
+                                        id: id,
+                                        location: location,
+                                        startLocation: startLocation,
+                                        proxy: proxy
+                                    )
                                 },
                                 onDragEnded: endDrag
                             )
@@ -221,10 +230,12 @@ struct MemePanelView: View {
     }
 
     private func toggleManaging() {
-        isManaging.toggle()
-        if !isManaging {
-            selectedIDs.removeAll()
-            selectionAnchorID = nil
+        withAnimation(AppleInteractionMotion.settle(reduceMotion: reduceMotion)) {
+            isManaging.toggle()
+            if !isManaging {
+                selectedIDs.removeAll()
+                selectionAnchorID = nil
+            }
         }
     }
 
@@ -235,16 +246,20 @@ struct MemePanelView: View {
     private func select(_ id: UUID, modifiers: NSEvent.ModifierFlags) {
         let flags = modifiers.intersection(.deviceIndependentFlagsMask)
         if flags.contains(.command) || !flags.contains(.shift) {
-            if selectedIDs.contains(id) { selectedIDs.remove(id) }
-            else { selectedIDs.insert(id) }
-            selectionAnchorID = id
+            withAnimation(AppleInteractionMotion.settle(reduceMotion: reduceMotion, response: 0.22)) {
+                if selectedIDs.contains(id) { selectedIDs.remove(id) }
+                else { selectedIDs.insert(id) }
+                selectionAnchorID = id
+            }
             return
         }
         if flags.contains(.shift),
            let anchor = selectionAnchorID,
            let first = visibleMemes.firstIndex(where: { $0.id == anchor }),
            let last = visibleMemes.firstIndex(where: { $0.id == id }) {
-            selectedIDs = Set(visibleMemes[min(first, last)...max(first, last)].map(\.id))
+            withAnimation(AppleInteractionMotion.settle(reduceMotion: reduceMotion, response: 0.22)) {
+                selectedIDs = Set(visibleMemes[min(first, last)...max(first, last)].map(\.id))
+            }
             return
         }
     }
@@ -305,9 +320,31 @@ struct MemePanelView: View {
         return row * columnCount + column
     }
 
-    private func handleDragChanged(id: UUID, location: CGPoint, proxy: ScrollViewProxy) {
-        if draggedID != id { draggedID = id }
-        dragLocation = location
+    private func handleDragChanged(
+        id: UUID,
+        location: CGPoint,
+        startLocation: CGPoint,
+        proxy: ScrollViewProxy
+    ) {
+        if draggedID != id {
+            draggedID = id
+            if let index = visibleMemes.firstIndex(where: { $0.id == id }) {
+                let center = MemeDragGeometry.tileCenter(
+                    index: index,
+                    columnCount: columnCount,
+                    tileSide: tileSide,
+                    spacing: tileSpacing
+                )
+                dragGrabOffset = MemeDragGeometry.grabOffset(
+                    startLocation: startLocation,
+                    tileCenter: center
+                )
+            }
+        }
+        dragLocation = MemeDragGeometry.floatingCenter(
+            pointerLocation: location,
+            grabOffset: dragGrabOffset
+        )
         let memes = visibleMemes
         let slot = slotIndex(at: location)
         if slot >= memes.count {
@@ -326,9 +363,13 @@ struct MemePanelView: View {
         defer { clearDragState() }
         guard let draggedID else { return }
         if dropsAtEnd {
-            store.reorderToEnd(draggedID: draggedID, categoryID: store.selectedCategoryID)
+            withAnimation(AppleInteractionMotion.momentum(reduceMotion: reduceMotion)) {
+                store.reorderToEnd(draggedID: draggedID, categoryID: store.selectedCategoryID)
+            }
         } else if let targetID = dropTargetID, targetID != draggedID {
-            store.reorder(draggedID: draggedID, over: targetID)
+            withAnimation(AppleInteractionMotion.momentum(reduceMotion: reduceMotion)) {
+                store.reorder(draggedID: draggedID, over: targetID)
+            }
         } else if isManaging {
             // The pointer never left this tile, so the gesture was a click, not
             // a reorder. Route it back through selection so a small drag can
@@ -339,6 +380,7 @@ struct MemePanelView: View {
 
     private func clearDragState() {
         draggedID = nil
+        dragGrabOffset = .zero
         dropTargetID = nil
         dropsAtEnd = false
     }
@@ -357,14 +399,14 @@ struct MemePanelView: View {
             let index = (row - 1) * columnCount
             guard memes.indices.contains(index) else { return }
             lastAutoscroll = .now
-            withAnimation(.easeInOut(duration: 0.2)) {
+            withAnimation(AppleInteractionMotion.settle(reduceMotion: reduceMotion, response: 0.26)) {
                 proxy.scrollTo(memes[index].id, anchor: .top)
             }
         } else if viewportY > gridHeight - edge {
             let index = min(memes.count - 1, (row + 1) * columnCount + columnCount - 1)
             guard index > row * columnCount else { return }
             lastAutoscroll = .now
-            withAnimation(.easeInOut(duration: 0.2)) {
+            withAnimation(AppleInteractionMotion.settle(reduceMotion: reduceMotion, response: 0.26)) {
                 proxy.scrollTo(memes[index].id, anchor: .bottom)
             }
         }
@@ -413,7 +455,7 @@ private struct MemeImportTile: View {
                         )
                 }
         }
-        .buttonStyle(.plain)
+        .buttonStyle(ApplePressButtonStyle(pressedScale: 0.98, pressedOpacity: 0.86))
         .help(L10n.text("从文件或文件夹批量导入到当前分类"))
         .accessibilityLabel(L10n.text("导入表情包"))
     }

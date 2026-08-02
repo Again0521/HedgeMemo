@@ -147,7 +147,7 @@ struct ClipboardAppFilterSettingsView: View {
             } label: {
                 Image(systemName: "minus.circle")
             }
-            .buttonStyle(.plain)
+            .buttonStyle(ApplePressButtonStyle(pressedScale: 0.9))
             .help(L10n.text("移除"))
             .accessibilityLabel(L10n.format("移除应用格式", application.displayName))
         }
