@@ -164,6 +164,7 @@ final class StatusItemController: NSObject {
         // monitor registration, leaving an orphaned panel visible.
         startOutsideClickMonitor()
         NSApp.activate(ignoringOtherApps: true)
+        TextCompletionCrashGuard.finishActiveTextSessions()
         popover.show(relativeTo: rect, of: view, preferredEdge: preferredEdge)
         clampPopoverToScreen()
         // AppKit may still adjust the popover frame right after `show`;
@@ -187,6 +188,7 @@ final class StatusItemController: NSObject {
         ImageThumbnailCache.shared.beginInteractiveUse()
         startOutsideClickMonitor()
         NSApp.activate(ignoringOtherApps: true)
+        TextCompletionCrashGuard.prepareToOrderOnScreen(panel)
         panel.makeKeyAndOrderFront(nil)
         panel.orderFrontRegardless()
     }
@@ -304,6 +306,9 @@ final class StatusItemController: NSObject {
     }
 
     private func closeMemePanel() {
+        if let window = popover.contentViewController?.view.window {
+            TextCompletionCrashGuard.finishActiveTextSessions(in: [window])
+        }
         popover.performClose(nil)
         hideKeyboardMemePanel()
     }
@@ -320,24 +325,40 @@ final class StatusItemController: NSObject {
     private func buildMenu() -> NSMenu {
         let menu = NSMenu()
 
-        menu.addItem(actionItem(L10n.text("导入 ZIP…"), #selector(importArchive)))
-        menu.addItem(actionItem(L10n.text("导出 ZIP…"), #selector(exportArchive)))
+        menu.addItem(actionItem(L10n.text("导入 ZIP…"), #selector(importArchive), icon: .importArchive))
+        menu.addItem(actionItem(L10n.text("导出 ZIP…"), #selector(exportArchive), icon: .exportArchive))
         menu.addItem(.separator())
 
-        let screenshot = NSMenuItem(title: L10n.text("截图"), action: nil, keyEquivalent: "")
+        let screenshot = menuItem(title: L10n.text("截图"), icon: .screenshot)
         let screenshotMenu = NSMenu()
-        screenshotMenu.addItem(actionItem(L10n.text("按当前模式截图"), #selector(screenshotDefault)))
+        screenshotMenu.addItem(actionItem(
+            L10n.text("按当前模式截图"),
+            #selector(screenshotDefault),
+            icon: .screenshotDefault
+        ))
         screenshotMenu.addItem(.separator())
-        screenshotMenu.addItem(actionItem(L10n.text("手动框选"), #selector(screenshotManual)))
-        screenshotMenu.addItem(actionItem(L10n.text("智能窗口"), #selector(screenshotSmart)))
+        screenshotMenu.addItem(actionItem(
+            L10n.text("手动框选"),
+            #selector(screenshotManual),
+            icon: .screenshotManual
+        ))
+        screenshotMenu.addItem(actionItem(
+            L10n.text("智能窗口"),
+            #selector(screenshotSmart),
+            icon: .screenshotSmart
+        ))
         screenshot.submenu = screenshotMenu
         menu.addItem(screenshot)
         menu.addItem(.separator())
 
-        menu.addItem(actionItem(L10n.text("清除剪贴板…"), #selector(clearClipboardHistory)))
+        menu.addItem(actionItem(
+            L10n.text("清除剪贴板…"),
+            #selector(clearClipboardHistory),
+            icon: .clearClipboard
+        ))
         menu.addItem(.separator())
 
-        let settingsItem = actionItem(L10n.text("设置…"), #selector(openSettings))
+        let settingsItem = actionItem(L10n.text("设置…"), #selector(openSettings), icon: .settings)
         // The menu is rebuilt on every right-click, so this reflects the current
         // update state without needing an observer of its own.
         if services.updateCheckStore.hasAvailableUpdate {
@@ -345,12 +366,23 @@ final class StatusItemController: NSObject {
         }
         menu.addItem(settingsItem)
         menu.addItem(.separator())
-        menu.addItem(actionItem(L10n.text("退出 HedgeMemo"), #selector(quit)))
+        menu.addItem(actionItem(L10n.text("退出 HedgeMemo"), #selector(quit), icon: .quit))
         return menu
     }
 
-    private func actionItem(_ title: String, _ selector: Selector) -> NSMenuItem {
-        let item = NSMenuItem(title: title, action: selector, keyEquivalent: "")
+    private func menuItem(title: String, icon: StatusMenuSymbol) -> NSMenuItem {
+        let item = NSMenuItem(title: title, action: nil, keyEquivalent: "")
+        item.image = icon.image(accessibilityDescription: title)
+        return item
+    }
+
+    private func actionItem(
+        _ title: String,
+        _ selector: Selector,
+        icon: StatusMenuSymbol
+    ) -> NSMenuItem {
+        let item = menuItem(title: title, icon: icon)
+        item.action = selector
         item.target = self
         return item
     }
@@ -399,6 +431,26 @@ final class StatusItemController: NSObject {
 
     func previewSettings() { settingsWindow.show() }
     func previewMemes() { togglePopover() }
+}
+
+/// A closed list makes it impossible to accidentally add a text-only menu item:
+/// every actionable status-menu row must choose one native, adaptive symbol.
+enum StatusMenuSymbol: String, CaseIterable {
+    case importArchive = "square.and.arrow.down"
+    case exportArchive = "square.and.arrow.up"
+    case screenshot = "camera.viewfinder"
+    case screenshotDefault = "camera"
+    case screenshotManual = "viewfinder"
+    case screenshotSmart = "macwindow"
+    case clearClipboard = "trash"
+    case settings = "gearshape"
+    case quit = "power"
+
+    func image(accessibilityDescription: String) -> NSImage? {
+        let image = NSImage(systemSymbolName: rawValue, accessibilityDescription: accessibilityDescription)
+        image?.isTemplate = true
+        return image
+    }
 }
 
 extension StatusItemController: NSPopoverDelegate {

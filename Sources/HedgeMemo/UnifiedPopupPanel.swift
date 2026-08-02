@@ -44,6 +44,7 @@ final class UnifiedPopupSession: NSObject, NSWindowDelegate {
     func finish(_ response: NSApplication.ModalResponse = .cancel) {
         guard !finished else { return }
         finished = true
+        TextCompletionCrashGuard.finishActiveTextSessions(in: [panel])
         panel.orderOut(nil)
         NSApp.stopModal(withCode: response)
     }
@@ -100,6 +101,62 @@ enum UnifiedPopupPanel {
         }
     }
 
+    /// Returns true for the destructive confirmation, false for the explicit
+    /// non-destructive choice, and nil when the window itself is closed.
+    static func requestConfirmation(
+        title: String,
+        message: String,
+        systemImage: String,
+        declineTitle: String,
+        confirmationTitle: String,
+        onCompletion: @escaping @MainActor (Bool?) -> Void
+    ) {
+        // Match text requests: let the Toggle's mouseUp finish before entering
+        // AppKit's modal event loop so both buttons receive their first click.
+        DispatchQueue.main.async {
+            let result = runConfirmationRequest(
+                title: title,
+                message: message,
+                systemImage: systemImage,
+                declineTitle: declineTitle,
+                confirmationTitle: confirmationTitle
+            )
+            onCompletion(result)
+        }
+    }
+
+    private static func runConfirmationRequest(
+        title: String,
+        message: String,
+        systemImage: String,
+        declineTitle: String,
+        confirmationTitle: String
+    ) -> Bool? {
+        let session = UnifiedPopupSession(
+            title: title,
+            size: NSSize(width: 420, height: 208)
+        )
+        var result: Bool?
+        let content = UnifiedConfirmationPopupContent(
+            title: title,
+            message: message,
+            systemImage: systemImage,
+            declineTitle: declineTitle,
+            confirmationTitle: confirmationTitle,
+            onDecline: {
+                result = false
+                session.finish(.cancel)
+            },
+            onConfirm: {
+                result = true
+                session.finish(.OK)
+            }
+        )
+        PanelMaterialHost.install(content, in: session.panel, cornerRadius: 14)
+        session.present()
+        return result
+    }
+
     private static func runTextRequest(
         title: String,
         message: String,
@@ -127,6 +184,45 @@ enum UnifiedPopupPanel {
         PanelMaterialHost.install(content, in: session.panel, cornerRadius: 14)
         session.present()
         return result
+    }
+}
+
+struct UnifiedConfirmationPopupContent: View {
+    let title: String
+    let message: String
+    let systemImage: String
+    let declineTitle: String
+    let confirmationTitle: String
+    let onDecline: () -> Void
+    let onConfirm: () -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            HStack(spacing: 10) {
+                Image(systemName: systemImage)
+                    .font(.system(size: 18, weight: .medium))
+                    .foregroundStyle(.orange)
+                Text(title)
+                    .font(.headline)
+            }
+            Text(message)
+                .font(.callout)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+            Spacer(minLength: 0)
+            HStack {
+                Spacer()
+                Button(declineTitle, action: onDecline)
+                    .keyboardShortcut(.cancelAction)
+                Button(confirmationTitle, role: .destructive, action: onConfirm)
+                    .keyboardShortcut(.defaultAction)
+            }
+        }
+        .padding(.horizontal, 20)
+        .padding(.top, 34)
+        .padding(.bottom, 20)
+        .frame(width: 420)
+        .frame(minHeight: 188)
     }
 }
 
@@ -201,6 +297,7 @@ private struct UnifiedTextInputPopupContent: View {
                 .font(.caption)
                 .foregroundStyle(.secondary)
             TextField(placeholder, text: $value)
+                .disablesRemoteTextCompletion()
                 .focused($isFocused)
             HStack {
                 Spacer()

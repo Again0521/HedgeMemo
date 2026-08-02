@@ -22,6 +22,7 @@ final class ScreenshotEditorPanelController {
         // A capture editor is an active, transient operation.  Ordering it
         // regardless of the current app prevents the captured app from
         // immediately covering the editor again after ScreenCaptureKit exits.
+        TextCompletionCrashGuard.prepareToOrderOnScreen(panel)
         panel.makeKeyAndOrderFront(nil)
         panel.orderFrontRegardless()
     }

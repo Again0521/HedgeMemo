@@ -33,6 +33,9 @@ final class TextCompletionCrashGuardTests: XCTestCase {
         XCTAssertNil(field.contentType)
         XCTAssertFalse(textView.isAutomaticTextCompletionEnabled)
         XCTAssertNil(textView.contentType)
+        if #available(macOS 15.2, *) {
+            XCTAssertFalse(field.allowsWritingTools)
+        }
     }
 
     func testDisablesAnActiveFieldEditorAsWellAsItsField() {
@@ -58,6 +61,9 @@ final class TextCompletionCrashGuardTests: XCTestCase {
         XCTAssertNil(field.contentType)
         XCTAssertFalse(editor?.isAutomaticTextCompletionEnabled ?? true)
         XCTAssertNil(editor?.contentType)
+        if #available(macOS 15.2, *) {
+            XCTAssertFalse(field.allowsWritingTools)
+        }
     }
 
     func testPreparingAWindowEndsOldEditingBeforeDestinationIsOrdered() {
@@ -104,6 +110,30 @@ final class TextCompletionCrashGuardTests: XCTestCase {
         XCTAssertNil(destinationField.contentType)
     }
 
+    func testWillCloseEndsEditingSynchronouslyBeforeTheWindowDetaches() {
+        let notifications = NotificationCenter()
+        let guardLifetime = TextCompletionCrashGuard(
+            notificationCenter: notifications,
+            workspaceNotificationCenter: NotificationCenter()
+        )
+        let window = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 240, height: 80),
+            styleMask: [.titled],
+            backing: .buffered,
+            defer: false
+        )
+        let field = NSTextField(frame: NSRect(x: 20, y: 20, width: 200, height: 24))
+        window.contentView = field
+        window.makeKey()
+        XCTAssertTrue(window.makeFirstResponder(field))
+        XCTAssertTrue(window.firstResponder is NSTextView)
+
+        notifications.post(name: NSWindow.willCloseNotification, object: window)
+
+        XCTAssertFalse(window.firstResponder is NSTextView)
+        withExtendedLifetime(guardLifetime) {}
+    }
+
     func testUnifiedPopupSessionUsesSharedPanelChrome() {
         let session = UnifiedPopupSession(
             title: "Popup",
@@ -132,13 +162,17 @@ final class TextCompletionCrashGuardTests: XCTestCase {
             defer: false
         )
         let delegate = Delegate()
-        let content = NSView()
+        let field = NSTextField(frame: NSRect(x: 20, y: 20, width: 200, height: 24))
         panel.isReleasedWhenClosed = false
         panel.delegate = delegate
-        panel.contentView = content
+        panel.contentView = field
+        panel.makeKey()
+        XCTAssertTrue(panel.makeFirstResponder(field))
+        XCTAssertTrue(panel.firstResponder is NSTextView)
 
         TransientPanelLifetime.release(panel)
 
+        XCTAssertFalse(panel.firstResponder is NSTextView)
         XCTAssertNil(panel.delegate)
         XCTAssertNil(panel.contentViewController)
         XCTAssertNil(panel.contentView)

@@ -70,6 +70,7 @@ enum PanelMaterialHost {
 @MainActor
 enum TransientPanelLifetime {
     static func release(_ window: NSWindow, close: Bool = true) {
+        TextCompletionCrashGuard.finishActiveTextSessions(in: [window])
         window.orderOut(nil)
         window.delegate = nil
         window.contentViewController = nil

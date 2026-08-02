@@ -109,6 +109,7 @@ struct PINDotsField: View {
                 }
             ))
             .textFieldStyle(.plain)
+            .disablesRemoteTextCompletion()
             .focused(isFocused)
             .opacity(0)
             .frame(width: dotsWidth, height: 34)

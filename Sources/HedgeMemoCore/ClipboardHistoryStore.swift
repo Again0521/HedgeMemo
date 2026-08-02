@@ -1652,11 +1652,16 @@ public final class ClipboardHistoryStore: ObservableObject {
         persist()
     }
 
-    /// Disabling a category is destructive by design: its current entries are
-    /// removed from disk and it will no longer collect matching clipboard data.
-    public func setCategory(_ key: ClipboardCategoryKey, enabled: Bool) {
+    /// Disabling always stops display and future capture. Callers decide whether
+    /// existing entries should also be removed; retaining them makes a later
+    /// re-enable restore the user's history without duplicating any payload.
+    public func setCategory(
+        _ key: ClipboardCategoryKey,
+        enabled: Bool,
+        clearExistingEntries: Bool = true
+    ) {
         guard settings.isCategoryEnabled(key) != enabled else { return }
-        if !enabled {
+        if !enabled, clearExistingEntries {
             clearEntries(matching: key)
             settingsMutationRequiresSnapshot = true
         }

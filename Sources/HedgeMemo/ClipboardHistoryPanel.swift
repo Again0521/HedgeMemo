@@ -1137,6 +1137,7 @@ private struct ClipboardDetailCard: View {
             // outgrows the fixed card height — a read-only preview never needs
             // that, since it never grows once it's on screen.
             TextEditor(text: $editText)
+                .disablesRemoteTextCompletion()
                 .font(.system(size: 12))
                 .scrollContentBackground(.hidden)
                 .scrollIndicators(showsScrollIndicators ? .automatic : .hidden)

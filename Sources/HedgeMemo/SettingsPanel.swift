@@ -148,6 +148,7 @@ struct SettingsPanelView: View {
     @State private var accessibilityTrusted = AXIsProcessTrusted()
     @State private var customDraft: CustomCategoryDraft?
     @State private var customCategoryError: String?
+    @State private var pendingCategoryDisable: ClipboardCategoryKey?
     @State private var selectedTab: SettingsTab = .clipboard
     @State private var isSettingPIN = false
     @State private var isVerifyingPIN = false
@@ -654,12 +655,39 @@ struct SettingsPanelView: View {
             .opacity(index == total - 1 ? 0.3 : 1)
             Toggle(L10n.text("启用"), isOn: Binding(
                 get: { clipboardStore.settings.isCategoryEnabled(key) },
-                set: { clipboardStore.setCategory(key, enabled: $0) }
+                set: { setCategory(key, enabled: $0) }
             ))
             .toggleStyle(.switch)
             .controlSize(.small)
             .labelsHidden()
-            .help(L10n.text("关闭会清除该分类现有记录，并停止展示及记录此分类"))
+            .help(L10n.text("关闭时可选择保留或清除该分类现有记录"))
+        }
+    }
+
+    private func setCategory(_ key: ClipboardCategoryKey, enabled: Bool) {
+        guard !enabled else {
+            clipboardStore.setCategory(key, enabled: true)
+            return
+        }
+        guard pendingCategoryDisable == nil else { return }
+        pendingCategoryDisable = key
+        let count = clipboardStore.entryCount(matching: [key])
+        let name = categoryDisplayName(key)
+        UnifiedPopupPanel.requestConfirmation(
+            title: L10n.text("关闭分类"),
+            message: L10n.format("关闭「%@」后将停止展示及记录此分类。是否同时清除分类下的 %d 条历史记录？", name, count),
+            systemImage: "archivebox",
+            declineTitle: L10n.text("否，仅关闭"),
+            confirmationTitle: L10n.text("是，清除")
+        ) { choice in
+            guard pendingCategoryDisable == key else { return }
+            pendingCategoryDisable = nil
+            guard let shouldClear = choice else { return }
+            clipboardStore.setCategory(
+                key,
+                enabled: false,
+                clearExistingEntries: shouldClear
+            )
         }
     }
 
@@ -1261,6 +1289,7 @@ private struct CustomCategoryEditorSheet: View {
             Text(L10n.text(draft.isNew ? "新建自定义分类" : "编辑自定义分类"))
                 .font(.headline)
             TextField(L10n.text("分类名称"), text: $draft.name)
+                .disablesRemoteTextCompletion()
 
             Picker(L10n.text("匹配方式"), selection: $draft.matchMode) {
                 ForEach(ClipboardRuleMatchMode.allCases, id: \.self) { mode in
@@ -1389,6 +1418,7 @@ private struct CustomCategoryEditorSheet: View {
                         }
                     )
                 )
+                .disablesRemoteTextCompletion()
                 if !recentApplications.isEmpty {
                     Menu {
                         ForEach(recentApplications) { application in
@@ -1408,10 +1438,12 @@ private struct CustomCategoryEditorSheet: View {
             .frame(maxWidth: .infinity)
         case .regularExpression:
             TextField(L10n.text("正则表达式，例如 ^\\d{6}$"), text: rule.value)
+                .disablesRemoteTextCompletion()
                 .font(.system(size: 11, design: .monospaced))
                 .frame(maxWidth: .infinity)
         case .contains, .startsWith, .endsWith:
             TextField(L10n.text("匹配内容"), text: rule.value)
+                .disablesRemoteTextCompletion()
                 .frame(maxWidth: .infinity)
         }
     }

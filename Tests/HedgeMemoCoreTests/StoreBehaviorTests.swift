@@ -1277,6 +1277,25 @@ final class StoreBehaviorTests: XCTestCase {
         XCTAssertEqual(store.entries.compactMap(\.text), ["普通中文内容"])
     }
 
+    func testDisablingCategoryCanRetainHistoryForLaterReenable() {
+        let store = makeClipboardStore()
+        XCTAssertTrue(store.addText("let retained = true;"))
+        let id = store.entries.first!.id
+
+        store.setCategory(
+            .builtin(.code),
+            enabled: false,
+            clearExistingEntries: false
+        )
+
+        XCTAssertFalse(store.settings.isCategoryEnabled(.builtin(.code)))
+        XCTAssertTrue(store.orderedEntries(key: .builtin(.code)).isEmpty)
+        XCTAssertEqual(store.entries.map(\.id), [id])
+
+        store.setCategory(.builtin(.code), enabled: true)
+        XCTAssertEqual(store.orderedEntries(key: .builtin(.code)).map(\.id), [id])
+    }
+
     func testConfiguredMaximumHistoryKeepsExactSearchAndBoundedFirstPage() {
         let store = makeClipboardStore()
         let textKey = ClipboardCategoryKey.builtin(.text).storageValue

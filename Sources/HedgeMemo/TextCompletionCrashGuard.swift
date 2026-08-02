@@ -1,4 +1,5 @@
 import AppKit
+import SwiftUI
 
 /// Prevents AppKit's system completion view service from outliving one of our
 /// short-lived panels.
@@ -56,6 +57,21 @@ final class TextCompletionCrashGuard {
                 Task { @MainActor in Self.disableRemoteCompletion(for: textView) }
             }
         )
+        notificationObservers.append(
+            notificationCenter.addObserver(
+                forName: NSWindow.willCloseNotification,
+                object: nil,
+                queue: .main
+            ) { notification in
+                guard let window = notification.object as? NSWindow else { return }
+                // End editing while the field editor still belongs to its
+                // original window. Detaching SwiftUI first can strand Safari's
+                // completion NSRemoteView with no containing window.
+                MainActor.assumeIsolated {
+                    Self.finishActiveTextSessions(in: [window])
+                }
+            }
+        )
 
         for name in [NSWorkspace.screensDidSleepNotification, NSWorkspace.willSleepNotification] {
             notificationObservers.append(
@@ -98,6 +114,7 @@ final class TextCompletionCrashGuard {
         // search and PIN fields. The remote view can otherwise survive the
         // panel that created it and throw when a later panel is ordered.
         field.contentType = nil
+        if #available(macOS 15.2, *) { field.allowsWritingTools = false }
         if let editor = field.currentEditor() as? NSTextView {
             disableRemoteCompletion(for: editor)
         }
@@ -134,5 +151,57 @@ final class TextCompletionCrashGuard {
             // session while the editor still has the correct containing window.
             window.makeFirstResponder(nil)
         }
+    }
+}
+
+/// Configures SwiftUI-owned text controls before focus. Their exact SwiftUI
+/// styling and layout remain untouched; the invisible bridge only reaches the
+/// native window to disable unrelated completion services.
+private struct RemoteCompletionDisabledModifier: ViewModifier {
+    func body(content: Content) -> some View {
+        content.background(RemoteCompletionConfigurationBridge())
+    }
+}
+
+private struct RemoteCompletionConfigurationBridge: NSViewRepresentable {
+    func makeNSView(context: Context) -> RemoteCompletionConfigurationView {
+        RemoteCompletionConfigurationView()
+    }
+
+    func updateNSView(_ view: RemoteCompletionConfigurationView, context: Context) {
+        view.configureContainingWindow()
+    }
+}
+
+private final class RemoteCompletionConfigurationView: NSView {
+    private weak var configuredWindow: NSWindow?
+
+    override func viewWillMove(toWindow newWindow: NSWindow?) {
+        configuredWindow = nil
+        if let newWindow { TextCompletionCrashGuard.disableRemoteCompletion(in: newWindow) }
+        super.viewWillMove(toWindow: newWindow)
+    }
+
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        configureContainingWindow()
+    }
+
+    func configureContainingWindow() {
+        guard let window, configuredWindow !== window else { return }
+        configuredWindow = window
+        TextCompletionCrashGuard.disableRemoteCompletion(in: window)
+        // SwiftUI can finish creating a sibling NSTextField after this marker
+        // joins the hierarchy. Recheck once before the user can focus it.
+        DispatchQueue.main.async { [weak window] in
+            guard let window else { return }
+            TextCompletionCrashGuard.disableRemoteCompletion(in: window)
+        }
+    }
+}
+
+extension View {
+    func disablesRemoteTextCompletion() -> some View {
+        modifier(RemoteCompletionDisabledModifier())
     }
 }

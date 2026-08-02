@@ -275,6 +275,7 @@ private final class SmartWindowPickerController {
         )
         overlay.contentView = view
         overlay.setFrame(frame, display: true)
+        TextCompletionCrashGuard.prepareToOrderOnScreen(overlay)
         overlay.makeKeyAndOrderFront(nil)
         NSApp.activate(ignoringOtherApps: true)
         self.overlay = overlay
@@ -453,6 +454,7 @@ private final class ManualScreenshotSelectionController {
         }
         window.contentView = view
         window.setFrame(frame, display: true)
+        TextCompletionCrashGuard.prepareToOrderOnScreen(window)
         window.makeKeyAndOrderFront(nil)
         NSApp.activate(ignoringOtherApps: true)
         self.window = window

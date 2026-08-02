@@ -578,6 +578,7 @@ private struct NoteEditorSheet: View {
         VStack(alignment: .leading, spacing: 14) {
             Text(L10n.text("修改备注")).font(.headline)
             TextField(L10n.text("备注"), text: $note, axis: .vertical)
+                .disablesRemoteTextCompletion()
                 .lineLimit(3...6)
             HStack {
                 Spacer()

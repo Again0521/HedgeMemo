@@ -169,6 +169,11 @@
 "配色会立即应用到剪贴板列表、预览和固定到桌面的代码便签。" = "The theme applies to clipboard lists, previews, and desktop code notes.";
 "自定义分类按正则表达式筛选文本条目。" = "Custom categories filter text using regular expressions.";
 "关闭会清除该分类现有记录，并停止展示及记录此分类" = "Turning this off clears existing items and stops showing or recording this category";
+"关闭时可选择保留或清除该分类现有记录" = "When turning a category off, you can keep or clear its existing items";
+"关闭分类" = "Turn Off Category";
+"关闭「%@」后将停止展示及记录此分类。是否同时清除分类下的 %d 条历史记录？" = "Turning off “%@” stops showing and recording this category. Also clear its %d existing items?";
+"否，仅关闭" = "No, Keep Items";
+"是，清除" = "Yes, Clear Items";
 "添加自定义分类…" = "Add Custom Category…";
 "新建自定义分类" = "New Custom Category";
 "编辑自定义分类" = "Edit Custom Category";

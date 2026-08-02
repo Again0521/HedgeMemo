@@ -153,6 +153,7 @@ private final class PinnedClipboardWindow {
     }
 
     func show() {
+        TextCompletionCrashGuard.prepareToOrderOnScreen(panel)
         panel.orderFrontRegardless()
     }
 
@@ -330,6 +331,7 @@ private struct PinnedClipboardNoteView: View {
             .frame(maxWidth: .infinity, maxHeight: .infinity)
         } else if model.isEditing {
             TextEditor(text: $model.draftText)
+                .disablesRemoteTextCompletion()
                 .font(.system(size: 13))
                 .scrollContentBackground(.hidden)
                 .scrollIndicators(showsScrollIndicators ? .automatic : .hidden)
